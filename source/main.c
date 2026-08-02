@@ -1,7 +1,7 @@
 // Nplay Switch - app homebrew do Nplay para Nintendo Switch.
-// Fase 1: login + catalogo navegavel (Filmes/Series/Animes/Doramas/Canais)
-// com capas. Reaproveita net/store/text/cJSON do Meruem. O player de video
-// (ffmpeg) vem na Fase 2.
+// Fase 1.5: tela inicial (rails "em alta"/recentes), abas Filmes/Series/Animes/
+// Doramas, detalhe de serie com temporadas/episodios. Capas em THREADS de fundo
+// (navegacao fluida). Player de video (ffmpeg) vem na Fase 2.
 #include <switch.h>
 #include <SDL.h>
 #include <SDL_image.h>
@@ -17,7 +17,6 @@
 #define WIN_W 1280
 #define WIN_H 720
 
-// Mapeamento dos botoes do Joy-Con/Pro via SDL (igual ao Meruem).
 #define JOY_A 0
 #define JOY_B 1
 #define JOY_X 2
@@ -40,7 +39,7 @@ static SDL_Joystick *g_joy = NULL;
 static char g_token[640] = {0};
 static char g_status[160] = {0};
 static Uint32 g_toast_until = 0;
-static char g_toast[128] = {0};
+static char g_toast[160] = {0};
 
 static const SDL_Color C_BG   = {  8, 10, 15, 255 };
 static const SDL_Color C_BAR  = { 12, 15, 23, 255 };
@@ -49,6 +48,7 @@ static const SDL_Color C_TEXT = { 234, 240, 250, 255 };
 static const SDL_Color C_MUT  = { 139, 150, 173, 255 };
 static const SDL_Color C_ACC  = { 139, 92, 246, 255 };
 static const SDL_Color C_ACC2 = { 59, 130, 246, 255 };
+static const SDL_Color C_ROSE = { 251, 113, 133, 255 };
 
 // ------------------------------------------------------------- helpers
 static void fill_rect(int x, int y, int w, int h, SDL_Color c) {
@@ -65,10 +65,14 @@ static void border_rect(int x, int y, int w, int h, int th, SDL_Color c) {
 static void toast(const char *msg) {
     strncpy(g_toast, msg, sizeof(g_toast) - 1);
     g_toast[sizeof(g_toast) - 1] = '\0';
-    g_toast_until = SDL_GetTicks() + 2200;
+    g_toast_until = SDL_GetTicks() + 2400;
 }
-
-// Teclado do sistema (login).
+static void short_title(const char *title, char *out, int cap) {
+    int k = 0;
+    for (const char *p = title; *p && k < cap - 1; p++, k++) out[k] = *p;
+    out[k] = '\0';
+    if (k >= cap - 1 && k >= 2) { out[k - 2] = '.'; out[k - 1] = '.'; }
+}
 static int prompt_text(const char *guide, char *out, size_t cap, int password) {
     SwkbdConfig kbd;
     if (R_FAILED(swkbdCreate(&kbd, 0))) return -1;
@@ -82,8 +86,6 @@ static int prompt_text(const char *guide, char *out, size_t cap, int password) {
     if (R_FAILED(rc)) return -1;
     return out[0] ? 0 : -2;
 }
-
-// GET na API -> cJSON (caller libera) ou NULL.
 static cJSON *api_get(const char *path) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
@@ -95,144 +97,309 @@ static cJSON *api_get(const char *path) {
     membuf_free(&out);
     return j;
 }
+static const char *jstr(cJSON *o, const char *k) {
+    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+    return (v && v->valuestring) ? v->valuestring : NULL;
+}
+static int jint(cJSON *o, const char *k) {
+    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+    return v ? v->valueint : 0;
+}
 
-// ------------------------------------------------------------- cache de capas
-#define MAX_COV 600
-typedef struct { char url[720]; SDL_Texture *tex; int tried; } Cover;
+// ============================================================= capas (threads)
+// state: 0 novo, 1 na fila/baixando, 2 surface pronta (main cria textura), 3 feito
+#define MAX_COV 3000
+typedef struct { char url[720]; SDL_Texture *tex; SDL_Surface *surf; int state; } Cover;
 static Cover g_cov[MAX_COV];
 static int g_covN = 0;
+static SDL_mutex *g_cov_mtx;
+static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0;
+static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
+static int g_run = 1;
 
-static SDL_Texture *cover_get(const char *url) {
+static SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     if (!url || !url[0]) return NULL;
-    for (int i = 0; i < g_covN; i++)
-        if (!strcmp(g_cov[i].url, url)) return g_cov[i].tex;
-    if (g_covN < MAX_COV) {
-        strncpy(g_cov[g_covN].url, url, sizeof(g_cov[0].url) - 1);
-        g_cov[g_covN].url[sizeof(g_cov[0].url) - 1] = '\0';
-        g_cov[g_covN].tex = NULL;
-        g_cov[g_covN].tried = 0;
-        g_covN++;
+    SDL_LockMutex(g_cov_mtx);
+    int f = -1;
+    for (int i = 0; i < g_covN; i++) if (!strcmp(g_cov[i].url, url)) { f = i; break; }
+    if (f < 0 && g_covN < MAX_COV) {
+        f = g_covN++;
+        strncpy(g_cov[f].url, url, sizeof(g_cov[0].url) - 1);
+        g_cov[f].url[sizeof(g_cov[0].url) - 1] = '\0';
+        g_cov[f].tex = NULL; g_cov[f].surf = NULL; g_cov[f].state = 0;
     }
-    return NULL;
+    SDL_Texture *tex = (f >= 0) ? g_cov[f].tex : NULL;
+    if (f >= 0 && g_cov[f].state == 0) {
+        g_cov[f].state = 1;
+        SDL_LockMutex(g_q_mtx);
+        g_q[g_qt] = f; g_qt = (g_qt + 1) % MAX_COV;
+        SDL_UnlockMutex(g_q_mtx);
+        SDL_SemPost(g_q_sem);
+    }
+    SDL_UnlockMutex(g_cov_mtx);
+    return tex;
 }
-// Baixa UMA capa ainda nao tentada por chamada (preenche a grade progressivamente).
-static void cover_load_one(void) {
-    for (int i = 0; i < g_covN; i++) {
-        if (g_cov[i].tried) continue;
-        g_cov[i].tried = 1;
+static int cover_worker(void *arg) {
+    (void)arg;
+    while (g_run) {
+        if (SDL_SemWaitTimeout(g_q_sem, 250) != 0) continue;
+        if (!g_run) break;
+        int idx = -1;
+        SDL_LockMutex(g_q_mtx);
+        if (g_qh != g_qt) { idx = g_q[g_qh]; g_qh = (g_qh + 1) % MAX_COV; }
+        SDL_UnlockMutex(g_q_mtx);
+        if (idx < 0) continue;
         char url[900];
-        if (strncmp(g_cov[i].url, "http", 4) == 0) snprintf(url, sizeof(url), "%s", g_cov[i].url);
-        else snprintf(url, sizeof(url), "%s%s", BASE, g_cov[i].url);
+        SDL_LockMutex(g_cov_mtx);
+        if (strncmp(g_cov[idx].url, "http", 4) == 0) snprintf(url, sizeof(url), "%s", g_cov[idx].url);
+        else snprintf(url, sizeof(url), "%s%s", BASE, g_cov[idx].url);
+        SDL_UnlockMutex(g_cov_mtx);
         struct membuf out = { 0 };
         const char *err = NULL;
         long code = net_request(url, "GET", NULL, NULL, &out, &err);
+        SDL_Surface *s = NULL;
         if (code == 200 && out.data && out.len > 32) {
             SDL_RWops *rw = SDL_RWFromMem(out.data, (int)out.len);
-            SDL_Surface *s = IMG_Load_RW(rw, 1);
-            if (s) { g_cov[i].tex = SDL_CreateTextureFromSurface(gRen, s); SDL_FreeSurface(s); }
+            s = IMG_Load_RW(rw, 1);
         }
         membuf_free(&out);
-        return;
+        SDL_LockMutex(g_cov_mtx);
+        if (s) { g_cov[idx].surf = s; g_cov[idx].state = 2; }
+        else g_cov[idx].state = 3;
+        SDL_UnlockMutex(g_cov_mtx);
+    }
+    return 0;
+}
+static void cover_pump(void) {   // main: converte surfaces prontas em texturas
+    for (int done = 0; done < 6; done++) {
+        int idx = -1; SDL_Surface *s = NULL;
+        SDL_LockMutex(g_cov_mtx);
+        for (int i = 0; i < g_covN; i++) if (g_cov[i].state == 2) { idx = i; s = g_cov[i].surf; g_cov[i].surf = NULL; g_cov[i].state = 3; break; }
+        SDL_UnlockMutex(g_cov_mtx);
+        if (idx < 0) break;
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(gRen, s);
+        SDL_FreeSurface(s);
+        SDL_LockMutex(g_cov_mtx);
+        g_cov[idx].tex = tex;
+        SDL_UnlockMutex(g_cov_mtx);
     }
 }
 
-// ------------------------------------------------------------- catalogo
-static const char *TAB_NAME[] = { "Filmes", "Series", "Animes", "Doramas", "Canais" };
-#define NTABS 5
-static int g_tab = 0, g_sel = 0, g_page = 1;
-static cJSON *g_list = NULL;   // {items:[...], total, ...}
+// ------------------------------------------------------------- card
+static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selected) {
+    const char *title = jstr(item, "title"); if (!title) title = "";
+    const char *logo = jstr(item, "logo");
+    SDL_Texture *tex = cover_get(logo);
+    SDL_Rect cr = { x, y, cw, coverH };
+    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr);
+    else {
+        fill_rect(x, y, cw, coverH, C_CARD);
+        char ini[2] = { title[0] ? title[0] : '?', 0 };
+        text_draw(gRen, ini, x + cw / 2 - 8, y + coverH / 2 - 16, C_MUT, 1);
+    }
+    char sh[26]; short_title(title, sh, (int)sizeof(sh));
+    text_draw(gRen, sh, x, y + coverH + 4, selected ? C_TEXT : C_MUT, 0);
+    if (selected) border_rect(x - 3, y - 3, cw + 6, coverH + 6, 3, C_ACC2);
+}
 
-static const char *tab_path(int tab, int page) {
+// ============================================================= estado / telas
+typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES } Screen;
+static Screen g_screen = SC_LOGIN;
+
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas" };
+#define NTABS 5
+static int g_tab = 0;
+
+// --- home (rails) ---
+static cJSON *g_home = NULL;
+typedef struct { char label[48]; cJSON *arr; int is_series; } Rail;
+static Rail g_rails[32]; static int g_railsN = 0;
+static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
+
+// --- catalogo (abas 1..4) ---
+static cJSON *g_list = NULL;
+static int g_gridSel = 0, g_gridScroll = 0;
+
+// --- serie (detalhe) ---
+static cJSON *g_ser = NULL;
+static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
+
+static int arr_len(cJSON *a) { return cJSON_IsArray(a) ? cJSON_GetArraySize(a) : 0; }
+
+static void add_rail(const char *label, cJSON *arr, int is_series) {
+    if (arr_len(arr) == 0 || g_railsN >= 32) return;
+    strncpy(g_rails[g_railsN].label, label, 47); g_rails[g_railsN].label[47] = '\0';
+    g_rails[g_railsN].arr = arr; g_rails[g_railsN].is_series = is_series;
+    g_railsN++;
+}
+static void load_home(void) {
+    if (g_home) { cJSON_Delete(g_home); g_home = NULL; }
+    g_railsN = 0; g_railSel = 0; g_railItem = 0; g_homeScroll = 0;
+    g_home = api_get("/api/catalog/home");
+    if (!g_home) { snprintf(g_status, sizeof(g_status), "Falha ao carregar inicio"); return; }
+    g_status[0] = '\0';
+    add_rail("Continuar assistindo", cJSON_GetObjectItem(g_home, "continue"), 1);
+    add_rail("Filmes recentes",     cJSON_GetObjectItem(g_home, "recentMovies"), 0);
+    add_rail("Series atualizadas",  cJSON_GetObjectItem(g_home, "recentSeries"), 1);
+    add_rail("Animes recentes",     cJSON_GetObjectItem(g_home, "recentAnimes"), 1);
+    cJSON *sh = cJSON_GetObjectItem(g_home, "movieShelves");
+    if (cJSON_IsArray(sh)) {
+        cJSON *e; cJSON_ArrayForEach(e, sh) {
+            const char *t = jstr(e, "title");
+            add_rail(t ? t : "Categoria", cJSON_GetObjectItem(e, "items"), 0);
+        }
+    }
+}
+
+static const char *cat_path(int tab, int page) {
     static char p[160];
     switch (tab) {
-        case 0: snprintf(p, sizeof(p), "/api/catalog/movies?page=%d", page); break;
-        case 1: snprintf(p, sizeof(p), "/api/catalog/series?page=%d", page); break;
-        case 2: snprintf(p, sizeof(p), "/api/catalog/series?section=anime&page=%d", page); break;
-        case 3: snprintf(p, sizeof(p), "/api/catalog/series?q=dorama&page=%d", page); break;
-        default: snprintf(p, sizeof(p), "/api/catalog/live?page=%d", page); break;
+        case 1: snprintf(p, sizeof(p), "/api/catalog/movies?page=%d", page); break;
+        case 2: snprintf(p, sizeof(p), "/api/catalog/series?page=%d", page); break;
+        case 3: snprintf(p, sizeof(p), "/api/catalog/series?section=anime&page=%d", page); break;
+        default: snprintf(p, sizeof(p), "/api/catalog/series?q=dorama&page=%d", page); break;
     }
     return p;
 }
-static int list_count(void) {
-    if (!g_list) return 0;
-    cJSON *items = cJSON_GetObjectItem(g_list, "items");
-    return cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
-}
-static cJSON *list_item(int i) {
-    if (!g_list) return NULL;
-    cJSON *items = cJSON_GetObjectItem(g_list, "items");
-    return cJSON_IsArray(items) ? cJSON_GetArrayItem(items, i) : NULL;
-}
-static void load_tab(void) {
+static void load_cat(void) {
     if (g_list) { cJSON_Delete(g_list); g_list = NULL; }
-    g_sel = 0;
-    g_list = api_get(tab_path(g_tab, g_page));
-    if (!g_list) snprintf(g_status, sizeof(g_status), "Falha ao carregar %s (rede/login)", TAB_NAME[g_tab]);
+    g_gridSel = 0; g_gridScroll = 0;
+    g_list = api_get(cat_path(g_tab, 1));
+    if (!g_list) snprintf(g_status, sizeof(g_status), "Falha ao carregar %s", TAB_NAME[g_tab]);
     else g_status[0] = '\0';
 }
+static cJSON *cat_items(void) { return g_list ? cJSON_GetObjectItem(g_list, "items") : NULL; }
 
-// layout da grade
-#define TB 66
-#define COLS 6
-#define MX 40
-#define GAP 16
-#define CW 180
-#define COVER_W 158
-#define COVER_H 226
-#define CH 268
+static void open_series(int id) {
+    if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
+    char p[96]; snprintf(p, sizeof(p), "/api/catalog/series/%d", id);
+    g_ser = api_get(p);
+    g_seasonIdx = 0; g_epSel = 0; g_epScroll = 0;
+    if (g_ser) g_screen = SC_SERIES;
+    else toast("Nao consegui abrir a serie");
+}
+static void open_item(cJSON *item, int is_series) {
+    if (!item) return;
+    int id = jint(item, "id");
+    // itens de "continuar" podem ser serie (series_id) ou filme (item_id)
+    cJSON *sid = cJSON_GetObjectItem(item, "series_id");
+    if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
+    if (is_series) open_series(id);
+    else { char m[160]; const char *t = jstr(item, "title"); snprintf(m, sizeof(m), "\"%s\" - player na Fase 2", t ? t : "filme"); toast(m); }
+}
 
-static void draw_catalog(int scrollY) {
-    // barra superior com abas
-    fill_rect(0, 0, WIN_W, TB, C_BAR);
-    text_draw(gRen, "Nplay", MX, 18, C_ACC, 1);
+// ------------------------------------------------------------- render: barra
+static void draw_topbar(void) {
+    fill_rect(0, 0, WIN_W, 66, C_BAR);
+    text_draw(gRen, "Nplay", 40, 18, C_ACC, 1);
     int tx = 180;
     for (int t = 0; t < NTABS; t++) {
-        SDL_Color col = (t == g_tab) ? C_TEXT : C_MUT;
-        int w = text_draw(gRen, TAB_NAME[t], tx, 20, col, 0);
+        int w = text_draw(gRen, TAB_NAME[t], tx, 20, (t == g_tab) ? C_TEXT : C_MUT, 0);
         if (t == g_tab) fill_rect(tx, 46, w, 3, C_ACC);
-        tx += w + 34;
+        tx += w + 32;
     }
-    text_draw(gRen, "L/R aba  A abre  (-) sair conta  (+) sair", WIN_W - 470, 24, C_MUT, 0);
+    text_draw(gRen, "L/R aba  A abre  (+) sair", WIN_W - 340, 24, C_MUT, 0);
+}
 
-    int n = list_count();
-    if (n == 0) {
-        text_draw(gRen, g_status[0] ? g_status : "Carregando...", MX, TB + 40, C_MUT, 0);
-        return;
+// ------------------------------------------------------------- render: home
+#define RCW 150
+#define RCH 214
+#define RGAP 16
+static void draw_home(void) {
+    draw_topbar();
+    if (g_railsN == 0) { text_draw(gRen, g_status[0] ? g_status : "Carregando...", 40, 110, C_MUT, 0); return; }
+    int y = 86 - g_homeScroll;
+    for (int r = 0; r < g_railsN; r++) {
+        int items = arr_len(g_rails[r].arr);
+        text_draw(gRen, g_rails[r].label, 40, y, (r == g_railSel) ? C_TEXT : C_MUT, 0);
+        int ry = y + 30;
+        int rowScroll = 0;
+        if (r == g_railSel) {
+            int selX = 40 + g_railItem * (RCW + RGAP);
+            if (selX + RCW - rowScroll > WIN_W - 40) rowScroll = selX + RCW - (WIN_W - 40);
+            if (selX - rowScroll < 40) rowScroll = selX - 40;
+            if (rowScroll < 0) rowScroll = 0;
+        }
+        for (int i = 0; i < items; i++) {
+            int x = 40 + i * (RCW + RGAP) - rowScroll;
+            if (x + RCW < 0 || x > WIN_W) continue;
+            draw_card(x, ry, RCW, RCH, cJSON_GetArrayItem(g_rails[r].arr, i), (r == g_railSel && i == g_railItem));
+        }
+        y += 30 + RCH + 40;
+        if (y > WIN_H + 200) break;
     }
-    int gridTop = TB + 16;
+}
+
+// ------------------------------------------------------------- render: grid
+#define GCOLS 6
+#define GMX 40
+#define GGAP 16
+#define GCW 180
+#define GCOVERW 158
+#define GCOVERH 226
+#define GCH 268
+static void draw_grid(void) {
+    draw_topbar();
+    cJSON *items = cat_items();
+    int n = arr_len(items);
+    if (n == 0) { text_draw(gRen, g_status[0] ? g_status : "Carregando...", 40, 110, C_MUT, 0); return; }
+    int top = 86;
     for (int i = 0; i < n; i++) {
-        int col = i % COLS, row = i / COLS;
-        int x = MX + col * (CW + GAP);
-        int y = gridTop + row * (CH + GAP) - scrollY;
-        if (y + CH < TB || y > WIN_H) continue;  // fora da tela
-        cJSON *it = list_item(i);
-        const char *title = "";
-        const char *logo = NULL;
-        if (it) {
-            cJSON *jt = cJSON_GetObjectItem(it, "title"); if (jt && jt->valuestring) title = jt->valuestring;
-            cJSON *jl = cJSON_GetObjectItem(it, "logo");  if (jl && jl->valuestring) logo = jl->valuestring;
-        }
-        int cx = x + (CW - COVER_W) / 2;
-        // capa
-        SDL_Texture *tex = cover_get(logo);
-        SDL_Rect cr = { cx, y, COVER_W, COVER_H };
-        if (tex) {
-            SDL_RenderCopy(gRen, tex, NULL, &cr);
-        } else {
-            fill_rect(cx, y, COVER_W, COVER_H, C_CARD);
-            char ini[2] = { title[0] ? title[0] : '?', 0 };
-            text_draw(gRen, ini, cx + COVER_W / 2 - 8, y + COVER_H / 2 - 18, C_MUT, 1);
-        }
-        // titulo (curto)
-        char sh[40];
-        int k = 0;
-        for (const char *p = title; *p && k < 22; p++, k++) sh[k] = *p;
-        sh[k] = '\0';
-        if (k >= 22) { sh[20] = '.'; sh[21] = '.'; }
-        text_draw(gRen, sh, cx, y + COVER_H + 6, C_TEXT, 0);
-        // selecao
-        if (i == g_sel) border_rect(cx - 4, y - 4, COVER_W + 8, COVER_H + 8, 3, C_ACC2);
+        int col = i % GCOLS, row = i / GCOLS;
+        int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
+        int y = top + row * (GCH + GGAP) - g_gridScroll;
+        if (y + GCH < 66 || y > WIN_H) continue;
+        draw_card(x, y, GCOVERW, GCOVERH, cJSON_GetArrayItem(items, i), i == g_gridSel);
     }
+}
+
+// ------------------------------------------------------------- render: serie
+static cJSON *season_arr(void) {
+    cJSON *seasons = g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL;
+    if (!seasons) return NULL;
+    return cJSON_GetArrayItem(seasons, g_seasonIdx);
+}
+static int season_count(void) {
+    cJSON *seasons = g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL;
+    return seasons ? cJSON_GetArraySize(seasons) : 0;
+}
+static void draw_series(void) {
+    cJSON *s = g_ser ? cJSON_GetObjectItem(g_ser, "series") : NULL;
+    fill_rect(0, 0, WIN_W, 66, C_BAR);
+    text_draw(gRen, "< (B) voltar", 40, 22, C_MUT, 0);
+    const char *title = jstr(s, "title"); if (!title) title = "Serie";
+    text_draw(gRen, title, 200, 18, C_TEXT, 1);
+
+    // capa + info a esquerda
+    const char *logo = jstr(s, "logo");
+    SDL_Texture *tex = cover_get(logo);
+    SDL_Rect cr = { 40, 96, 240, 340 };
+    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr);
+    else fill_rect(40, 96, 240, 340, C_CARD);
+    const char *year = jstr(s, "year"); const char *genre = jstr(s, "genre");
+    char meta[160]; snprintf(meta, sizeof(meta), "%s%s%s", year ? year : "", (year && genre) ? "  -  " : "", genre ? genre : "");
+    if (meta[0]) text_draw(gRen, meta, 40, 444, C_MUT, 0);
+
+    // seletor de temporada
+    int nsea = season_count();
+    cJSON *sa = season_arr();
+    char stitle[64]; snprintf(stitle, sizeof(stitle), "Temporada %s   (L/R troca, %d no total)", sa && sa->string ? sa->string : "1", nsea);
+    text_draw(gRen, stitle, 320, 96, C_TEXT, 0);
+
+    // lista de episodios
+    int nep = arr_len(sa);
+    int listTop = 136, rowH = 42, visible = (WIN_H - listTop - 20) / rowH;
+    if (g_epSel < g_epScroll) g_epScroll = g_epSel;
+    if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
+    for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
+        cJSON *ep = cJSON_GetArrayItem(sa, i);
+        int yy = listTop + (i - g_epScroll) * rowH;
+        if (i == g_epSel) fill_rect(320, yy - 4, WIN_W - 360, rowH - 4, C_CARD);
+        const char *et = jstr(ep, "title"); if (!et) et = "Episodio";
+        char sh[80]; short_title(et, sh, (int)sizeof(sh));
+        text_draw(gRen, sh, 332, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0);
+    }
+    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", 332, listTop, C_MUT, 0);
 }
 
 // ------------------------------------------------------------- login
@@ -244,40 +411,80 @@ static int do_login(void) {
     snprintf(body, sizeof(body),
         "{\"username\":\"%s\",\"password\":\"%s\",\"device\":{\"fingerprint\":\"nplay-switch\",\"type\":\"tv\",\"name\":\"Nintendo Switch\"}}",
         user, pass);
-    char url[512];
-    snprintf(url, sizeof(url), "%s/api/auth/login", BASE);
-    struct membuf out = { 0 };
-    const char *err = NULL;
+    char url[512]; snprintf(url, sizeof(url), "%s/api/auth/login", BASE);
+    struct membuf out = { 0 }; const char *err = NULL;
     long code = net_request(url, "POST", body, NULL, &out, &err);
     int ok = -1;
     if (out.data) {
         cJSON *j = cJSON_Parse(out.data);
         if (j) {
-            cJSON *t = cJSON_GetObjectItem(j, "token");
-            if (code == 200 && t && t->valuestring) {
-                strncpy(g_token, t->valuestring, sizeof(g_token) - 1);
-                store_save_token(g_token);
-                store_save_user(user);
-                ok = 0;
+            const char *tk = jstr(j, "token");
+            if (code == 200 && tk) {
+                strncpy(g_token, tk, sizeof(g_token) - 1);
+                store_save_token(g_token); store_save_user(user); ok = 0;
             } else {
-                cJSON *e = cJSON_GetObjectItem(j, "error");
-                snprintf(g_status, sizeof(g_status), "%s", (e && e->valuestring) ? e->valuestring : "Falha no login");
+                const char *e = jstr(j, "error");
+                snprintf(g_status, sizeof(g_status), "%s", e ? e : "Falha no login");
             }
             cJSON_Delete(j);
         }
-    } else {
-        snprintf(g_status, sizeof(g_status), "Sem conexao (%s)", err ? err : "rede");
-    }
+    } else snprintf(g_status, sizeof(g_status), "Sem conexao (%s)", err ? err : "rede");
     membuf_free(&out);
     return ok;
 }
-
 static void draw_login(void) {
-    SDL_Color rose = { 251, 113, 133, 255 };
     text_draw(gRen, "Nplay", WIN_W / 2 - 70, 220, C_ACC, 1);
     text_draw(gRen, "Aperte  A  para entrar com sua conta", WIN_W / 2 - 220, 320, C_TEXT, 0);
     text_draw(gRen, "(+) para sair do app", WIN_W / 2 - 110, 360, C_MUT, 0);
-    if (g_status[0]) text_draw(gRen, g_status, WIN_W / 2 - 220, 420, rose, 0);
+    if (g_status[0]) text_draw(gRen, g_status, WIN_W / 2 - 220, 420, C_ROSE, 0);
+}
+
+// ------------------------------------------------------------- input
+static void enter_tab(int tab) {
+    g_tab = tab;
+    if (tab == 0) { if (!g_home) load_home(); }
+    else load_cat();
+}
+static void input_home(int b) {
+    int items = arr_len(g_rails[g_railSel].arr);
+    if (b == JOY_UP) { if (g_railSel > 0) { g_railSel--; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
+    else if (b == JOY_DOWN) { if (g_railSel < g_railsN - 1) { g_railSel++; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
+    else if (b == JOY_DLEFT) { if (g_railItem > 0) g_railItem--; }
+    else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
+    else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
+    // rolagem vertical p/ manter a rail visivel
+    int ry = 86 + g_railSel * (30 + RCH + 40);
+    if (ry + RCH + 30 - g_homeScroll > WIN_H) g_homeScroll = ry + RCH + 30 - WIN_H + 20;
+    if (ry - g_homeScroll < 86) g_homeScroll = ry - 86;
+    if (g_homeScroll < 0) g_homeScroll = 0;
+}
+static void input_grid(int b) {
+    cJSON *items = cat_items();
+    int n = arr_len(items);
+    if (b == JOY_UP) { if (g_gridSel - GCOLS >= 0) g_gridSel -= GCOLS; }
+    else if (b == JOY_DOWN) { if (g_gridSel + GCOLS < n) g_gridSel += GCOLS; }
+    else if (b == JOY_DLEFT) { if (g_gridSel > 0) g_gridSel--; }
+    else if (b == JOY_DRIGHT) { if (g_gridSel + 1 < n) g_gridSel++; }
+    else if (b == JOY_A) { open_item(cJSON_GetArrayItem(items, g_gridSel), g_tab != 1); } // aba 1 = Filmes
+    int row = g_gridSel / GCOLS, rowTop = 86 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    if (rowBot - g_gridScroll > WIN_H) g_gridScroll = rowBot - WIN_H + 16;
+    if (rowTop - g_gridScroll < 86) g_gridScroll = rowTop - 86;
+    if (g_gridScroll < 0) g_gridScroll = 0;
+}
+static void input_series(int b) {
+    cJSON *sa = season_arr();
+    int nep = arr_len(sa);
+    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; }
+    else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
+    else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
+    else if (b == JOY_L || b == JOY_ZL) { if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; } }
+    else if (b == JOY_R || b == JOY_ZR) { if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; } }
+    else if (b == JOY_A) {
+        cJSON *ep = cJSON_GetArrayItem(sa, g_epSel);
+        const char *t = jstr(ep, "title");
+        char m[180]; snprintf(m, sizeof(m), "%s - player na Fase 2", t ? t : "episodio");
+        toast(m);
+    }
 }
 
 // ------------------------------------------------------------- main
@@ -293,63 +500,46 @@ int main(int argc, char **argv) {
     SDL_InitSubSystem(SDL_INIT_JOYSTICK);
     g_joy = SDL_JoystickOpen(0);
 
-    text_init();
-    net_init();
-    store_init();
+    text_init(); net_init(); store_init();
+
+    // threads de capas
+    g_cov_mtx = SDL_CreateMutex(); g_q_mtx = SDL_CreateMutex(); g_q_sem = SDL_CreateSemaphore(0);
+    SDL_Thread *wk[3];
+    for (int i = 0; i < 3; i++) wk[i] = SDL_CreateThread(cover_worker, "cov", NULL);
 
     store_load_token(g_token, sizeof(g_token));
-    int logged = g_token[0] ? 1 : 0;
-    if (logged) load_tab();
+    if (g_token[0]) { g_screen = SC_MAIN; enter_tab(0); }
 
     int running = 1;
-    int scrollY = 0;
     while (appletMainLoop() && running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { running = 0; break; }
             if (e.type != SDL_JOYBUTTONDOWN) continue;
             int b = e.jbutton.button;
-            if (!logged) {
-                if (b == JOY_A) { if (do_login() == 0) { logged = 1; g_page = 1; g_tab = 0; load_tab(); } }
+            if (g_screen == SC_LOGIN) {
+                if (b == JOY_A) { if (do_login() == 0) { g_screen = SC_MAIN; enter_tab(0); } }
                 else if (b == JOY_PLUS) running = 0;
-                continue;
+            } else if (g_screen == SC_MAIN) {
+                if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
+                else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
+                else if (b == JOY_PLUS) running = 0;
+                else if (b == JOY_MINUS) { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
+                else if (g_tab == 0) input_home(b);
+                else input_grid(b);
+            } else if (g_screen == SC_SERIES) {
+                input_series(b);
             }
-            int n = list_count();
-            if (b == JOY_UP)         { if (g_sel - COLS >= 0) g_sel -= COLS; }
-            else if (b == JOY_DOWN)  { if (g_sel + COLS < n)  g_sel += COLS; }
-            else if (b == JOY_DLEFT) { if (g_sel > 0) g_sel--; }
-            else if (b == JOY_DRIGHT){ if (g_sel + 1 < n) g_sel++; }
-            else if (b == JOY_L || b == JOY_ZL) { g_tab = (g_tab - 1 + NTABS) % NTABS; g_page = 1; scrollY = 0; load_tab(); }
-            else if (b == JOY_R || b == JOY_ZR) { g_tab = (g_tab + 1) % NTABS; g_page = 1; scrollY = 0; load_tab(); }
-            else if (b == JOY_A) {
-                cJSON *it = list_item(g_sel);
-                cJSON *jt = it ? cJSON_GetObjectItem(it, "title") : NULL;
-                char m[160];
-                snprintf(m, sizeof(m), "\"%s\" - player chega na Fase 2", (jt && jt->valuestring) ? jt->valuestring : "item");
-                toast(m);
-            }
-            else if (b == JOY_MINUS) { store_clear_token(); g_token[0] = '\0'; logged = 0; g_status[0] = '\0'; }
-            else if (b == JOY_PLUS)  { running = 0; }
         }
 
-        // rolagem p/ manter a selecao visivel
-        if (logged) {
-            int selRow = g_sel / COLS;
-            int rowTop = (TB + 16) + selRow * (CH + GAP);
-            int rowBot = rowTop + CH;
-            if (rowBot - scrollY > WIN_H) scrollY = rowBot - WIN_H + 16;
-            if (rowTop - scrollY < TB + 16) scrollY = rowTop - (TB + 16);
-            if (scrollY < 0) scrollY = 0;
-        }
-
-        // render
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
         SDL_RenderClear(gRen);
-        if (!logged) draw_login();
-        else {
-            draw_catalog(scrollY);
-            cover_load_one();  // preenche uma capa por frame
-        }
+        if (g_screen == SC_LOGIN) draw_login();
+        else if (g_screen == SC_SERIES) draw_series();
+        else { if (g_tab == 0) draw_home(); else draw_grid(); }
+
+        cover_pump();
+
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
             int w = 0, h = 0;
             SDL_Texture *tx = text_cached(gRen, g_toast, C_TEXT, 0, &w, &h);
@@ -359,15 +549,18 @@ int main(int argc, char **argv) {
         SDL_RenderPresent(gRen);
     }
 
+    // encerra threads
+    g_run = 0;
+    for (int i = 0; i < 3; i++) SDL_SemPost(g_q_sem);
+    for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
+
+    if (g_home) cJSON_Delete(g_home);
     if (g_list) cJSON_Delete(g_list);
+    if (g_ser) cJSON_Delete(g_ser);
     for (int i = 0; i < g_covN; i++) if (g_cov[i].tex) SDL_DestroyTexture(g_cov[i].tex);
-    text_exit();
-    net_exit();
+    text_exit(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
-    SDL_DestroyRenderer(gRen);
-    SDL_DestroyWindow(win);
-    IMG_Quit();
-    SDL_Quit();
-    socketExit();
+    SDL_DestroyRenderer(gRen); SDL_DestroyWindow(win);
+    IMG_Quit(); SDL_Quit(); socketExit();
     return 0;
 }
