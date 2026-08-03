@@ -14,6 +14,7 @@
 #include "text.h"
 #include "cJSON.h"
 #include "update.h"
+#include "player.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -283,6 +284,29 @@ static void load_cat(void) {
 }
 static cJSON *cat_items(void) { return g_list ? cJSON_GetObjectItem(g_list, "items") : NULL; }
 
+// Resolve a fonte do item e reproduz (link direto = anime/dorama). Torrent fica p/ depois.
+static void resolve_and_play(int itemId) {
+    SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+    text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
+    SDL_RenderPresent(gRen);
+    char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
+    struct membuf out = { 0 }; const char *err = NULL;
+    long code = net_request(url, "POST", "{}", g_token[0] ? g_token : NULL, &out, &err);
+    if (code != 200 || !out.data) { membuf_free(&out); toast("Falha ao resolver o stream"); return; }
+    cJSON *j = cJSON_Parse(out.data);
+    const char *container = jstr(j, "container");
+    const char *play = jstr(j, "play_url");
+    char purl[1200] = { 0 };
+    if (play) {
+        if (strncmp(play, "http", 4) == 0) snprintf(purl, sizeof(purl), "%s", play);
+        else snprintf(purl, sizeof(purl), "%s%s", BASE, play);
+    }
+    if (container && !strcmp(container, "torrent")) toast("Filme/serie via torrent - em breve no Switch");
+    else if (purl[0]) { int r = player_play(gRen, g_joy, purl); if (r < 0) { char m[64]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); } }
+    else toast("Sem fonte para tocar");
+    if (j) cJSON_Delete(j);
+    membuf_free(&out);
+}
 static void open_series(int id) {
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
     char p[96]; snprintf(p, sizeof(p), "/api/catalog/series/%d", id);
@@ -298,7 +322,7 @@ static void open_item(cJSON *item, int is_series) {
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
     if (is_series) open_series(id);
-    else { char m[160]; const char *t = jstr(item, "title"); snprintf(m, sizeof(m), "\"%s\" - player na Fase 2", t ? t : "filme"); toast(m); }
+    else resolve_and_play(id);
 }
 
 // ------------------------------------------------------------- render: barra
@@ -550,9 +574,7 @@ static void input_series(int b) {
     else if (b == JOY_R || b == JOY_ZR) { if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; } }
     else if (b == JOY_A) {
         cJSON *ep = cJSON_GetArrayItem(sa, g_epSel);
-        const char *t = jstr(ep, "title");
-        char m[180]; snprintf(m, sizeof(m), "%s - player na Fase 2", t ? t : "episodio");
-        toast(m);
+        if (ep) resolve_and_play(jint(ep, "id"));
     }
 }
 
