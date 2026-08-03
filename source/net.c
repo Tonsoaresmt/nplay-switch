@@ -115,6 +115,10 @@ long net_request_timeout(const char *url, const char *method,
     if (method && strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
+    } else if (method && strcmp(method, "GET") != 0) {
+        // DELETE/PUT/etc: metodo custom. Se veio corpo, manda como campos.
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+        if (body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     }
 
     CURLcode res = curl_easy_perform(curl);

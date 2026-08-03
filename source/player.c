@@ -13,6 +13,7 @@
 #include <libavutil/time.h>
 #include <libavutil/channel_layout.h>
 #include "player.h"
+#include "curl_avio.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -26,23 +27,23 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     // tela preta enquanto abre (pode levar alguns segundos)
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren);
 
-    AVFormatContext *fmt = NULL;
-    AVDictionary *opts = NULL;
-    av_dict_set(&opts, "user_agent", "Nplay-Switch/1.0", 0);
-    av_dict_set(&opts, "reconnect", "1", 0);
-    av_dict_set(&opts, "reconnect_streamed", "1", 0);
-    av_dict_set(&opts, "reconnect_delay_max", "5", 0);
-    av_dict_set(&opts, "rw_timeout", "20000000", 0);
-    av_dict_set(&opts, "tls_verify", "0", 0);
+    // O switch-ffmpeg nao tem TLS, entao NAO abrimos a URL direto: pluga o libcurl
+    // (com mbedtls) como camada de I/O do ffmpeg. Funciona pra https do R2 (animes)
+    // e pro arquivo do acelerador (Range). Ver curl_avio.c.
+    AVIOContext *avio = nplay_curl_avio_open(url);
+    if (!avio) return -1;
+    AVFormatContext *fmt = avformat_alloc_context();
+    if (!fmt) { nplay_curl_avio_close(avio); return -1; }
+    fmt->pb = avio;
+    fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
 
-    int rc = avformat_open_input(&fmt, url, NULL, &opts);
-    av_dict_free(&opts);
-    if (rc != 0) return -1;
-    if (avformat_find_stream_info(fmt, NULL) < 0) { avformat_close_input(&fmt); return -2; }
+    int rc = avformat_open_input(&fmt, NULL, NULL, NULL);
+    if (rc != 0) { nplay_curl_avio_close(avio); return -1; }
+    if (avformat_find_stream_info(fmt, NULL) < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2; }
 
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     int aidx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-    if (vidx < 0) { avformat_close_input(&fmt); return -3; }
+    if (vidx < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
 
     // ---- decoder de video ----
     AVCodecParameters *vpar = fmt->streams[vidx]->codecpar;
@@ -50,7 +51,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     AVCodecContext *vctx = avcodec_alloc_context3(vdec);
     avcodec_parameters_to_context(vctx, vpar);
     vctx->thread_count = 4;
-    if (!vdec || avcodec_open2(vctx, vdec, NULL) < 0) { avcodec_free_context(&vctx); avformat_close_input(&fmt); return -4; }
+    if (!vdec || avcodec_open2(vctx, vdec, NULL) < 0) { avcodec_free_context(&vctx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -4; }
 
     // ---- decoder de audio + resample + saida SDL ----
     AVCodecContext *actx = NULL;
@@ -168,5 +169,6 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     av_frame_free(&frame); av_packet_free(&pkt);
     SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
+    nplay_curl_avio_close(avio);
     return 0;
 }
