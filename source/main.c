@@ -13,6 +13,7 @@
 #include "store.h"
 #include "text.h"
 #include "cJSON.h"
+#include "update.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -40,6 +41,9 @@ static char g_token[640] = {0};
 static char g_status[160] = {0};
 static Uint32 g_toast_until = 0;
 static char g_toast[160] = {0};
+static char g_self_path[600] = {0};
+static char g_user[128] = {0};
+static int g_do_update = 0;
 
 static const SDL_Color C_BG   = {  8, 10, 15, 255 };
 static const SDL_Color C_BAR  = { 12, 15, 23, 255 };
@@ -206,8 +210,8 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
 typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES } Screen;
 static Screen g_screen = SC_LOGIN;
 
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas" };
-#define NTABS 5
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Config" };
+#define NTABS 6
 static int g_tab = 0;
 
 // --- home (rails) ---
@@ -442,6 +446,8 @@ static void draw_login(void) {
 // ------------------------------------------------------------- input
 static void enter_tab(int tab) {
     g_tab = tab;
+    g_status[0] = '\0';
+    if (tab == 5) return;                  // Config: nada a carregar
     if (tab == 0) { if (!g_home) load_home(); }
     else load_cat();
 }
@@ -487,9 +493,54 @@ static void input_series(int b) {
     }
 }
 
+// ------------------------------------------------------------- config
+static const char *SET_ITEMS[] = { "Buscar atualizacao", "Sair da conta" };
+#define NSET 2
+static int g_setSel = 0;
+static void draw_settings(void) {
+    draw_topbar();
+    text_draw(gRen, "Configuracoes", 40, 100, C_TEXT, 1);
+    char v[96]; snprintf(v, sizeof(v), "Versao do app: %s", APP_VERSION_STR);
+    text_draw(gRen, v, 40, 152, C_MUT, 0);
+    char u[180]; snprintf(u, sizeof(u), "Conta: %s", g_user[0] ? g_user : "-");
+    text_draw(gRen, u, 40, 182, C_MUT, 0);
+    text_draw(gRen, BASE, 40, 212, C_MUT, 0);
+    for (int i = 0; i < NSET; i++) {
+        int y = 270 + i * 56;
+        if (i == g_setSel) fill_rect(36, y - 6, 470, 48, C_CARD);
+        text_draw(gRen, SET_ITEMS[i], 48, y, (i == g_setSel) ? C_TEXT : C_MUT, 0);
+    }
+    if (g_status[0]) text_draw(gRen, g_status, 40, 270 + NSET * 56 + 22, C_ACC, 0);
+    text_draw(gRen, "A confirma  -  D-pad move", 40, WIN_H - 50, C_MUT, 0);
+}
+static void input_settings(int b) {
+    if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
+    else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
+    else if (b == JOY_A) {
+        if (g_setSel == 0) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
+        else { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
+    }
+}
+static void run_update(void) {
+    struct update_info info;
+    int r = update_check(&info);
+    if (r == UPDATE_CHECK_AVAILABLE) {
+        char target[600]; update_resolve_target_path(g_self_path, target, sizeof(target));
+        char err[256] = "";
+        if (update_apply(&info, target, err, sizeof(err)) == 0)
+            snprintf(g_status, sizeof(g_status), "Atualizado p/ %s! Feche e reabra o Nplay.", info.latest_version);
+        else
+            snprintf(g_status, sizeof(g_status), "Falha na atualizacao: %s", err[0] ? err : "download");
+    } else if (r == UPDATE_CHECK_UP_TO_DATE) {
+        snprintf(g_status, sizeof(g_status), "Voce ja esta na versao mais recente (%s).", APP_VERSION_STR);
+    } else {
+        snprintf(g_status, sizeof(g_status), "%s", info.message[0] ? info.message : "Erro ao verificar atualizacao");
+    }
+}
+
 // ------------------------------------------------------------- main
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
+    update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
     socketInitializeDefault();
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
     IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG | IMG_INIT_WEBP);
@@ -508,6 +559,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; i++) wk[i] = SDL_CreateThread(cover_worker, "cov", NULL);
 
     store_load_token(g_token, sizeof(g_token));
+    store_load_user(g_user, sizeof(g_user));
     if (g_token[0]) { g_screen = SC_MAIN; enter_tab(0); }
 
     int running = 1;
@@ -525,6 +577,7 @@ int main(int argc, char **argv) {
                 else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
                 else if (b == JOY_PLUS) running = 0;
                 else if (b == JOY_MINUS) { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
+                else if (g_tab == 5) input_settings(b);
                 else if (g_tab == 0) input_home(b);
                 else input_grid(b);
             } else if (g_screen == SC_SERIES) {
@@ -536,7 +589,7 @@ int main(int argc, char **argv) {
         SDL_RenderClear(gRen);
         if (g_screen == SC_LOGIN) draw_login();
         else if (g_screen == SC_SERIES) draw_series();
-        else { if (g_tab == 0) draw_home(); else draw_grid(); }
+        else { if (g_tab == 5) draw_settings(); else if (g_tab == 0) draw_home(); else draw_grid(); }
 
         cover_pump();
 
@@ -547,6 +600,7 @@ int main(int argc, char **argv) {
             if (tx) { SDL_Rect d = { WIN_W / 2 - w / 2, WIN_H - 80, w, h }; SDL_RenderCopy(gRen, tx, NULL, &d); }
         }
         SDL_RenderPresent(gRen);
+        if (g_do_update) { g_do_update = 0; run_update(); }
     }
 
     // encerra threads
