@@ -77,6 +77,13 @@ static void short_title(const char *title, char *out, int cap) {
     out[k] = '\0';
     if (k >= cap - 1 && k >= 2) { out[k - 2] = '.'; out[k - 1] = '.'; }
 }
+// Desenha texto recortado a uma largura (evita vazar pro card/coluna vizinha).
+static void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw) {
+    SDL_Rect clip = { x, y - 3, maxw, big ? 40 : 30 };
+    SDL_RenderSetClipRect(gRen, &clip);
+    text_draw(gRen, s, x, y, c, big);
+    SDL_RenderSetClipRect(gRen, NULL);
+}
 static int prompt_text(const char *guide, char *out, size_t cap, int password) {
     SwkbdConfig kbd;
     if (R_FAILED(swkbdCreate(&kbd, 0))) return -1;
@@ -201,8 +208,8 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
         char ini[2] = { title[0] ? title[0] : '?', 0 };
         text_draw(gRen, ini, x + cw / 2 - 8, y + coverH / 2 - 16, C_MUT, 1);
     }
-    char sh[26]; short_title(title, sh, (int)sizeof(sh));
-    text_draw(gRen, sh, x, y + coverH + 4, selected ? C_TEXT : C_MUT, 0);
+    char sh[48]; short_title(title, sh, (int)sizeof(sh));
+    text_clip(sh, x, y + coverH + 6, selected ? C_TEXT : C_MUT, 0, cw);
     if (selected) border_rect(x - 3, y - 3, cw + 6, coverH + 6, 3, C_ACC2);
 }
 
@@ -396,43 +403,60 @@ static int season_count(void) {
     cJSON *seasons = g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL;
     return seasons ? cJSON_GetArraySize(seasons) : 0;
 }
+// remove um prefixo "T1:E1 " do titulo do episodio (fica mais limpo)
+static const char *ep_clean(const char *t) {
+    if (t && t[0] == 'T') {
+        const char *colon = strchr(t, ':');
+        const char *space = strchr(t, ' ');
+        if (colon && space && colon < space) return space + 1;
+    }
+    return t ? t : "Episodio";
+}
 static void draw_series(void) {
     cJSON *s = g_ser ? cJSON_GetObjectItem(g_ser, "series") : NULL;
     fill_rect(0, 0, WIN_W, 66, C_BAR);
     text_draw(gRen, "< (B) voltar", 40, 22, C_MUT, 0);
     const char *title = jstr(s, "title"); if (!title) title = "Serie";
-    text_draw(gRen, title, 200, 18, C_TEXT, 1);
+    text_clip(title, 200, 16, C_TEXT, 1, WIN_W - 240);
 
-    // capa + info a esquerda
-    const char *logo = jstr(s, "logo");
-    SDL_Texture *tex = cover_get(logo);
-    SDL_Rect cr = { 40, 96, 240, 340 };
-    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr);
-    else fill_rect(40, 96, 240, 340, C_CARD);
-    const char *year = jstr(s, "year"); const char *genre = jstr(s, "genre");
-    char meta[160]; snprintf(meta, sizeof(meta), "%s%s%s", year ? year : "", (year && genre) ? "  -  " : "", genre ? genre : "");
-    if (meta[0]) text_draw(gRen, meta, 40, 444, C_MUT, 0);
+    // ----- coluna esquerda: capa + metadados (recortados a 220px) -----
+    int LX = 40, LW = 220;
+    SDL_Texture *tex = cover_get(jstr(s, "logo"));
+    SDL_Rect cr = { LX, 100, LW, 314 };
+    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr); else fill_rect(LX, 100, LW, 314, C_CARD);
+    const char *year = jstr(s, "year");
+    double rating = 0; cJSON *jr = cJSON_GetObjectItem(s, "rating"); if (jr && cJSON_IsNumber(jr)) rating = jr->valuedouble;
+    char l1[80];
+    if (rating > 0) snprintf(l1, sizeof(l1), "%s%sNota %.1f", year ? year : "", year ? "   " : "", rating);
+    else snprintf(l1, sizeof(l1), "%s", year ? year : "");
+    if (l1[0]) text_clip(l1, LX, 426, C_TEXT, 0, LW);
+    const char *genre = jstr(s, "genre");
+    if (genre) text_clip(genre, LX, 456, C_MUT, 0, LW);
+    char epc[48]; snprintf(epc, sizeof(epc), "%d episodios", jint(s, "episode_count"));
+    text_clip(epc, LX, 486, C_MUT, 0, LW);
 
-    // seletor de temporada
-    int nsea = season_count();
+    // ----- coluna direita: temporada + episodios -----
+    int RX = 300, REND = WIN_W - 40;
     cJSON *sa = season_arr();
-    char stitle[64]; snprintf(stitle, sizeof(stitle), "Temporada %s   (L/R troca, %d no total)", sa && sa->string ? sa->string : "1", nsea);
-    text_draw(gRen, stitle, 320, 96, C_TEXT, 0);
+    int nsea = season_count(), nep = arr_len(sa);
+    char sh[48]; snprintf(sh, sizeof(sh), "Temporada %s", (sa && sa->string) ? sa->string : "1");
+    text_draw(gRen, sh, RX, 100, C_ACC, 1);
+    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R troca temporada  (%d)", nsea); text_draw(gRen, hint, RX + 260, 108, C_MUT, 0); }
+    fill_rect(RX, 148, REND - RX, 2, C_CARD);
 
-    // lista de episodios
-    int nep = arr_len(sa);
-    int listTop = 136, rowH = 42, visible = (WIN_H - listTop - 20) / rowH;
+    int listTop = 168, rowH = 40, visible = (WIN_H - listTop - 44) / rowH;
     if (g_epSel < g_epScroll) g_epScroll = g_epSel;
     if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
     for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
         cJSON *ep = cJSON_GetArrayItem(sa, i);
         int yy = listTop + (i - g_epScroll) * rowH;
-        if (i == g_epSel) fill_rect(320, yy - 4, WIN_W - 360, rowH - 4, C_CARD);
-        const char *et = jstr(ep, "title"); if (!et) et = "Episodio";
-        char sh[80]; short_title(et, sh, (int)sizeof(sh));
-        text_draw(gRen, sh, 332, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0);
+        if (i == g_epSel) fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD);
+        int en = jint(ep, "episode"); char nb[10]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
+        text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : C_MUT, 0);
+        text_clip(ep_clean(jstr(ep, "title")), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 60);
     }
-    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", 332, listTop, C_MUT, 0);
+    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", RX, listTop, C_MUT, 0);
+    text_draw(gRen, "cima/baixo navega   -   A assistir (Fase 2)", RX, WIN_H - 36, C_MUT, 0);
 }
 
 // ------------------------------------------------------------- login
