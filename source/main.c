@@ -219,6 +219,7 @@ static cJSON *g_home = NULL;
 typedef struct { char label[48]; cJSON *arr; int is_series; } Rail;
 static Rail g_rails[32]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
+static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
 
 // --- catalogo (abas 1..4) ---
 static cJSON *g_list = NULL;
@@ -238,7 +239,8 @@ static void add_rail(const char *label, cJSON *arr, int is_series) {
 }
 static void load_home(void) {
     if (g_home) { cJSON_Delete(g_home); g_home = NULL; }
-    g_railsN = 0; g_railSel = 0; g_railItem = 0; g_homeScroll = 0;
+    g_railsN = 0; g_railSel = -1; g_railItem = 0; g_homeScroll = 0;
+    g_heroIdx = 0; g_hero_next = SDL_GetTicks() + 6000;
     g_home = api_get("/api/catalog/home");
     if (!g_home) { snprintf(g_status, sizeof(g_status), "Falha ao carregar inicio"); return; }
     g_status[0] = '\0';
@@ -309,15 +311,42 @@ static void draw_topbar(void) {
 #define RCW 150
 #define RCH 214
 #define RGAP 16
+#define HERO_H 224
+#define RAILS_TOP (108 + HERO_H + 24)
 static void draw_home(void) {
     draw_topbar();
-    if (g_railsN == 0) { text_draw(gRen, g_status[0] ? g_status : "Carregando...", 40, 110, C_MUT, 0); return; }
-    int y = 86 - g_homeScroll;
+    if (!g_home) { text_draw(gRen, g_status[0] ? g_status : "Carregando...", 40, 110, C_MUT, 0); return; }
+    // saudacao
+    char hi[180]; snprintf(hi, sizeof(hi), "Bem-vindo de volta%s%s", g_user[0] ? ", " : "", g_user[0] ? g_user : "");
+    text_draw(gRen, hi, 40, 76 - g_homeScroll, C_MUT, 0);
+    // destaque (hero) rotativo
+    cJSON *heroes = cJSON_GetObjectItem(g_home, "heroes");
+    int nh = arr_len(heroes);
+    int hy = 108 - g_homeScroll;
+    if (nh > 0) {
+        cJSON *h = cJSON_GetArrayItem(heroes, g_heroIdx % nh);
+        fill_rect(40, hy, WIN_W - 80, HERO_H, C_BAR);
+        if (g_railSel == -1) border_rect(37, hy - 3, WIN_W - 74, HERO_H + 6, 3, C_ACC2);
+        SDL_Texture *tex = cover_get(jstr(h, "logo"));
+        SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
+        if (tex) SDL_RenderCopy(gRen, tex, NULL, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
+        text_draw(gRen, "DESTAQUE", 228, hy + 28, C_ACC, 0);
+        const char *ht = jstr(h, "title"); if (!ht) ht = "";
+        char ht2[42]; short_title(ht, ht2, (int)sizeof(ht2));
+        text_draw(gRen, ht2, 228, hy + 54, C_TEXT, 1);
+        const char *hk = jstr(h, "kind");
+        const char *kl = (hk && !strcmp(hk, "movie")) ? "Filme" : (hk && !strcmp(hk, "live")) ? "Ao vivo" : "Serie";
+        text_draw(gRen, kl, 228, hy + 100, C_MUT, 0);
+        text_draw(gRen, "A abre   -   D-pad esq/dir troca o destaque", 228, hy + HERO_H - 40, C_MUT, 0);
+        char cnt[24]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
+        text_draw(gRen, cnt, WIN_W - 128, hy + HERO_H - 40, C_MUT, 0);
+    }
+    // trilhos
+    int y = RAILS_TOP - g_homeScroll;
     for (int r = 0; r < g_railsN; r++) {
         int items = arr_len(g_rails[r].arr);
         text_draw(gRen, g_rails[r].label, 40, y, (r == g_railSel) ? C_TEXT : C_MUT, 0);
-        int ry = y + 30;
-        int rowScroll = 0;
+        int ry = y + 30, rowScroll = 0;
         if (r == g_railSel) {
             int selX = 40 + g_railItem * (RCW + RGAP);
             if (selX + RCW - rowScroll > WIN_W - 40) rowScroll = selX + RCW - (WIN_W - 40);
@@ -330,7 +359,7 @@ static void draw_home(void) {
             draw_card(x, ry, RCW, RCH, cJSON_GetArrayItem(g_rails[r].arr, i), (r == g_railSel && i == g_railItem));
         }
         y += 30 + RCH + 40;
-        if (y > WIN_H + 200) break;
+        if (y > WIN_H + 240) break;
     }
 }
 
@@ -452,16 +481,26 @@ static void enter_tab(int tab) {
     else load_cat();
 }
 static void input_home(int b) {
+    cJSON *heroes = cJSON_GetObjectItem(g_home, "heroes");
+    int nh = arr_len(heroes);
+    if (g_railSel < 0) {   // destaque (hero) focado
+        if (b == JOY_DOWN) { if (g_railsN > 0) g_railSel = 0; }
+        else if (b == JOY_DLEFT) { if (nh) g_heroIdx = (g_heroIdx - 1 + nh) % nh; g_hero_next = SDL_GetTicks() + 6000; }
+        else if (b == JOY_DRIGHT) { if (nh) g_heroIdx = (g_heroIdx + 1) % nh; g_hero_next = SDL_GetTicks() + 6000; }
+        else if (b == JOY_A) { if (nh) { cJSON *h = cJSON_GetArrayItem(heroes, g_heroIdx % nh); const char *k = jstr(h, "kind"); open_item(h, (k && !strcmp(k, "movie")) ? 0 : 1); } }
+        g_homeScroll = 0;
+        return;
+    }
     int items = arr_len(g_rails[g_railSel].arr);
-    if (b == JOY_UP) { if (g_railSel > 0) { g_railSel--; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
+    if (b == JOY_UP) { if (g_railSel == 0) { g_railSel = -1; g_homeScroll = 0; return; } g_railSel--; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; }
     else if (b == JOY_DOWN) { if (g_railSel < g_railsN - 1) { g_railSel++; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
     else if (b == JOY_DLEFT) { if (g_railItem > 0) g_railItem--; }
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
     // rolagem vertical p/ manter a rail visivel
-    int ry = 86 + g_railSel * (30 + RCH + 40);
-    if (ry + RCH + 30 - g_homeScroll > WIN_H) g_homeScroll = ry + RCH + 30 - WIN_H + 20;
-    if (ry - g_homeScroll < 86) g_homeScroll = ry - 86;
+    int ry = RAILS_TOP + g_railSel * (30 + RCH + 40);
+    if (ry + RCH + 60 - g_homeScroll > WIN_H) g_homeScroll = ry + RCH + 60 - WIN_H + 20;
+    if (ry - g_homeScroll < 76) g_homeScroll = ry - 76;
     if (g_homeScroll < 0) g_homeScroll = 0;
 }
 static void input_grid(int b) {
@@ -583,6 +622,13 @@ int main(int argc, char **argv) {
             } else if (g_screen == SC_SERIES) {
                 input_series(b);
             }
+        }
+
+        // destaque rotativo no Inicio (a cada ~6s)
+        if (g_screen == SC_MAIN && g_tab == 0 && g_home && SDL_GetTicks() > g_hero_next) {
+            int nh = arr_len(cJSON_GetObjectItem(g_home, "heroes"));
+            if (nh > 0) g_heroIdx = (g_heroIdx + 1) % nh;
+            g_hero_next = SDL_GetTicks() + 6000;
         }
 
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
