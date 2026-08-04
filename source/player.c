@@ -1,6 +1,8 @@
 // player.c - player de video: ffmpeg decodifica, SDL desenha (textura YUV) e toca
 // o audio (SDL Audio + swresample). Sincroniza o video pelo relogio do audio.
-// Software decode por enquanto (NVDEC/hardware fica pra otimizacao futura).
+// I/O via libcurl (curl_avio) porque o switch-ffmpeg nao tem TLS.
+// Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur) e mostra
+// um HUD (titulo + barra de progresso + tempo) ao pausar/buscar.
 #include <switch.h>
 #include <SDL.h>
 #include <stdio.h>
@@ -14,6 +16,7 @@
 #include <libavutil/channel_layout.h>
 #include "player.h"
 #include "curl_avio.h"
+#include "text.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -21,15 +24,58 @@
 #define JOY_R 7
 #define JOY_PLUS 10
 #define JOY_MINUS 11
+#define PWIN_W 1280
+#define PWIN_H 720
 
-int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
+static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
+static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
+static const SDL_Color PC_ACC  = { 139, 92, 246, 255 };
+
+static void pfill(SDL_Renderer *r, int x, int y, int w, int h, SDL_Color c, int a) {
+    SDL_SetRenderDrawColor(r, c.r, c.g, c.b, a);
+    SDL_Rect rr = { x, y, w, h };
+    SDL_RenderFillRect(r, &rr);
+}
+static void fmt_time(double s, char *out, int cap) {
+    if (s < 0 || s != s) s = 0;
+    int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
+    if (h > 0) snprintf(out, cap, "%d:%02d:%02d", h, m, sec);
+    else snprintf(out, cap, "%d:%02d", m, sec);
+}
+// HUD inferior: faixa escura + titulo + barra de progresso + tempo (+ PAUSADO).
+static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur, int paused) {
+    SDL_Color black = { 0, 0, 0, 255 };
+    pfill(ren, 0, PWIN_H - 96, PWIN_W, 96, black, 150);           // faixa translucida
+    if (title && title[0]) text_draw(ren, title, 60, PWIN_H - 84, PC_TEXT, 1);
+    if (paused) text_draw(ren, "PAUSADO", PWIN_W - 180, PWIN_H - 84, PC_ACC, 0);
+
+    int bx = 60, by = PWIN_H - 34, bw = PWIN_W - 260, bh = 6;
+    pfill(ren, bx, by, bw, bh, PC_MUT, 90);                        // trilho
+    if (dur > 0) {
+        int fw = (int)(bw * (pos / dur));
+        if (fw < 0) fw = 0; if (fw > bw) fw = bw;
+        pfill(ren, bx, by, fw, bh, PC_ACC, 255);                  // preenchido
+        pfill(ren, bx + fw - 2, by - 4, 4, bh + 8, PC_TEXT, 255);  // "cabeca"
+    }
+    char t1[16], t2[16], line[40];
+    fmt_time(pos, t1, sizeof(t1));
+    if (dur > 0) { fmt_time(dur, t2, sizeof(t2)); snprintf(line, sizeof(line), "%s / %s", t1, t2); }
+    else snprintf(line, sizeof(line), "%s", t1);
+    text_draw(ren, line, PWIN_W - 190, PWIN_H - 40, PC_MUT, 0);
+    text_draw(ren, "A pausa   L/R -+15s   B/+ volta", 60, PWIN_H - 62, PC_MUT, 0);
+}
+
+int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
+                const char *title, double start_sec, double *out_pos, double *out_dur) {
     (void)joy;
-    // tela preta enquanto abre (pode levar alguns segundos)
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren);
+    if (out_pos) *out_pos = 0;
+    if (out_dur) *out_dur = 0;
+    // tela preta + "carregando" enquanto abre (pode levar alguns segundos)
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
+    text_draw(ren, "Carregando video...", PWIN_W / 2 - 120, PWIN_H / 2 - 16, PC_TEXT, 1);
+    SDL_RenderPresent(ren);
 
-    // O switch-ffmpeg nao tem TLS, entao NAO abrimos a URL direto: pluga o libcurl
-    // (com mbedtls) como camada de I/O do ffmpeg. Funciona pra https do R2 (animes)
-    // e pro arquivo do acelerador (Range). Ver curl_avio.c.
+    // O switch-ffmpeg nao tem TLS: pluga o libcurl como I/O do ffmpeg (ver curl_avio.c).
     AVIOContext *avio = nplay_curl_avio_open(url);
     if (!avio) return -1;
     AVFormatContext *fmt = avformat_alloc_context();
@@ -44,6 +90,9 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     int aidx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (vidx < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
+
+    double dur = (fmt->duration > 0) ? fmt->duration / (double)AV_TIME_BASE : 0;
+    if (out_dur) *out_dur = dur;
 
     // ---- decoder de video ----
     AVCodecParameters *vpar = fmt->streams[vidx]->codecpar;
@@ -87,7 +136,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     }
 
     // retangulo com letterbox (1280x720)
-    int dw = 1280, dh = 720;
+    int dw = PWIN_W, dh = PWIN_H;
     double ar = (double)vw / vh, dar = (double)dw / dh;
     SDL_Rect dst;
     if (ar > dar) { dst.w = dw; dst.h = (int)(dw / ar); } else { dst.h = dh; dst.w = (int)(dh * ar); }
@@ -99,28 +148,46 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
     AVRational atb = (aidx >= 0) ? fmt->streams[aidx]->time_base : (AVRational){1, ORATE};
     double bps = (double)ORATE * OCH * 2.0;
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
+    double cur_pos = 0;
     int running = 1, paused = 0;
+    Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     SDL_Event e;
+
+    // Retoma de onde parou (só se fizer sentido: > 3s e não no finzinho).
+    if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
+        av_seek_frame(fmt, -1, (int64_t)(start_sec * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+        audio_clock = start_sec; cur_pos = start_sec;
+        wall_start = av_gettime() / 1000000.0 - start_sec;
+    }
 
     while (running) {
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN) {
                 int b = e.jbutton.button;
+                hud_until = SDL_GetTicks() + 4000;
                 if (b == JOY_B || b == JOY_PLUS || b == JOY_MINUS) running = 0;
                 else if (b == JOY_A) { paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused); }
                 else if (b == JOY_R || b == JOY_L) {
                     double t = audio_clock + (b == JOY_R ? 15 : -15);
                     if (t < 0) t = 0;
+                    if (dur > 0 && t > dur - 1) t = dur - 1;
                     av_seek_frame(fmt, -1, (int64_t)(t * AV_TIME_BASE), (b == JOY_L) ? AVSEEK_FLAG_BACKWARD : 0);
                     avcodec_flush_buffers(vctx); if (actx) avcodec_flush_buffers(actx);
                     if (adev) SDL_ClearQueuedAudio(adev);
-                    wall_start = av_gettime() / 1000000.0 - t; audio_clock = t;
+                    wall_start = av_gettime() / 1000000.0 - t; audio_clock = t; cur_pos = t;
                 }
             }
         }
         if (!running) break;
-        if (paused) { SDL_Delay(30); continue; }
+        if (paused) {   // continua desenhando (quadro congelado + HUD)
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex, NULL, &dst);
+            draw_hud(ren, title, cur_pos, dur, 1);
+            SDL_RenderPresent(ren);
+            SDL_Delay(30);
+            continue;
+        }
 
         int ret = av_read_frame(fmt, pkt);
         if (ret < 0) {  // fim do arquivo
@@ -146,6 +213,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
                     double vpts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(vtb) : 0;
                     double master = adev ? (audio_clock - SDL_GetQueuedAudioSize(adev) / bps)
                                          : (av_gettime() / 1000000.0 - wall_start);
+                    cur_pos = master;
                     double delay = vpts - master;
                     if (delay > 0.001) { if (delay > 0.4) delay = 0.4; SDL_Delay((Uint32)(delay * 1000)); }
                     AVFrame *u = frame;
@@ -153,12 +221,16 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url) {
                     SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                     SDL_RenderCopy(ren, tex, NULL, &dst);
+                    if (paused || SDL_GetTicks() < hud_until) draw_hud(ren, title, cur_pos, dur, 0);
                     SDL_RenderPresent(ren);
                 }
             }
         }
         av_packet_unref(pkt);
     }
+
+    if (out_pos) *out_pos = cur_pos;
+    if (out_dur) *out_dur = dur;
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);

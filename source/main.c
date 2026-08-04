@@ -273,7 +273,8 @@ static void load_downloads(void);
 static void accel_start(int itemId);
 static void do_search(void);
 static void open_series(int id);
-static void resolve_and_play(int itemId);
+static void resolve_and_play(int itemId, const char *title);
+static void play_with_progress(int itemId, const char *title, const char *url);
 
 // ------------------------------------------------------------- favoritos
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
@@ -359,9 +360,31 @@ static void load_landing(int tab) {
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
 }
 
+// Toca uma URL retomando de onde parou e salvando o progresso ("continuar
+// assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
+static void play_with_progress(int itemId, const char *title, const char *url) {
+    double start = 0;
+    char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
+    cJSON *pr = api_get(p);
+    if (pr) {
+        cJSON *prog = cJSON_GetObjectItem(pr, "progress");
+        cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
+        if (ps && cJSON_IsNumber(ps)) start = ps->valuedouble;
+        cJSON_Delete(pr);
+    }
+    double pos = 0, dur = 0;
+    int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
+    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); return; }
+    if (dur > 0 && pos > 5) {
+        char body[160];
+        snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", itemId, (int)pos, (int)dur);
+        api_send("/api/sync/progress", "POST", body);
+    }
+}
+
 // Resolve a fonte e reproduz. Link direto (anime/dorama) toca na hora; torrent
 // (filme/serie) manda pro acelerador do servidor e abre a aba Baixados.
-static void resolve_and_play(int itemId) {
+static void resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
     SDL_RenderPresent(gRen);
@@ -384,8 +407,7 @@ static void resolve_and_play(int itemId) {
     } else if (container && !strcmp(container, "embed")) {
         toast("Este conteudo (embed) ainda nao toca no Switch");
     } else if (purl[0]) {
-        int r = player_play(gRen, g_joy, purl);
-        if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); }
+        play_with_progress(itemId, title, purl);
     } else toast("Sem fonte para tocar");
     if (j) cJSON_Delete(j);
     membuf_free(&out);
@@ -404,7 +426,7 @@ static void open_item(cJSON *item, int is_series) {
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
     if (is_series) open_series(id);
-    else resolve_and_play(id);
+    else resolve_and_play(id, jstr(item, "title"));
 }
 
 // ------------------------------------------------------------- downloads (acelerador)
@@ -429,8 +451,7 @@ static void dl_play(cJSON *job) {
     char url[1400];
     if (strncmp(fu, "http", 4) == 0) snprintf(url, sizeof(url), "%s", fu);
     else snprintf(url, sizeof(url), "%s%s", BASE, fu);
-    int r = player_play(gRen, g_joy, url);
-    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); }
+    play_with_progress(jint(job, "item_id"), jstr(job, "title"), url);
 }
 
 // ------------------------------------------------------------- busca
@@ -654,7 +675,12 @@ static void draw_downloads(void) {
         char info[96];
         if (ready) snprintf(info, sizeof(info), "Pronto  -  aperte A pra assistir");
         else if (erro) snprintf(info, sizeof(info), "Erro: %s", jstr(j, "error") ? jstr(j, "error") : "falhou");
-        else snprintf(info, sizeof(info), "Baixando  %d%%   %.1f MB/s   %d peers", pct, jint(j, "speed") / 1048576.0, jint(j, "peers"));
+        else {
+            int eta = jint(j, "eta_seconds");
+            char et[24] = "";
+            if (eta > 0) { if (eta >= 3600) snprintf(et, sizeof(et), "  ~%dh%02dm", eta / 3600, (eta % 3600) / 60); else snprintf(et, sizeof(et), "  ~%dmin", (eta + 59) / 60); }
+            snprintf(info, sizeof(info), "Baixando  %d%%   %.1f MB/s   %d peers%s", pct, jint(j, "speed") / 1048576.0, jint(j, "peers"), et);
+        }
         text_clip(info, 48, yy + 56, ready ? C_GREEN : (erro ? C_ROSE : C_MUT), 0, WIN_W - 360);
         char pc[8]; snprintf(pc, sizeof(pc), "%d%%", pct);
         text_draw(gRen, pc, WIN_W - 150, yy + 6, ready ? C_GREEN : C_TEXT, 1);
@@ -754,7 +780,7 @@ static void input_series(int b) {
     else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
     else if (b == JOY_L || b == JOY_ZL) { if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; } }
     else if (b == JOY_R || b == JOY_ZR) { if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; } }
-    else if (b == JOY_A) { cJSON *ep = cJSON_GetArrayItem(sa, g_epSel); if (ep) resolve_and_play(jint(ep, "id")); }
+    else if (b == JOY_A) { cJSON *ep = cJSON_GetArrayItem(sa, g_epSel); if (ep) resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title"))); }
 }
 static void input_downloads(int b) {
     cJSON *jobs = dl_jobs();
