@@ -14,12 +14,15 @@
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/dict.h>
 #include "player.h"
 #include "curl_avio.h"
 #include "text.h"
 
 #define JOY_A 0
 #define JOY_B 1
+#define JOY_X 2
+#define JOY_Y 3
 #define JOY_L 6
 #define JOY_R 7
 #define JOY_ZL 8
@@ -47,7 +50,7 @@ static void fmt_time(double s, char *out, int cap) {
     else snprintf(out, cap, "%d:%02d", m, sec);
 }
 // HUD inferior: faixa escura + titulo + barra de progresso + tempo + volume.
-static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur, int paused, int vol) {
+static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur, int paused, int vol, const char *hint) {
     SDL_Color black = { 0, 0, 0, 255 };
     pfill(ren, 0, PWIN_H - 96, PWIN_W, 96, black, 150);           // faixa translucida
     if (title && title[0]) text_draw(ren, title, 60, PWIN_H - 84, PC_TEXT, 1);
@@ -67,7 +70,80 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
     if (dur > 0) { fmt_time(dur, t2, sizeof(t2)); snprintf(line, sizeof(line), "%s / %s", t1, t2); }
     else snprintf(line, sizeof(line), "%s", t1);
     text_draw(ren, line, PWIN_W - 190, PWIN_H - 40, PC_MUT, 0);
-    text_draw(ren, "A pausa   L/R +-10s   ZL/ZR +-60s   cima/baixo volume   B/+ volta", 60, PWIN_H - 62, PC_MUT, 0);
+    text_draw(ren, hint ? hint : "A pausa   L/R 10s   ZL/ZR 60s   cima/baixo volume   B volta", 60, PWIN_H - 62, PC_MUT, 0);
+}
+// monta a linha de status/controles do HUD (mostra audio/legenda quando ha varias faixas).
+static void build_hint(AVFormatContext *fmt, int naud, int aidx, int nsub, int scur, char *out, int cap);
+
+// idioma de um stream (tag "language"), ex.: "por", "eng", "jpn".
+static const char *stream_lang(AVFormatContext *fmt, int idx) {
+    if (idx < 0) return "?";
+    AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
+    return (e && e->value) ? e->value : "und";
+}
+// (re)abre o decoder de audio + resample p/ o stream aidx. Fecha o anterior.
+static int open_audio_dec(AVFormatContext *fmt, int aidx, AVCodecContext **pactx, struct SwrContext **pswr, int OCH, int ORATE) {
+    if (*pswr) swr_free(pswr);
+    if (*pactx) avcodec_free_context(pactx);
+    if (aidx < 0) return -1;
+    AVCodecParameters *apar = fmt->streams[aidx]->codecpar;
+    const AVCodec *adec = avcodec_find_decoder(apar->codec_id);
+    if (!adec) return -1;
+    AVCodecContext *actx = avcodec_alloc_context3(adec);
+    avcodec_parameters_to_context(actx, apar);
+    if (avcodec_open2(actx, adec, NULL) != 0) { avcodec_free_context(&actx); return -1; }
+    AVChannelLayout outl; av_channel_layout_default(&outl, OCH);
+    struct SwrContext *swr = NULL;
+    if (swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE, &actx->ch_layout, actx->sample_fmt, actx->sample_rate, 0, NULL) == 0)
+        swr_init(swr);
+    *pactx = actx; *pswr = swr;
+    return 0;
+}
+// (re)abre o decoder de legenda p/ o stream sidx (-1 = desliga).
+static int open_sub_dec(AVFormatContext *fmt, int sidx, AVCodecContext **psctx) {
+    if (*psctx) avcodec_free_context(psctx);
+    if (sidx < 0) return -1;
+    AVCodecParameters *sp = fmt->streams[sidx]->codecpar;
+    const AVCodec *sd = avcodec_find_decoder(sp->codec_id);
+    if (!sd) return -1;
+    AVCodecContext *sc = avcodec_alloc_context3(sd);
+    avcodec_parameters_to_context(sc, sp);
+    if (avcodec_open2(sc, sd, NULL) != 0) { avcodec_free_context(&sc); return -1; }
+    *psctx = sc;
+    return 0;
+}
+// extrai o texto legivel de uma linha ASS (tira campos e tags {\...}, \N -> espaco).
+static void ass_to_text(const char *ass, char *out, int cap) {
+    const char *p = ass; int commas = 0;
+    for (const char *q = ass; *q && commas < 8; q++) if (*q == ',') { commas++; p = q + 1; }
+    if (commas < 8) p = ass;
+    int k = 0;
+    while (*p && k < cap - 1) {
+        if (p[0] == '{') { const char *e = strchr(p, '}'); if (e) { p = e + 1; continue; } }
+        if (p[0] == '\\' && (p[1] == 'N' || p[1] == 'n')) { out[k++] = ' '; p += 2; continue; }
+        if (p[0] == '\r') { p++; continue; }
+        if (p[0] == '\n') { out[k++] = ' '; p++; continue; }
+        out[k++] = *p++;
+    }
+    out[k] = 0;
+}
+// desenha a legenda centralizada perto do rodape (com faixa de fundo).
+static void draw_sub(SDL_Renderer *ren, const char *txt) {
+    if (!txt || !txt[0]) return;
+    int w = 0, h = 0;
+    SDL_Color white = { 245, 245, 245, 255 };
+    SDL_Texture *t = text_cached(ren, txt, white, 0, &w, &h);
+    if (w > PWIN_W - 80) w = PWIN_W - 80;
+    int x = (PWIN_W - w) / 2, y = PWIN_H - 150;
+    SDL_Color black = { 0, 0, 0, 255 };
+    pfill(ren, x - 14, y - 6, w + 28, h + 12, black, 165);
+    if (t) { SDL_Rect d = { x, y, w, h }; SDL_RenderCopy(ren, t, NULL, &d); }
+}
+static void build_hint(AVFormatContext *fmt, int naud, int aidx, int nsub, int scur, char *out, int cap) {
+    char a[48] = "", s[32] = "";
+    if (naud > 1) snprintf(a, sizeof(a), "Audio: %s (Y)   ", stream_lang(fmt, aidx));
+    if (nsub > 0) snprintf(s, sizeof(s), "Leg: %s (X)   ", scur < 0 ? "off" : "on");
+    snprintf(out, cap, "%s%sA pausa  L/R 10s  ZL/ZR 60s  cima/baixo vol  B volta", a, s);
 }
 
 int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
@@ -93,8 +169,24 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     if (avformat_find_stream_info(fmt, NULL) < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2; }
 
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    int aidx = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (vidx < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
+
+    // enumera faixas de AUDIO e de LEGENDA (so legendas de texto: SRT/ASS/mov_text)
+    int aidxs[16], naud = 0, sidxs[16], nsub = 0;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        int t = fmt->streams[i]->codecpar->codec_type, cid = fmt->streams[i]->codecpar->codec_id;
+        if (t == AVMEDIA_TYPE_AUDIO && naud < 16) aidxs[naud++] = (int)i;
+        else if (t == AVMEDIA_TYPE_SUBTITLE && nsub < 16 &&
+                 (cid == AV_CODEC_ID_SUBRIP || cid == AV_CODEC_ID_ASS || cid == AV_CODEC_ID_SSA ||
+                  cid == AV_CODEC_ID_MOV_TEXT || cid == AV_CODEC_ID_TEXT || cid == AV_CODEC_ID_WEBVTT))
+            sidxs[nsub++] = (int)i;
+    }
+    int acur = 0, best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    for (int i = 0; i < naud; i++) if (aidxs[i] == best) acur = i;
+    int aidx = naud ? aidxs[acur] : -1;
+    int scur = -1;                       // -1 = legenda desligada
+    AVCodecContext *sctx = NULL;
+    char sub_text[512] = ""; double sub_end = 0;
 
     double dur = (fmt->duration > 0) ? fmt->duration / (double)AV_TIME_BASE : 0;
     if (out_dur) *out_dur = dur;
@@ -112,23 +204,11 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     struct SwrContext *swr = NULL;
     SDL_AudioDeviceID adev = 0;
     const int OCH = 2, ORATE = 48000;
-    if (aidx >= 0) {
-        AVCodecParameters *apar = fmt->streams[aidx]->codecpar;
-        const AVCodec *adec = avcodec_find_decoder(apar->codec_id);
-        if (adec) {
-            actx = avcodec_alloc_context3(adec);
-            avcodec_parameters_to_context(actx, apar);
-            if (avcodec_open2(actx, adec, NULL) == 0) {
-                AVChannelLayout outl; av_channel_layout_default(&outl, OCH);
-                if (swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE,
-                                        &actx->ch_layout, actx->sample_fmt, actx->sample_rate, 0, NULL) == 0)
-                    swr_init(swr);
-                SDL_AudioSpec want; SDL_zero(want);
-                want.freq = ORATE; want.format = AUDIO_S16SYS; want.channels = OCH; want.samples = 2048;
-                adev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
-                if (adev) SDL_PauseAudioDevice(adev, 0);
-            }
-        }
+    if (aidx >= 0 && open_audio_dec(fmt, aidx, &actx, &swr, OCH, ORATE) == 0) {
+        SDL_AudioSpec want; SDL_zero(want);
+        want.freq = ORATE; want.format = AUDIO_S16SYS; want.channels = OCH; want.samples = 2048;
+        adev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+        if (adev) SDL_PauseAudioDevice(adev, 0);
     }
 
     int vw = vctx->width, vh = vctx->height;
@@ -183,8 +263,25 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     int back = (b == JOY_L || b == JOY_ZL);
                     av_seek_frame(fmt, -1, (int64_t)(t * AV_TIME_BASE), back ? AVSEEK_FLAG_BACKWARD : 0);
                     avcodec_flush_buffers(vctx); if (actx) avcodec_flush_buffers(actx);
+                    if (sctx) avcodec_flush_buffers(sctx);
                     if (adev) SDL_ClearQueuedAudio(adev);
+                    sub_text[0] = 0; sub_end = 0;
                     wall_start = av_gettime() / 1000000.0 - t; audio_clock = t; cur_pos = t;
+                }
+                else if (b == JOY_Y) {   // proximo audio (idioma) quando ha varias faixas
+                    if (naud > 1) {
+                        acur = (acur + 1) % naud; aidx = aidxs[acur];
+                        open_audio_dec(fmt, aidx, &actx, &swr, OCH, ORATE);
+                        atb = fmt->streams[aidx]->time_base;
+                        if (adev) SDL_ClearQueuedAudio(adev);
+                    }
+                }
+                else if (b == JOY_X) {   // legenda: desligada -> faixa 0 -> ... -> desligada
+                    if (nsub > 0) {
+                        scur++; if (scur >= nsub) scur = -1;
+                        open_sub_dec(fmt, scur >= 0 ? sidxs[scur] : -1, &sctx);
+                        sub_text[0] = 0; sub_end = 0;
+                    }
                 }
             }
         }
@@ -192,7 +289,9 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         if (paused) {   // continua desenhando (quadro congelado + HUD)
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, NULL, &dst);
-            draw_hud(ren, title, cur_pos, dur, 1, vol);
+            if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
+            char hint[128]; build_hint(fmt, naud, aidx, nsub, scur, hint, sizeof(hint));
+            draw_hud(ren, title, cur_pos, dur, 1, vol, hint);
             SDL_RenderPresent(ren);
             SDL_Delay(30);
             continue;
@@ -234,9 +333,25 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                     SDL_RenderCopy(ren, tex, NULL, &dst);
-                    if (paused || SDL_GetTicks() < hud_until) draw_hud(ren, title, cur_pos, dur, 0, vol);
+                    if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
+                    if (SDL_GetTicks() < hud_until) { char hint[128]; build_hint(fmt, naud, aidx, nsub, scur, hint, sizeof(hint)); draw_hud(ren, title, cur_pos, dur, 0, vol, hint); }
                     SDL_RenderPresent(ren);
                 }
+            }
+        } else if (scur >= 0 && sctx && pkt->stream_index == sidxs[scur]) {   // legenda
+            AVSubtitle sub; int got = 0;
+            if (avcodec_decode_subtitle2(sctx, &sub, &got, pkt) >= 0 && got) {
+                sub_text[0] = 0;
+                for (unsigned r = 0; r < sub.num_rects; r++) {
+                    AVSubtitleRect *rc = sub.rects[r]; char tmp[400] = "";
+                    if (rc->type == SUBTITLE_ASS && rc->ass) ass_to_text(rc->ass, tmp, sizeof(tmp));
+                    else if (rc->type == SUBTITLE_TEXT && rc->text) snprintf(tmp, sizeof(tmp), "%s", rc->text);
+                    if (tmp[0]) { size_t rem = sizeof(sub_text) - strlen(sub_text) - 1; if (sub_text[0] && rem > 1) { strncat(sub_text, " ", rem); rem--; } strncat(sub_text, tmp, rem); }
+                }
+                double base = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts * av_q2d(fmt->streams[sidxs[scur]]->time_base) : cur_pos;
+                double sd = (sub.end_display_time > sub.start_display_time) ? (sub.end_display_time - sub.start_display_time) / 1000.0 : 4.0;
+                sub_end = base + sd;
+                avsubtitle_free(&sub);
             }
         }
         av_packet_unref(pkt);
@@ -250,6 +365,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     if (yuv) av_frame_free(&yuv);
     if (swr) swr_free(&swr);
     if (actx) avcodec_free_context(&actx);
+    if (sctx) avcodec_free_context(&sctx);
     avcodec_free_context(&vctx);
     av_frame_free(&frame); av_packet_free(&pkt);
     SDL_DestroyTexture(tex);

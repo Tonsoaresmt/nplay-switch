@@ -264,6 +264,8 @@ static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 #define MAX_DLG 300
 typedef struct { int key; int job[128]; int nJobs; int isMovie; } DlGroup;
 static DlGroup g_dlg[MAX_DLG]; static int g_dlgN = 0;
+// episodios ja assistidos (completed) da obra aberta no detalhe de Baixados
+static int g_dlDone[256]; static int g_dlDoneN = 0;
 // status de armazenamento (aba config)
 static cJSON *g_accel_status = NULL;
 // menu "baixar episodios" (Y no detalhe da serie)
@@ -471,6 +473,23 @@ static void build_dl_groups(void) {
     }
 }
 static cJSON *dlg_job(int g, int idx) { return cJSON_GetArrayItem(dl_jobs(), g_dlg[g].job[idx]); }
+// carrega os episodios ja assistidos da serie (p/ marcar "visto" no detalhe)
+static void load_dl_done(int series_id) {
+    g_dlDoneN = 0;
+    if (series_id <= 0) return;
+    char p[64]; snprintf(p, sizeof(p), "/api/catalog/series/%d", series_id);
+    cJSON *sd = api_get(p);
+    if (!sd) return;
+    cJSON *seasons = cJSON_GetObjectItem(sd, "seasons"), *arr;
+    cJSON_ArrayForEach(arr, seasons) {
+        cJSON *ep;
+        cJSON_ArrayForEach(ep, arr) {
+            if (cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed")) && g_dlDoneN < 256) g_dlDone[g_dlDoneN++] = jint(ep, "id");
+        }
+    }
+    cJSON_Delete(sd);
+}
+static int dl_is_done(int item_id) { for (int i = 0; i < g_dlDoneN; i++) if (g_dlDone[i] == item_id) return 1; return 0; }
 static void load_downloads(void) {
     if (g_dl) { cJSON_Delete(g_dl); g_dl = NULL; }
     g_dl = api_get("/api/accel/jobs");
@@ -834,12 +853,14 @@ static void draw_dl_detail(void) {
         int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
         const char *state = jstr(j, "state"); int erro = state && !strcmp(state, "erro");
         int pct = jint(j, "percent");
+        int done = dl_is_done(jint(j, "item_id"));
         char lab[48];
         if (g_dlg[g].isMovie) snprintf(lab, sizeof(lab), "Filme");
         else snprintf(lab, sizeof(lab), "T%d  Ep %d", jint(j, "season") > 0 ? jint(j, "season") : 1, jint(j, "episode"));
-        text_draw(gRen, lab, 52, yy, sel ? C_ACC : C_MUT, 0);
+        text_draw(gRen, lab, 52, yy, sel ? C_ACC : (done ? C_GREEN : C_MUT), 0);
         const char *et = jstr(j, "ep_title"); if (!et || !et[0]) et = title;
-        text_clip(ep_clean(et), 200, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 480);
+        text_clip(ep_clean(et), 200, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 500);
+        if (done) text_draw(gRen, "visto", WIN_W - 340, yy, C_GREEN, 0);
         char st[40];
         if (ready) snprintf(st, sizeof(st), "PRONTO");
         else if (erro) snprintf(st, sizeof(st), "ERRO");
@@ -1003,7 +1024,7 @@ static void input_downloads(int b) {
     else if (b == JOY_A) {
         if (g_dlSel < n) {
             if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda baixando..."); }
-            else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; }
+            else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; load_dl_done(jint(dlg_job(g_dlSel, 0), "series_id")); }
         }
     }
     else if (b == JOY_X) {   // remove a obra inteira
