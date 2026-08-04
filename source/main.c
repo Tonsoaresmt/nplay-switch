@@ -230,14 +230,15 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
 }
 
 // ============================================================= estado / telas
-typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES, SC_SEARCH } Screen;
+typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES, SC_SEARCH, SC_CONFIG } Screen;
 static Screen g_screen = SC_LOGIN;
 
+// Config saiu da barra de abas -> abre pelo botao (-). Assim L a partir do
+// Inicio ja cai em Baixados (ultima aba).
 #define TAB_HOME 0
 #define TAB_DOWNLOADS 5
-#define TAB_CONFIG 6
-#define NTABS 7
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Baixados", "Config" };
+#define NTABS 6
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Baixados" };
 static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
@@ -257,6 +258,17 @@ static int g_srchSel = 0, g_srchScroll = 0;
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
 static int g_dlSel = 0, g_dlScroll = 0; static Uint32 g_dl_next = 0;
+// vista da aba: 0 = grade de capas (por obra), 1 = episodios de uma obra
+static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
+// agrupamento dos jobs por obra (series_id) ou filme (item_id negativo)
+#define MAX_DLG 300
+typedef struct { int key; int job[128]; int nJobs; int isMovie; } DlGroup;
+static DlGroup g_dlg[MAX_DLG]; static int g_dlgN = 0;
+// status de armazenamento (aba config)
+static cJSON *g_accel_status = NULL;
+// menu "baixar episodios" (Y no detalhe da serie)
+static int g_dlmenu = 0;
+static char g_epChk[512]; static int g_epChkN = 0;
 
 // --- favoritos (set local p/ togglar rapido) ---
 static int g_favItem[512]; static int g_favItemN = 0;
@@ -273,8 +285,8 @@ static void load_downloads(void);
 static void accel_start(int itemId);
 static void do_search(void);
 static void open_series(int id);
-static void resolve_and_play(int itemId, const char *title);
-static void play_with_progress(int itemId, const char *title, const char *url);
+static int resolve_and_play(int itemId, const char *title);
+static int play_with_progress(int itemId, const char *title, const char *url);
 
 // ------------------------------------------------------------- favoritos
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
@@ -362,7 +374,8 @@ static void load_landing(int tab) {
 
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
 // assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
-static void play_with_progress(int itemId, const char *title, const char *url) {
+// Retorna 1 se o video terminou naturalmente (p/ auto-play do proximo).
+static int play_with_progress(int itemId, const char *title, const char *url) {
     double start = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
     cJSON *pr = api_get(p);
@@ -374,24 +387,25 @@ static void play_with_progress(int itemId, const char *title, const char *url) {
     }
     double pos = 0, dur = 0;
     int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
-    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); return; }
+    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); return 0; }
     if (dur > 0 && pos > 5) {
         char body[160];
         snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", itemId, (int)pos, (int)dur);
         api_send("/api/sync/progress", "POST", body);
     }
+    return r;   // 1 = terminou
 }
 
 // Resolve a fonte e reproduz. Link direto (anime/dorama) toca na hora; torrent
 // (filme/serie) manda pro acelerador do servidor e abre a aba Baixados.
-static void resolve_and_play(int itemId, const char *title) {
+static int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
     SDL_RenderPresent(gRen);
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
     struct membuf out = { 0 }; const char *err = NULL;
     long code = net_request(url, "POST", "{}", g_token[0] ? g_token : NULL, &out, &err);
-    if (code != 200 || !out.data) { membuf_free(&out); toast("Falha ao resolver o stream"); return; }
+    if (code != 200 || !out.data) { membuf_free(&out); toast("Falha ao resolver o stream"); return 0; }
     cJSON *j = cJSON_Parse(out.data);
     const char *container = jstr(j, "container");
     const char *play = jstr(j, "play_url");
@@ -400,6 +414,7 @@ static void resolve_and_play(int itemId, const char *title) {
         if (strncmp(play, "http", 4) == 0) snprintf(purl, sizeof(purl), "%s", play);
         else snprintf(purl, sizeof(purl), "%s%s", BASE, play);
     }
+    int rc = 0;
     if (container && !strcmp(container, "torrent")) {
         accel_start(itemId);
         toast("Baixando no servidor - veja em Baixados");
@@ -407,10 +422,11 @@ static void resolve_and_play(int itemId, const char *title) {
     } else if (container && !strcmp(container, "embed")) {
         toast("Este conteudo (embed) ainda nao toca no Switch");
     } else if (purl[0]) {
-        play_with_progress(itemId, title, purl);
+        rc = play_with_progress(itemId, title, purl);
     } else toast("Sem fonte para tocar");
     if (j) cJSON_Delete(j);
     membuf_free(&out);
+    return rc;
 }
 static void open_series(int id) {
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
@@ -439,19 +455,39 @@ static void accel_remove(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/jobs/%d", itemId);
     api_send(path, "DELETE", "{}");
 }
+// Agrupa os jobs por OBRA: serie (series_id) num card so; filme = card avulso.
+static void build_dl_groups(void) {
+    g_dlgN = 0;
+    cJSON *jobs = dl_jobs(); int n = arr_len(jobs);
+    for (int i = 0; i < n; i++) {
+        cJSON *j = cJSON_GetArrayItem(jobs, i);
+        const char *kind = jstr(j, "kind");
+        int isEp = kind && !strcmp(kind, "episode");
+        int key = (isEp && jint(j, "series_id") > 0) ? jint(j, "series_id") : -jint(j, "item_id");
+        int g = -1;
+        for (int k = 0; k < g_dlgN; k++) if (g_dlg[k].key == key) { g = k; break; }
+        if (g < 0 && g_dlgN < MAX_DLG) { g = g_dlgN++; g_dlg[g].key = key; g_dlg[g].nJobs = 0; g_dlg[g].isMovie = !isEp; }
+        if (g >= 0 && g_dlg[g].nJobs < 128) g_dlg[g].job[g_dlg[g].nJobs++] = i;
+    }
+}
+static cJSON *dlg_job(int g, int idx) { return cJSON_GetArrayItem(dl_jobs(), g_dlg[g].job[idx]); }
 static void load_downloads(void) {
     if (g_dl) { cJSON_Delete(g_dl); g_dl = NULL; }
     g_dl = api_get("/api/accel/jobs");
-    int n = arr_len(dl_jobs());
-    if (g_dlSel >= n) g_dlSel = n > 0 ? n - 1 : 0;
+    build_dl_groups();
+    if (g_dlSel >= g_dlgN) g_dlSel = g_dlgN > 0 ? g_dlgN - 1 : 0;
+    if (g_dlView == 1) {
+        if (g_dlGroup >= g_dlgN) { g_dlView = 0; g_dlGroup = 0; g_dlDetSel = 0; }
+        else { int nj = g_dlg[g_dlGroup].nJobs; if (g_dlDetSel >= nj) g_dlDetSel = nj > 0 ? nj - 1 : 0; }
+    }
 }
-static void dl_play(cJSON *job) {
+static int dl_play(cJSON *job) {
     const char *fu = jstr(job, "file_url");
-    if (!fu) { toast("Sem arquivo"); return; }
+    if (!fu) { toast("Sem arquivo"); return 0; }
     char url[1400];
     if (strncmp(fu, "http", 4) == 0) snprintf(url, sizeof(url), "%s", fu);
     else snprintf(url, sizeof(url), "%s%s", BASE, fu);
-    play_with_progress(jint(job, "item_id"), jstr(job, "title"), url);
+    return play_with_progress(jint(job, "item_id"), jstr(job, "title"), url);
 }
 
 // ------------------------------------------------------------- busca
@@ -486,7 +522,7 @@ static void draw_topbar(void) {
         if (t == g_tab) fill_rect(tx, 46, w, 3, C_ACC);
         tx += w + 24;
     }
-    text_draw(gRen, "Y busca  (+) sair", WIN_W - 220, 24, C_MUT, 0);
+    text_draw(gRen, "Y busca   (-) config   (+) sair", WIN_W - 330, 24, C_MUT, 0);
 }
 
 // ------------------------------------------------------------- render: landing
@@ -641,7 +677,7 @@ static void draw_series(void) {
     // versoes de audio (Legendado/Dublado) - troca com Y
     cJSON *au = ser_audio();
     if (arr_len(au) > 1) {
-        text_draw(gRen, "Audio (Y):", LX, 520, C_MUT, 0);
+        text_draw(gRen, "Audio (ZL/ZR):", LX, 520, C_MUT, 0);
         int axx = LX; cJSON *av;
         cJSON_ArrayForEach(av, au) {
             int cur = cJSON_IsTrue(cJSON_GetObjectItem(av, "current"));
@@ -683,87 +719,148 @@ static void draw_series(void) {
         fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    text_draw(gRen, "A assistir  L/R temporada  ZL/ZR baixa temporada  X lista", RX, WIN_H - 36, C_MUT, 0);
+    text_draw(gRen, "A assistir  L/R temporada  Y baixar  X lista  ZL/ZR audio", RX, WIN_H - 36, C_MUT, 0);
 }
 
-// Baixa a temporada atual inteira (so episodios torrent). Link direto retorna 0.
-static void accel_season(void) {
-    cJSON *s = ser_obj(); if (!s) return;
-    int sid = jint(s, "id");
-    char url[300];
-    if (ser_grouped()) snprintf(url, sizeof(url), "%s/api/accel/download-season/%d", BASE, sid);
-    else { cJSON *sa = season_arr(); const char *k = (sa && sa->string) ? sa->string : "1"; snprintf(url, sizeof(url), "%s/api/accel/download-season/%d?season=%s", BASE, sid, k); }
-    toast("Enviando temporada pra baixar...");
-    struct membuf out = { 0 }; const char *err = NULL;
-    long code = net_request(url, "POST", "{}", g_token[0] ? g_token : NULL, &out, &err);
-    int started = 0;
-    if (code == 200 && out.data) { cJSON *j = cJSON_Parse(out.data); started = jint(j, "started"); if (j) cJSON_Delete(j); }
-    membuf_free(&out);
-    if (started > 0) { char m[80]; snprintf(m, sizeof(m), "%d episodio(s) enviados pra baixar", started); toast(m); g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS); }
-    else toast("Nada pra baixar aqui (toca direto ou sem fonte torrent)");
+// Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
+static void open_dlmenu(void) {
+    int n = ser_nep();
+    g_epChkN = n > 512 ? 512 : n;
+    for (int i = 0; i < g_epChkN; i++) g_epChk[i] = 0;
+    g_dlmenu = 1;
+}
+static void draw_dlmenu(void) {
+    fill_rect(0, 0, WIN_W, 66, C_BAR);
+    text_draw(gRen, "Baixar episodios", 40, 20, C_TEXT, 1);
+    cJSON *s = ser_obj(); const char *title = jstr(s, "title");
+    if (title) text_clip(title, 320, 22, C_MUT, 0, WIN_W - 360);
+    int n = ser_nep(), cnt = 0;
+    for (int i = 0; i < g_epChkN; i++) if (g_epChk[i]) cnt++;
+    int listTop = 92, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
+    if (g_epSel < g_epScroll) g_epScroll = g_epSel;
+    if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
+    for (int i = g_epScroll; i < n && i < g_epScroll + visible; i++) {
+        cJSON *ep = ser_ep_at(i);
+        int yy = listTop + (i - g_epScroll) * rowH, sel = (i == g_epSel);
+        if (sel) fill_rect(32, yy - 5, WIN_W - 64, rowH - 2, C_CARD);
+        int chk = (i < g_epChkN) && g_epChk[i];
+        border_rect(48, yy + 1, 22, 22, 2, chk ? C_ACC : C_MUT);
+        if (chk) fill_rect(53, yy + 6, 12, 12, C_ACC);
+        int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "Ep %d", en > 0 ? en : i + 1);
+        text_draw(gRen, nb, 86, yy, sel ? C_ACC : C_MUT, 0);
+        text_clip(ep_clean(jstr(ep, "title")), 170, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 240);
+    }
+    char foot[110]; snprintf(foot, sizeof(foot), "%d selecionado(s)   -   A marca   X todos   Y baixa selecionados   B cancela", cnt);
+    text_draw(gRen, foot, 40, WIN_H - 40, C_MUT, 0);
+}
+static void input_dlmenu(int b) {
+    int n = ser_nep();
+    if (b == JOY_B || b == JOY_MINUS) { g_dlmenu = 0; }
+    else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
+    else if (b == JOY_DOWN) { if (g_epSel < n - 1) g_epSel++; }
+    else if (b == JOY_A) { if (g_epSel < g_epChkN) g_epChk[g_epSel] = !g_epChk[g_epSel]; }
+    else if (b == JOY_X) {   // todos / nenhum
+        int any = 0; for (int i = 0; i < g_epChkN; i++) if (!g_epChk[i]) { any = 1; break; }
+        for (int i = 0; i < g_epChkN; i++) g_epChk[i] = any ? 1 : 0;
+    }
+    else if (b == JOY_Y) {   // confirma
+        char body[6000]; int k = 0, cnt = 0;
+        k += snprintf(body + k, sizeof(body) - k, "{\"item_ids\":[");
+        for (int i = 0; i < n && i < g_epChkN; i++) {
+            if (!g_epChk[i]) continue;
+            cJSON *ep = ser_ep_at(i); if (!ep) continue;
+            if (k > (int)sizeof(body) - 20) break;
+            k += snprintf(body + k, sizeof(body) - k, "%s%d", cnt ? "," : "", jint(ep, "id"));
+            cnt++;
+        }
+        k += snprintf(body + k, sizeof(body) - k, "]}");
+        if (cnt == 0) { toast("Selecione ao menos um episodio (A)"); return; }
+        api_send("/api/accel/download-batch", "POST", body);
+        char m[64]; snprintf(m, sizeof(m), "%d episodio(s) enviados pra baixar", cnt);
+        toast(m); g_dlmenu = 0; g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
+    }
 }
 
 // ------------------------------------------------------------- render: downloads
-static void draw_downloads(void) {
-    draw_topbar();
-    text_draw(gRen, "Baixados", 40, 88, C_TEXT, 1);
-    cJSON *jobs = dl_jobs();
-    int n = arr_len(jobs);
-    if (n == 0) {
-        text_draw(gRen, "Nenhum download ainda.", 40, 150, C_MUT, 0);
-        text_draw(gRen, "Abra um filme ou serie torrent e aperte A: ele baixa aqui no servidor.", 40, 182, C_MUT, 0);
-        text_draw(gRen, "Numa serie, ZL/ZR baixa a temporada inteira. Quando pronto, A assiste.", 40, 214, C_MUT, 0);
+// Vista 1: GRADE de capas, uma por obra (serie agrupada / filme avulso).
+static void draw_dl_grid(void) {
+    text_draw(gRen, "Baixados", 40, 84, C_TEXT, 1);
+    if (g_dlgN == 0) {
+        text_draw(gRen, "Nenhum download ainda.", 40, 140, C_MUT, 0);
+        text_draw(gRen, "Abra um filme, serie ou anime e baixe: A no filme, ou Y numa serie", 40, 172, C_MUT, 0);
+        text_draw(gRen, "pra escolher os episodios. Aparecem aqui, por obra.", 40, 200, C_MUT, 0);
         return;
     }
-    int top = 122, rowH = 108, visible = (WIN_H - top - 44) / rowH;
-    if (g_dlSel < g_dlScroll) g_dlScroll = g_dlSel;
-    if (g_dlSel >= g_dlScroll + visible) g_dlScroll = g_dlSel - visible + 1;
-    for (int i = g_dlScroll; i < n && i < g_dlScroll + visible; i++) {
-        cJSON *j = cJSON_GetArrayItem(jobs, i);
-        int yy = top + (i - g_dlScroll) * rowH, sel = (i == g_dlSel);
-        if (sel) fill_rect(30, yy - 6, WIN_W - 60, rowH - 8, C_CARD);
-        // capa do que foi baixado
-        int cx = 46, cw = 62, ch = 88;
-        SDL_Texture *cov = cover_get(jstr(j, "cover"));
-        SDL_Rect cr = { cx, yy, cw, ch };
-        if (cov) SDL_RenderCopy(gRen, cov, NULL, &cr); else fill_rect(cx, yy, cw, ch, C_BAR);
-        int tx = cx + cw + 18, tw = WIN_W - tx - 210;
-        const char *title = jstr(j, "title"); if (!title) title = "";
-        text_clip(title, tx, yy, sel ? C_TEXT : C_MUT, 1, tw);
-        const char *kind = jstr(j, "kind");
-        char sub[96];
-        if (kind && !strcmp(kind, "episode")) snprintf(sub, sizeof(sub), "Temporada %d   Episodio %d", jint(j, "season") > 0 ? jint(j, "season") : 1, jint(j, "episode"));
-        else snprintf(sub, sizeof(sub), "Filme");
-        text_clip(sub, tx, yy + 34, C_MUT, 0, tw);
-        // barra + info
-        int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
-        const char *state = jstr(j, "state");
-        int erro = state && !strcmp(state, "erro");
-        int pct = jint(j, "percent");
-        int bx = tx, by = yy + 64, bw = tw, bh = 10;
-        fill_rect(bx, by, bw, bh, C_BAR);
-        int fw = bw * pct / 100; if (fw < 0) fw = 0; if (fw > bw) fw = bw;
-        fill_rect(bx, by, fw, bh, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
-        char info[96];
-        if (ready) snprintf(info, sizeof(info), "Pronto - aperte A pra assistir");
-        else if (erro) snprintf(info, sizeof(info), "Erro: %s", jstr(j, "error") ? jstr(j, "error") : "falhou");
-        else {
-            int eta = jint(j, "eta_seconds"); char et[24] = "";
-            if (eta > 0) { if (eta >= 3600) snprintf(et, sizeof(et), "  ~%dh%02dm", eta / 3600, (eta % 3600) / 60); else snprintf(et, sizeof(et), "  ~%dmin", (eta + 59) / 60); }
-            snprintf(info, sizeof(info), "%.1f MB/s   %d peers%s", jint(j, "speed") / 1048576.0, jint(j, "peers"), et);
-        }
-        text_clip(info, tx, yy + 82, ready ? C_GREEN : (erro ? C_ROSE : C_MUT), 0, tw);
-        text_draw(gRen, ready ? "PRONTO" : (erro ? "ERRO" : "BAIXANDO"), WIN_W - 190, yy + 4, ready ? C_GREEN : (erro ? C_ROSE : C_ACC2), 0);
-        char pc[8]; snprintf(pc, sizeof(pc), "%d%%", pct);
-        text_draw(gRen, pc, WIN_W - 150, yy + 34, ready ? C_GREEN : C_TEXT, 1);
+    int top = 116;
+    for (int i = 0; i < g_dlgN; i++) {
+        int col = i % GCOLS, row = i / GCOLS;
+        int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
+        int yy = top + row * (GCH + GGAP) - g_dlScroll;
+        if (yy + GCH < 66 || yy > WIN_H) continue;
+        cJSON *j0 = dlg_job(i, 0);
+        SDL_Texture *cov = cover_get(jstr(j0, "cover"));
+        SDL_Rect cr = { x, yy, GCOVERW, GCOVERH };
+        if (cov) SDL_RenderCopy(gRen, cov, NULL, &cr); else fill_rect(x, yy, GCOVERW, GCOVERH, C_CARD);
+        int nJobs = g_dlg[i].nJobs, baixando = 0;
+        for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
+        char badge[32];
+        if (g_dlg[i].isMovie) { if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
+        else snprintf(badge, sizeof(badge), baixando ? "%d ep - baixando" : "%d ep", nJobs);
+        fill_rect(x, yy + GCOVERH - 26, GCOVERW, 26, C_BAR);
+        text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
+        const char *title = jstr(j0, "title"); if (!title) title = "";
+        char sh[48]; short_title(title, sh, sizeof(sh));
+        text_clip(sh, x, yy + GCOVERH + 6, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
+        if (i == g_dlSel) border_rect(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 6, 3, C_ACC2);
     }
-    if (n > visible) {
-        int trkH = visible * rowH, thumbH = trkH * visible / n;
-        int thumbY = top + (trkH - thumbH) * g_dlScroll / (n - visible);
-        fill_rect(WIN_W - 22, top, 4, trkH, C_CARD);
+    text_draw(gRen, "A abre a obra   -   X remove   -   atualiza sozinho", 40, WIN_H - 34, C_MUT, 0);
+}
+// Vista 2: episodios baixados de UMA obra (com status), estilo menu de serie.
+static void draw_dl_detail(void) {
+    int g = g_dlGroup;
+    if (g >= g_dlgN) { g_dlView = 0; return; }
+    cJSON *j0 = dlg_job(g, 0);
+    const char *title = jstr(j0, "title"); if (!title) title = "";
+    text_draw(gRen, "< (B) voltar", 40, 84, C_MUT, 0);
+    text_clip(title, 200, 82, C_TEXT, 1, WIN_W - 240);
+    int nj = g_dlg[g].nJobs;
+    int listTop = 128, rowH = 46, visible = (WIN_H - listTop - 44) / rowH;
+    if (g_dlDetSel < g_dlDetScroll) g_dlDetScroll = g_dlDetSel;
+    if (g_dlDetSel >= g_dlDetScroll + visible) g_dlDetScroll = g_dlDetSel - visible + 1;
+    for (int i = g_dlDetScroll; i < nj && i < g_dlDetScroll + visible; i++) {
+        cJSON *j = dlg_job(g, i);
+        int yy = listTop + (i - g_dlDetScroll) * rowH, sel = (i == g_dlDetSel);
+        if (sel) fill_rect(32, yy - 6, WIN_W - 64, rowH - 4, C_CARD);
+        int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
+        const char *state = jstr(j, "state"); int erro = state && !strcmp(state, "erro");
+        int pct = jint(j, "percent");
+        char lab[48];
+        if (g_dlg[g].isMovie) snprintf(lab, sizeof(lab), "Filme");
+        else snprintf(lab, sizeof(lab), "T%d  Ep %d", jint(j, "season") > 0 ? jint(j, "season") : 1, jint(j, "episode"));
+        text_draw(gRen, lab, 52, yy, sel ? C_ACC : C_MUT, 0);
+        const char *et = jstr(j, "ep_title"); if (!et || !et[0]) et = title;
+        text_clip(ep_clean(et), 200, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 480);
+        char st[40];
+        if (ready) snprintf(st, sizeof(st), "PRONTO");
+        else if (erro) snprintf(st, sizeof(st), "ERRO");
+        else snprintf(st, sizeof(st), "baixando %d%%", pct);
+        text_draw(gRen, st, WIN_W - 260, yy, ready ? C_GREEN : (erro ? C_ROSE : C_ACC), 0);
+        int bx = WIN_W - 260, by = yy + 24, bw = 200, bh = 5;
+        fill_rect(bx, by, bw, bh, C_BAR);
+        int fw = bw * pct / 100; if (fw > bw) fw = bw; if (fw < 0) fw = 0;
+        fill_rect(bx, by, fw, bh, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
+    }
+    if (nj > visible) {
+        int trkH = visible * rowH, thumbH = trkH * visible / nj;
+        int thumbY = listTop + (trkH - thumbH) * g_dlDetScroll / (nj - visible);
+        fill_rect(WIN_W - 22, listTop, 4, trkH, C_CARD);
         fill_rect(WIN_W - 22, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
-    text_draw(gRen, "A assistir (quando pronto)   -   X remover   -   atualiza sozinho", 40, WIN_H - 34, C_MUT, 0);
+    text_draw(gRen, "A assistir (quando pronto)   -   X remove este   -   B volta", 40, WIN_H - 34, C_MUT, 0);
+}
+static void draw_downloads(void) {
+    draw_topbar();
+    if (g_dlView == 1) draw_dl_detail(); else draw_dl_grid();
 }
 
 // ------------------------------------------------------------- login
@@ -807,8 +904,7 @@ static void draw_login(void) {
 static void enter_tab(int tab) {
     g_tab = tab;
     g_status[0] = '\0';
-    if (tab == TAB_CONFIG) return;
-    if (tab == TAB_DOWNLOADS) { g_dlSel = 0; g_dlScroll = 0; load_downloads(); g_dl_next = SDL_GetTicks() + 2000; return; }
+    if (tab == TAB_DOWNLOADS) { g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; load_downloads(); g_dl_next = SDL_GetTicks() + 2000; return; }
     load_landing(tab);
 }
 static void input_landing(int b) {
@@ -849,10 +945,12 @@ static void input_search(int b) {
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
 static void input_series(int b) {
+    if (g_dlmenu) { input_dlmenu(b); return; }   // menu "baixar episodios" aberto
     int nep = ser_nep();
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; }
     else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
-    else if (b == JOY_Y) {   // troca a versao de audio (Legendado <-> Dublado)
+    else if (b == JOY_Y) { open_dlmenu(); }       // escolher episodios pra baixar
+    else if (b == JOY_ZL || b == JOY_ZR) {        // troca audio (Legendado <-> Dublado)
         cJSON *au = ser_audio();
         if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
     }
@@ -866,39 +964,98 @@ static void input_series(int b) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
-    else if (b == JOY_ZL || b == JOY_ZR) { accel_season(); }
-    else if (b == JOY_A) { cJSON *ep = ser_ep_at(g_epSel); if (ep) resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title"))); }
+    else if (b == JOY_A) {   // assistir + auto-play do proximo episodio
+        int idx = g_epSel;
+        while (idx < ser_nep()) {
+            cJSON *ep = ser_ep_at(idx); if (!ep) break;
+            g_epSel = idx;
+            int ended = resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title")));
+            if (ended != 1) break;   // usuario saiu / erro / virou download -> para
+            idx++;
+        }
+    }
 }
 static void input_downloads(int b) {
-    cJSON *jobs = dl_jobs();
-    int n = arr_len(jobs);
-    if (b == JOY_UP) { if (g_dlSel > 0) g_dlSel--; }
-    else if (b == JOY_DOWN) { if (g_dlSel < n - 1) g_dlSel++; }
-    else if (b == JOY_A) { cJSON *j = cJSON_GetArrayItem(jobs, g_dlSel); if (j) { if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda baixando..."); } }
-    else if (b == JOY_X) { cJSON *j = cJSON_GetArrayItem(jobs, g_dlSel); if (j) { accel_remove(jint(j, "item_id")); load_downloads(); toast("Download removido"); } }
+    if (g_dlView == 1) {   // detalhe: episodios baixados de uma obra
+        int g = g_dlGroup, nj = (g < g_dlgN) ? g_dlg[g].nJobs : 0;
+        if (b == JOY_B || b == JOY_MINUS) { g_dlView = 0; }
+        else if (b == JOY_UP) { if (g_dlDetSel > 0) g_dlDetSel--; }
+        else if (b == JOY_DOWN) { if (g_dlDetSel < nj - 1) g_dlDetSel++; }
+        else if (b == JOY_A) {   // assistir + auto-play do proximo baixado
+            int idx = g_dlDetSel;
+            while (idx < g_dlg[g].nJobs) {
+                cJSON *j = dlg_job(g, idx);
+                if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda baixando..."); break; }
+                g_dlDetSel = idx;
+                if (dl_play(j) != 1) break;
+                idx++;
+            }
+        }
+        else if (b == JOY_X) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) { accel_remove(jint(j, "item_id")); load_downloads(); toast("Removido"); } }
+        return;
+    }
+    // grade de obras
+    int n = g_dlgN;
+    if (b == JOY_UP) { if (g_dlSel - GCOLS >= 0) g_dlSel -= GCOLS; }
+    else if (b == JOY_DOWN) { if (g_dlSel + GCOLS < n) g_dlSel += GCOLS; }
+    else if (b == JOY_DLEFT) { if (g_dlSel > 0) g_dlSel--; }
+    else if (b == JOY_DRIGHT) { if (g_dlSel + 1 < n) g_dlSel++; }
+    else if (b == JOY_A) {
+        if (g_dlSel < n) {
+            if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda baixando..."); }
+            else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; }
+        }
+    }
+    else if (b == JOY_X) {   // remove a obra inteira
+        if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
+    }
+    int row = g_dlSel / GCOLS, rowTop = 116 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    if (rowBot - g_dlScroll > WIN_H) g_dlScroll = rowBot - WIN_H + 16;
+    if (rowTop - g_dlScroll < 116) g_dlScroll = rowTop - 116;
+    if (g_dlScroll < 0) g_dlScroll = 0;
 }
 
 // ------------------------------------------------------------- config
 static const char *SET_ITEMS[] = { "Buscar atualizacao", "Sair da conta" };
 #define NSET 2
 static int g_setSel = 0;
+static void load_accel_status(void) {
+    if (g_accel_status) { cJSON_Delete(g_accel_status); g_accel_status = NULL; }
+    g_accel_status = api_get("/api/accel/status");
+}
 static void draw_settings(void) {
-    draw_topbar();
-    text_draw(gRen, "Configuracoes", 40, 100, C_TEXT, 1);
+    fill_rect(0, 0, WIN_W, 66, C_BAR);
+    text_draw(gRen, "Nplay - Configuracoes", 40, 20, C_ACC, 1);
+    text_draw(gRen, "(B) volta", WIN_W - 150, 24, C_MUT, 0);
     char v[96]; snprintf(v, sizeof(v), "Versao do app: %s", APP_VERSION_STR);
-    text_draw(gRen, v, 40, 152, C_MUT, 0);
+    text_draw(gRen, v, 40, 92, C_MUT, 0);
     char u[180]; snprintf(u, sizeof(u), "Conta: %s", g_user[0] ? g_user : "-");
-    text_draw(gRen, u, 40, 182, C_MUT, 0);
-    text_draw(gRen, BASE, 40, 212, C_MUT, 0);
+    text_draw(gRen, u, 40, 122, C_MUT, 0);
+    text_draw(gRen, BASE, 40, 152, C_MUT, 0);
+    // onde os downloads ficam salvos + uso de disco
+    text_draw(gRen, "Downloads (salvos no servidor / Pi):", 40, 200, C_TEXT, 0);
+    if (g_accel_status) {
+        cJSON *up = cJSON_GetObjectItem(g_accel_status, "used_bytes");
+        cJSON *cp = cJSON_GetObjectItem(g_accel_status, "cap_bytes");
+        double used = up ? up->valuedouble : 0, cap = cp ? cp->valuedouble : 0;
+        const char *path = jstr(g_accel_status, "path");
+        char pl[220]; snprintf(pl, sizeof(pl), "Pasta: %s", path ? path : "-");
+        text_clip(pl, 40, 230, C_MUT, 0, WIN_W - 80);
+        char sl[140]; snprintf(sl, sizeof(sl), "Uso: %.1f GB de %.0f GB   -   %d download(s)   (pastas: Filmes/Series/Animes/Doramas)", used / 1e9, cap / 1e9, jint(g_accel_status, "count"));
+        text_clip(sl, 40, 258, C_MUT, 0, WIN_W - 80);
+        int bw = 500, fw = cap > 0 ? (int)(bw * used / cap) : 0; if (fw > bw) fw = bw; if (fw < 0) fw = 0;
+        fill_rect(40, 288, bw, 10, C_BAR); fill_rect(40, 288, fw, 10, C_ACC2);
+    } else text_draw(gRen, "(carregando...)", 40, 230, C_MUT, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 270 + i * 56;
+        int y = 340 + i * 56;
         if (i == g_setSel) fill_rect(36, y - 6, 470, 48, C_CARD);
         text_draw(gRen, SET_ITEMS[i], 48, y, (i == g_setSel) ? C_TEXT : C_MUT, 0);
     }
-    if (g_status[0]) text_draw(gRen, g_status, 40, 270 + NSET * 56 + 22, C_ACC, 0);
-    text_draw(gRen, "A confirma  -  D-pad move", 40, WIN_H - 50, C_MUT, 0);
+    if (g_status[0]) text_draw(gRen, g_status, 40, 340 + NSET * 56 + 22, C_ACC, 0);
+    text_draw(gRen, "A confirma   D-pad move   B volta", 40, WIN_H - 44, C_MUT, 0);
 }
 static void input_settings(int b) {
+    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
@@ -957,14 +1114,16 @@ static void handle_button(int b) {
         if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
         else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
         else if (b == JOY_PLUS) g_running = 0;
+        else if (b == JOY_MINUS) { g_setSel = 0; load_accel_status(); g_screen = SC_CONFIG; }
         else if (b == JOY_Y) do_search();
-        else if (g_tab == TAB_CONFIG) input_settings(b);
         else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
         else input_landing(b);
     } else if (g_screen == SC_SERIES) {
         input_series(b);
     } else if (g_screen == SC_SEARCH) {
         input_search(b);
+    } else if (g_screen == SC_CONFIG) {
+        input_settings(b);
     }
 }
 
@@ -1027,9 +1186,10 @@ int main(int argc, char **argv) {
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
         SDL_RenderClear(gRen);
         if (g_screen == SC_LOGIN) draw_login();
-        else if (g_screen == SC_SERIES) draw_series();
+        else if (g_screen == SC_CONFIG) draw_settings();
+        else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
         else if (g_screen == SC_SEARCH) draw_search();
-        else { if (g_tab == TAB_CONFIG) draw_settings(); else if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
+        else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
 
         cover_pump();
 

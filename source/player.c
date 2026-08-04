@@ -154,7 +154,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     double bps = (double)ORATE * OCH * 2.0;
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
     double cur_pos = 0;
-    int running = 1, paused = 0, vol = 100;
+    int running = 1, paused = 0, vol = 100, reached_end = 0;
     Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     SDL_Event e;
 
@@ -200,7 +200,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
 
         int ret = av_read_frame(fmt, pkt);
         if (ret < 0) {  // fim do arquivo
-            if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) break;
+            if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) { reached_end = 1; break; }
             SDL_Delay(40); continue;
         }
         if (aidx >= 0 && pkt->stream_index == aidx && actx) {
@@ -255,5 +255,5 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
-    return 0;
+    return reached_end;   // 1 = terminou naturalmente (p/ auto-play do proximo)
 }

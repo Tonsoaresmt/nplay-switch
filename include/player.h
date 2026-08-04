@@ -9,6 +9,7 @@
 //   start_sec : retoma a partir deste segundo (0 = do comeco)
 //   out_pos   : (opcional) recebe a posicao em que parou, em segundos
 //   out_dur   : (opcional) recebe a duracao total, em segundos
-// Retorna 0 normal, negativo em erro de abertura/decode.
+// Retorna 1 se terminou naturalmente (p/ auto-play do proximo), 0 se o usuario
+// saiu, negativo em erro de abertura/decode.
 int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                 const char *title, double start_sec, double *out_pos, double *out_dur);
