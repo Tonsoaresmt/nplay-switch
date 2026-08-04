@@ -11,7 +11,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #--------------------------------------------------------------------------------- metadados
 APP_TITLE	:=	Nplay
 APP_AUTHOR	:=	Nplay
-APP_VERSION	:=	0.4.0
+APP_VERSION	:=	0.4.1
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	nplay-switch
 
