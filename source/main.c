@@ -683,7 +683,24 @@ static void draw_series(void) {
         fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    text_draw(gRen, "cima/baixo (segure p/ rolar)   A assistir   X lista", RX, WIN_H - 36, C_MUT, 0);
+    text_draw(gRen, "A assistir  L/R temporada  ZL/ZR baixa temporada  X lista", RX, WIN_H - 36, C_MUT, 0);
+}
+
+// Baixa a temporada atual inteira (so episodios torrent). Link direto retorna 0.
+static void accel_season(void) {
+    cJSON *s = ser_obj(); if (!s) return;
+    int sid = jint(s, "id");
+    char url[300];
+    if (ser_grouped()) snprintf(url, sizeof(url), "%s/api/accel/download-season/%d", BASE, sid);
+    else { cJSON *sa = season_arr(); const char *k = (sa && sa->string) ? sa->string : "1"; snprintf(url, sizeof(url), "%s/api/accel/download-season/%d?season=%s", BASE, sid, k); }
+    toast("Enviando temporada pra baixar...");
+    struct membuf out = { 0 }; const char *err = NULL;
+    long code = net_request(url, "POST", "{}", g_token[0] ? g_token : NULL, &out, &err);
+    int started = 0;
+    if (code == 200 && out.data) { cJSON *j = cJSON_Parse(out.data); started = jint(j, "started"); if (j) cJSON_Delete(j); }
+    membuf_free(&out);
+    if (started > 0) { char m[80]; snprintf(m, sizeof(m), "%d episodio(s) enviados pra baixar", started); toast(m); g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS); }
+    else toast("Nada pra baixar aqui (toca direto ou sem fonte torrent)");
 }
 
 // ------------------------------------------------------------- render: downloads
@@ -694,40 +711,57 @@ static void draw_downloads(void) {
     int n = arr_len(jobs);
     if (n == 0) {
         text_draw(gRen, "Nenhum download ainda.", 40, 150, C_MUT, 0);
-        text_draw(gRen, "Abra um filme ou serie e aperte A: ele baixa aqui no servidor.", 40, 182, C_MUT, 0);
-        text_draw(gRen, "Quando ficar pronto, aperte A pra assistir.", 40, 214, C_MUT, 0);
+        text_draw(gRen, "Abra um filme ou serie torrent e aperte A: ele baixa aqui no servidor.", 40, 182, C_MUT, 0);
+        text_draw(gRen, "Numa serie, ZL/ZR baixa a temporada inteira. Quando pronto, A assiste.", 40, 214, C_MUT, 0);
         return;
     }
-    int top = 132, rowH = 88, visible = (WIN_H - top - 46) / rowH;
+    int top = 122, rowH = 108, visible = (WIN_H - top - 44) / rowH;
     if (g_dlSel < g_dlScroll) g_dlScroll = g_dlSel;
     if (g_dlSel >= g_dlScroll + visible) g_dlScroll = g_dlSel - visible + 1;
     for (int i = g_dlScroll; i < n && i < g_dlScroll + visible; i++) {
         cJSON *j = cJSON_GetArrayItem(jobs, i);
         int yy = top + (i - g_dlScroll) * rowH, sel = (i == g_dlSel);
-        if (sel) fill_rect(34, yy - 8, WIN_W - 68, rowH - 8, C_CARD);
+        if (sel) fill_rect(30, yy - 6, WIN_W - 60, rowH - 8, C_CARD);
+        // capa do que foi baixado
+        int cx = 46, cw = 62, ch = 88;
+        SDL_Texture *cov = cover_get(jstr(j, "cover"));
+        SDL_Rect cr = { cx, yy, cw, ch };
+        if (cov) SDL_RenderCopy(gRen, cov, NULL, &cr); else fill_rect(cx, yy, cw, ch, C_BAR);
+        int tx = cx + cw + 18, tw = WIN_W - tx - 210;
         const char *title = jstr(j, "title"); if (!title) title = "";
-        char st[64]; short_title(title, st, (int)sizeof(st));
-        text_clip(st, 48, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 340);
-        const char *state = jstr(j, "state");
-        int pct = jint(j, "percent");
+        text_clip(title, tx, yy, sel ? C_TEXT : C_MUT, 1, tw);
+        const char *kind = jstr(j, "kind");
+        char sub[96];
+        if (kind && !strcmp(kind, "episode")) snprintf(sub, sizeof(sub), "Temporada %d   Episodio %d", jint(j, "season") > 0 ? jint(j, "season") : 1, jint(j, "episode"));
+        else snprintf(sub, sizeof(sub), "Filme");
+        text_clip(sub, tx, yy + 34, C_MUT, 0, tw);
+        // barra + info
         int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
+        const char *state = jstr(j, "state");
         int erro = state && !strcmp(state, "erro");
-        int bx = 48, by = yy + 36, bw = WIN_W - 360, bh = 12;
+        int pct = jint(j, "percent");
+        int bx = tx, by = yy + 64, bw = tw, bh = 10;
         fill_rect(bx, by, bw, bh, C_BAR);
         int fw = bw * pct / 100; if (fw < 0) fw = 0; if (fw > bw) fw = bw;
         fill_rect(bx, by, fw, bh, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
         char info[96];
-        if (ready) snprintf(info, sizeof(info), "Pronto  -  aperte A pra assistir");
+        if (ready) snprintf(info, sizeof(info), "Pronto - aperte A pra assistir");
         else if (erro) snprintf(info, sizeof(info), "Erro: %s", jstr(j, "error") ? jstr(j, "error") : "falhou");
         else {
-            int eta = jint(j, "eta_seconds");
-            char et[24] = "";
+            int eta = jint(j, "eta_seconds"); char et[24] = "";
             if (eta > 0) { if (eta >= 3600) snprintf(et, sizeof(et), "  ~%dh%02dm", eta / 3600, (eta % 3600) / 60); else snprintf(et, sizeof(et), "  ~%dmin", (eta + 59) / 60); }
-            snprintf(info, sizeof(info), "Baixando  %d%%   %.1f MB/s   %d peers%s", pct, jint(j, "speed") / 1048576.0, jint(j, "peers"), et);
+            snprintf(info, sizeof(info), "%.1f MB/s   %d peers%s", jint(j, "speed") / 1048576.0, jint(j, "peers"), et);
         }
-        text_clip(info, 48, yy + 56, ready ? C_GREEN : (erro ? C_ROSE : C_MUT), 0, WIN_W - 360);
+        text_clip(info, tx, yy + 82, ready ? C_GREEN : (erro ? C_ROSE : C_MUT), 0, tw);
+        text_draw(gRen, ready ? "PRONTO" : (erro ? "ERRO" : "BAIXANDO"), WIN_W - 190, yy + 4, ready ? C_GREEN : (erro ? C_ROSE : C_ACC2), 0);
         char pc[8]; snprintf(pc, sizeof(pc), "%d%%", pct);
-        text_draw(gRen, pc, WIN_W - 150, yy + 6, ready ? C_GREEN : C_TEXT, 1);
+        text_draw(gRen, pc, WIN_W - 150, yy + 34, ready ? C_GREEN : C_TEXT, 1);
+    }
+    if (n > visible) {
+        int trkH = visible * rowH, thumbH = trkH * visible / n;
+        int thumbY = top + (trkH - thumbH) * g_dlScroll / (n - visible);
+        fill_rect(WIN_W - 22, top, 4, trkH, C_CARD);
+        fill_rect(WIN_W - 22, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     text_draw(gRen, "A assistir (quando pronto)   -   X remover   -   atualiza sozinho", 40, WIN_H - 34, C_MUT, 0);
 }
@@ -824,14 +858,15 @@ static void input_series(int b) {
     }
     else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
     else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
-    else if (b == JOY_L || b == JOY_ZL) {
+    else if (b == JOY_L) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
     }
-    else if (b == JOY_R || b == JOY_ZR) {
+    else if (b == JOY_R) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
+    else if (b == JOY_ZL || b == JOY_ZR) { accel_season(); }
     else if (b == JOY_A) { cJSON *ep = ser_ep_at(g_epSel); if (ep) resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title"))); }
 }
 static void input_downloads(int b) {
@@ -888,11 +923,32 @@ static void run_update(void) {
     }
 }
 
-// Roteia um botao para a tela atual. Usado pelos eventos E pelo auto-repeat
-// (segurar o D-pad). g_running/g_hold_* controlam o loop e a repeticao.
+// Roteia um botao para a tela atual. Usado pelos eventos E pela navegacao
+// continua (segurar D-pad OU empurrar o analogico). g_running/g_dir/g_dir_next
+// controlam o loop e a repeticao.
 static int g_running = 1;
-static int g_hold_btn = -1;
-static Uint32 g_hold_next = 0;
+static int g_dir = -1;            // direcao ativa (D-pad ou analogico), -1 = nenhuma
+static Uint32 g_dir_next = 0;
+
+// D-pad fisicamente segurado (-1 = nenhum).
+static int dpad_held(SDL_Joystick *j) {
+    if (!j) return -1;
+    if (SDL_JoystickGetButton(j, JOY_UP)) return JOY_UP;
+    if (SDL_JoystickGetButton(j, JOY_DOWN)) return JOY_DOWN;
+    if (SDL_JoystickGetButton(j, JOY_DLEFT)) return JOY_DLEFT;
+    if (SDL_JoystickGetButton(j, JOY_DRIGHT)) return JOY_DRIGHT;
+    return -1;
+}
+// Direcao do analogico esquerdo (eixos 0/1) com zona morta (-1 = centro).
+static int stick_dir(SDL_Joystick *j) {
+    if (!j) return -1;
+    int ax = SDL_JoystickGetAxis(j, 0), ay = SDL_JoystickGetAxis(j, 1);
+    const int DZ = 16000;
+    int aax = ax < 0 ? -ax : ax, aay = ay < 0 ? -ay : ay;
+    if (aax < DZ && aay < DZ) return -1;
+    if (aay >= aax) return ay < 0 ? JOY_UP : JOY_DOWN;
+    return ax < 0 ? JOY_DLEFT : JOY_DRIGHT;
+}
 static void handle_button(int b) {
     if (g_screen == SC_LOGIN) {
         if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
@@ -941,15 +997,20 @@ int main(int argc, char **argv) {
             if (e.type == SDL_QUIT) { g_running = 0; break; }
             if (e.type != SDL_JOYBUTTONDOWN) continue;
             int b = e.jbutton.button;
+            // direcoes (D-pad) sao tratadas no bloco de navegacao abaixo (junto
+            // com o analogico); aqui so os demais botoes.
+            if (b == JOY_UP || b == JOY_DOWN || b == JOY_DLEFT || b == JOY_DRIGHT) continue;
             handle_button(b);
-            g_hold_btn = b; g_hold_next = SDL_GetTicks() + 380;   // arma o auto-repeat
         }
-        // segurar o D-pad rola rapido (episodios longos, grades, trilhos)
-        if (g_joy && (g_hold_btn == JOY_UP || g_hold_btn == JOY_DOWN || g_hold_btn == JOY_DLEFT || g_hold_btn == JOY_DRIGHT)) {
-            if (SDL_JoystickGetButton(g_joy, g_hold_btn)) {
-                Uint32 now = SDL_GetTicks();
-                if (now >= g_hold_next) { handle_button(g_hold_btn); g_hold_next = now + 55; }
-            } else g_hold_btn = -1;
+        // Navegacao continua: D-pad segurado OU analogico empurrado. 1a ativacao
+        // na hora, depois repete (segurar rola rapido em listas longas).
+        {
+            int dir = dpad_held(g_joy);
+            if (dir < 0) dir = stick_dir(g_joy);
+            Uint32 now = SDL_GetTicks();
+            if (dir < 0) g_dir = -1;
+            else if (dir != g_dir) { handle_button(dir); g_dir = dir; g_dir_next = now + 380; }
+            else if (now >= g_dir_next) { handle_button(dir); g_dir_next = now + 55; }
         }
 
         // destaque rotativo nas abas 0..4 (a cada ~6s)

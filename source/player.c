@@ -22,8 +22,12 @@
 #define JOY_B 1
 #define JOY_L 6
 #define JOY_R 7
+#define JOY_ZL 8
+#define JOY_ZR 9
 #define JOY_PLUS 10
 #define JOY_MINUS 11
+#define JOY_UP 13
+#define JOY_DOWN 15
 #define PWIN_W 1280
 #define PWIN_H 720
 
@@ -42,12 +46,13 @@ static void fmt_time(double s, char *out, int cap) {
     if (h > 0) snprintf(out, cap, "%d:%02d:%02d", h, m, sec);
     else snprintf(out, cap, "%d:%02d", m, sec);
 }
-// HUD inferior: faixa escura + titulo + barra de progresso + tempo (+ PAUSADO).
-static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur, int paused) {
+// HUD inferior: faixa escura + titulo + barra de progresso + tempo + volume.
+static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur, int paused, int vol) {
     SDL_Color black = { 0, 0, 0, 255 };
     pfill(ren, 0, PWIN_H - 96, PWIN_W, 96, black, 150);           // faixa translucida
     if (title && title[0]) text_draw(ren, title, 60, PWIN_H - 84, PC_TEXT, 1);
-    if (paused) text_draw(ren, "PAUSADO", PWIN_W - 180, PWIN_H - 84, PC_ACC, 0);
+    char vv[24]; snprintf(vv, sizeof(vv), "%s Vol %d%%", paused ? "PAUSADO  " : "", vol);
+    text_draw(ren, vv, PWIN_W - 240, PWIN_H - 84, paused ? PC_ACC : PC_MUT, 0);
 
     int bx = 60, by = PWIN_H - 34, bw = PWIN_W - 260, bh = 6;
     pfill(ren, bx, by, bw, bh, PC_MUT, 90);                        // trilho
@@ -62,7 +67,7 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
     if (dur > 0) { fmt_time(dur, t2, sizeof(t2)); snprintf(line, sizeof(line), "%s / %s", t1, t2); }
     else snprintf(line, sizeof(line), "%s", t1);
     text_draw(ren, line, PWIN_W - 190, PWIN_H - 40, PC_MUT, 0);
-    text_draw(ren, "A pausa   L/R -+15s   B/+ volta", 60, PWIN_H - 62, PC_MUT, 0);
+    text_draw(ren, "A pausa   L/R +-10s   ZL/ZR +-60s   cima/baixo volume   B/+ volta", 60, PWIN_H - 62, PC_MUT, 0);
 }
 
 int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
@@ -149,7 +154,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     double bps = (double)ORATE * OCH * 2.0;
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
     double cur_pos = 0;
-    int running = 1, paused = 0;
+    int running = 1, paused = 0, vol = 100;
     Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     SDL_Event e;
 
@@ -168,11 +173,15 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                 hud_until = SDL_GetTicks() + 4000;
                 if (b == JOY_B || b == JOY_PLUS || b == JOY_MINUS) running = 0;
                 else if (b == JOY_A) { paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused); }
-                else if (b == JOY_R || b == JOY_L) {
-                    double t = audio_clock + (b == JOY_R ? 15 : -15);
+                else if (b == JOY_UP) { vol += 10; if (vol > 150) vol = 150; }
+                else if (b == JOY_DOWN) { vol -= 10; if (vol < 0) vol = 0; }
+                else if (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL) {
+                    double step = (b == JOY_ZR || b == JOY_ZL) ? 60 : 10;
+                    double t = audio_clock + ((b == JOY_R || b == JOY_ZR) ? step : -step);
                     if (t < 0) t = 0;
                     if (dur > 0 && t > dur - 1) t = dur - 1;
-                    av_seek_frame(fmt, -1, (int64_t)(t * AV_TIME_BASE), (b == JOY_L) ? AVSEEK_FLAG_BACKWARD : 0);
+                    int back = (b == JOY_L || b == JOY_ZL);
+                    av_seek_frame(fmt, -1, (int64_t)(t * AV_TIME_BASE), back ? AVSEEK_FLAG_BACKWARD : 0);
                     avcodec_flush_buffers(vctx); if (actx) avcodec_flush_buffers(actx);
                     if (adev) SDL_ClearQueuedAudio(adev);
                     wall_start = av_gettime() / 1000000.0 - t; audio_clock = t; cur_pos = t;
@@ -183,7 +192,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         if (paused) {   // continua desenhando (quadro congelado + HUD)
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, NULL, &dst);
-            draw_hud(ren, title, cur_pos, dur, 1);
+            draw_hud(ren, title, cur_pos, dur, 1, vol);
             SDL_RenderPresent(ren);
             SDL_Delay(30);
             continue;
@@ -202,6 +211,10 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     int os = swr_get_out_samples(swr, frame->nb_samples);
                     if (av_samples_alloc(&ob, NULL, OCH, os, AV_SAMPLE_FMT_S16, 0) >= 0) {
                         int n = swr_convert(swr, &ob, os, (const uint8_t **)frame->data, frame->nb_samples);
+                        if (n > 0 && vol != 100) {   // aplica o volume nas amostras S16
+                            int16_t *sm = (int16_t *)ob; int cnt = n * OCH;
+                            for (int i = 0; i < cnt; i++) { int v = sm[i] * vol / 100; sm[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v); }
+                        }
                         if (n > 0 && adev) SDL_QueueAudio(adev, ob, n * OCH * 2);
                     }
                     av_freep(&ob);
@@ -221,7 +234,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                     SDL_RenderCopy(ren, tex, NULL, &dst);
-                    if (paused || SDL_GetTicks() < hud_until) draw_hud(ren, title, cur_pos, dur, 0);
+                    if (paused || SDL_GetTicks() < hud_until) draw_hud(ren, title, cur_pos, dur, 0, vol);
                     SDL_RenderPresent(ren);
                 }
             }
