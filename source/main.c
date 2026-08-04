@@ -575,14 +575,34 @@ static void draw_search(void) {
 }
 
 // ------------------------------------------------------------- render: serie
-static cJSON *season_arr(void) {
-    cJSON *seasons = g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL;
-    if (!seasons) return NULL;
-    return cJSON_GetArrayItem(seasons, g_seasonIdx);
+// A obra pode ter temporadas AGRUPADAS (season_group = series-irmas por group_key,
+// ex.: Grand Blue T1/T2/T3) e versoes de audio (Legendado/Dublado). Unificamos:
+// se agrupado, L/R troca de temporada CARREGANDO a serie-irma; senao, troca a
+// temporada interna (seasons).
+static cJSON *ser_obj(void) { return g_ser ? cJSON_GetObjectItem(g_ser, "series") : NULL; }
+static cJSON *ser_group(void) { return cJSON_GetObjectItem(ser_obj(), "season_group"); }
+static cJSON *ser_audio(void) { return cJSON_GetObjectItem(ser_obj(), "audio_versions"); }
+static cJSON *seasons_obj(void) { return g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL; }
+static cJSON *season_arr(void) { return cJSON_GetArrayItem(seasons_obj(), g_seasonIdx); }
+static int season_count(void) { cJSON *s = seasons_obj(); return s ? cJSON_GetArraySize(s) : 0; }
+static int ser_grouped(void) { return arr_len(ser_group()) > 1; }
+static int ser_group_idx(void) {
+    cJSON *g = ser_group(); int sid = jint(ser_obj(), "id"), k = 0, i = 0; cJSON *e;
+    cJSON_ArrayForEach(e, g) { if (jint(e, "id") == sid) { k = i; break; } i++; }
+    return k;
 }
-static int season_count(void) {
-    cJSON *seasons = g_ser ? cJSON_GetObjectItem(g_ser, "seasons") : NULL;
-    return seasons ? cJSON_GetArraySize(seasons) : 0;
+static int ser_nseasons(void) { return ser_grouped() ? arr_len(ser_group()) : season_count(); }
+// episodios visiveis: agrupado -> junta as temporadas internas (em geral 1);
+// senao -> a temporada interna selecionada.
+static int ser_nep(void) {
+    if (!ser_grouped()) return arr_len(season_arr());
+    cJSON *arr; int n = 0; cJSON_ArrayForEach(arr, seasons_obj()) n += arr_len(arr);
+    return n;
+}
+static cJSON *ser_ep_at(int idx) {
+    if (!ser_grouped()) return cJSON_GetArrayItem(season_arr(), idx);
+    cJSON *arr; cJSON_ArrayForEach(arr, seasons_obj()) { int k = arr_len(arr); if (idx < k) return cJSON_GetArrayItem(arr, idx); idx -= k; }
+    return NULL;
 }
 static const char *ep_clean(const char *t) {
     if (t && t[0] == 'T') {
@@ -593,14 +613,13 @@ static const char *ep_clean(const char *t) {
     return t ? t : "Episodio";
 }
 static void draw_series(void) {
-    cJSON *s = g_ser ? cJSON_GetObjectItem(g_ser, "series") : NULL;
+    cJSON *s = ser_obj();
     int sid = jint(s, "id");
     int fav = is_fav_series(sid);
     fill_rect(0, 0, WIN_W, 66, C_BAR);
     text_draw(gRen, "< (B) voltar", 40, 22, C_MUT, 0);
     const char *title = jstr(s, "title"); if (!title) title = "Serie";
     text_clip(title, 200, 16, C_TEXT, 1, WIN_W - 420);
-    // botao favoritar (X)
     fill_rect(WIN_W - 300, 14, 260, 40, fav ? C_ROSE : C_CARD);
     text_draw(gRen, fav ? "* Na Minha lista (X)" : "+ Minha lista (X)", WIN_W - 288, 22, C_TEXT, 0);
 
@@ -619,27 +638,52 @@ static void draw_series(void) {
     char epc[48]; snprintf(epc, sizeof(epc), "%d episodios", jint(s, "episode_count"));
     text_clip(epc, LX, 486, C_MUT, 0, LW);
 
+    // versoes de audio (Legendado/Dublado) - troca com Y
+    cJSON *au = ser_audio();
+    if (arr_len(au) > 1) {
+        text_draw(gRen, "Audio (Y):", LX, 520, C_MUT, 0);
+        int axx = LX; cJSON *av;
+        cJSON_ArrayForEach(av, au) {
+            int cur = cJSON_IsTrue(cJSON_GetObjectItem(av, "current"));
+            const char *lb = jstr(av, "label"); if (!lb) lb = "?";
+            int w = text_draw(gRen, lb, axx, 548, cur ? C_TEXT : C_MUT, 0);
+            if (cur) fill_rect(axx, 570, w, 3, C_ACC);
+            axx += w + 20;
+        }
+    }
+
     int RX = 300, REND = WIN_W - 40;
-    cJSON *sa = season_arr();
-    int nsea = season_count(), nep = arr_len(sa);
-    char sh[48]; snprintf(sh, sizeof(sh), "Temporada %s", (sa && sa->string) ? sa->string : "1");
+    int grouped = ser_grouped();
+    int nsea = ser_nseasons(), nep = ser_nep();
+    char sh[64];
+    if (grouped) snprintf(sh, sizeof(sh), "Temporada %d de %d", ser_group_idx() + 1, nsea);
+    else { cJSON *sa = season_arr(); snprintf(sh, sizeof(sh), "Temporada %s", (sa && sa->string) ? sa->string : "1"); }
     text_draw(gRen, sh, RX, 100, C_ACC, 1);
-    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R troca temporada  (%d)", nsea); text_draw(gRen, hint, RX + 260, 108, C_MUT, 0); }
+    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R troca temporada  (%d)", nsea); text_draw(gRen, hint, RX + 300, 108, C_MUT, 0); }
     fill_rect(RX, 148, REND - RX, 2, C_CARD);
 
     int listTop = 168, rowH = 40, visible = (WIN_H - listTop - 44) / rowH;
     if (g_epSel < g_epScroll) g_epScroll = g_epSel;
     if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
     for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
-        cJSON *ep = cJSON_GetArrayItem(sa, i);
+        cJSON *ep = ser_ep_at(i);
         int yy = listTop + (i - g_epScroll) * rowH;
         if (i == g_epSel) fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD);
         int en = jint(ep, "episode"); char nb[10]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
-        text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : C_MUT, 0);
-        text_clip(ep_clean(jstr(ep, "title")), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 60);
+        int done = cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed"));
+        text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : (done ? C_GREEN : C_MUT), 0);
+        text_clip(ep_clean(jstr(ep, "title")), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 110);
+        if (done) text_draw(gRen, "visto", REND - 60, yy, C_GREEN, 0);
     }
-    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", RX, listTop, C_MUT, 0);
-    text_draw(gRen, "cima/baixo navega   -   A assistir   -   X favoritar", RX, WIN_H - 36, C_MUT, 0);
+    // barra de rolagem (ha muitos episodios)
+    if (nep > visible) {
+        int trkH = visible * rowH, thumbH = trkH * visible / nep;
+        int thumbY = listTop + (trkH - thumbH) * g_epScroll / (nep - visible);
+        fill_rect(REND + 8, listTop, 4, trkH, C_CARD);
+        fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
+    }
+    if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
+    text_draw(gRen, "cima/baixo (segure p/ rolar)   A assistir   X lista", RX, WIN_H - 36, C_MUT, 0);
 }
 
 // ------------------------------------------------------------- render: downloads
@@ -771,16 +815,24 @@ static void input_search(int b) {
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
 static void input_series(int b) {
-    cJSON *sa = season_arr();
-    int nep = arr_len(sa);
+    int nep = ser_nep();
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; }
-    else if (b == JOY_Y) { do_search(); }
-    else if (b == JOY_X) { cJSON *s = g_ser ? cJSON_GetObjectItem(g_ser, "series") : NULL; if (s) toggle_fav_series(jint(s, "id")); }
+    else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
+    else if (b == JOY_Y) {   // troca a versao de audio (Legendado <-> Dublado)
+        cJSON *au = ser_audio();
+        if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
+    }
     else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
     else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
-    else if (b == JOY_L || b == JOY_ZL) { if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; } }
-    else if (b == JOY_R || b == JOY_ZR) { if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; } }
-    else if (b == JOY_A) { cJSON *ep = cJSON_GetArrayItem(sa, g_epSel); if (ep) resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title"))); }
+    else if (b == JOY_L || b == JOY_ZL) {
+        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
+        else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
+    }
+    else if (b == JOY_R || b == JOY_ZR) {
+        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
+        else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
+    }
+    else if (b == JOY_A) { cJSON *ep = ser_ep_at(g_epSel); if (ep) resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title"))); }
 }
 static void input_downloads(int b) {
     cJSON *jobs = dl_jobs();
@@ -836,6 +888,30 @@ static void run_update(void) {
     }
 }
 
+// Roteia um botao para a tela atual. Usado pelos eventos E pelo auto-repeat
+// (segurar o D-pad). g_running/g_hold_* controlam o loop e a repeticao.
+static int g_running = 1;
+static int g_hold_btn = -1;
+static Uint32 g_hold_next = 0;
+static void handle_button(int b) {
+    if (g_screen == SC_LOGIN) {
+        if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
+        else if (b == JOY_PLUS) g_running = 0;
+    } else if (g_screen == SC_MAIN) {
+        if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
+        else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
+        else if (b == JOY_PLUS) g_running = 0;
+        else if (b == JOY_Y) do_search();
+        else if (g_tab == TAB_CONFIG) input_settings(b);
+        else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
+        else input_landing(b);
+    } else if (g_screen == SC_SERIES) {
+        input_series(b);
+    } else if (g_screen == SC_SEARCH) {
+        input_search(b);
+    }
+}
+
 // ------------------------------------------------------------- main
 int main(int argc, char **argv) {
     update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
@@ -859,29 +935,21 @@ int main(int argc, char **argv) {
     store_load_user(g_user, sizeof(g_user));
     if (g_token[0]) { load_favs(); g_screen = SC_MAIN; enter_tab(0); }
 
-    int running = 1;
-    while (appletMainLoop() && running) {
+    while (appletMainLoop() && g_running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) { running = 0; break; }
+            if (e.type == SDL_QUIT) { g_running = 0; break; }
             if (e.type != SDL_JOYBUTTONDOWN) continue;
             int b = e.jbutton.button;
-            if (g_screen == SC_LOGIN) {
-                if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
-                else if (b == JOY_PLUS) running = 0;
-            } else if (g_screen == SC_MAIN) {
-                if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
-                else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
-                else if (b == JOY_PLUS) running = 0;
-                else if (b == JOY_Y) do_search();
-                else if (g_tab == TAB_CONFIG) input_settings(b);
-                else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
-                else input_landing(b);
-            } else if (g_screen == SC_SERIES) {
-                input_series(b);
-            } else if (g_screen == SC_SEARCH) {
-                input_search(b);
-            }
+            handle_button(b);
+            g_hold_btn = b; g_hold_next = SDL_GetTicks() + 380;   // arma o auto-repeat
+        }
+        // segurar o D-pad rola rapido (episodios longos, grades, trilhos)
+        if (g_joy && (g_hold_btn == JOY_UP || g_hold_btn == JOY_DOWN || g_hold_btn == JOY_DLEFT || g_hold_btn == JOY_DRIGHT)) {
+            if (SDL_JoystickGetButton(g_joy, g_hold_btn)) {
+                Uint32 now = SDL_GetTicks();
+                if (now >= g_hold_next) { handle_button(g_hold_btn); g_hold_next = now + 55; }
+            } else g_hold_btn = -1;
         }
 
         // destaque rotativo nas abas 0..4 (a cada ~6s)
