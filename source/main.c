@@ -238,7 +238,7 @@ static Screen g_screen = SC_LOGIN;
 #define TAB_HOME 0
 #define TAB_DOWNLOADS 5
 #define NTABS 6
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Baixados" };
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Salvos" };
 static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
@@ -419,7 +419,7 @@ static int resolve_and_play(int itemId, const char *title) {
     int rc = 0;
     if (container && !strcmp(container, "torrent")) {
         accel_start(itemId);
-        toast("Baixando no servidor - veja em Baixados");
+        toast("Salvando na sua conta (no servidor) - veja em Salvos");
         g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
     } else if (container && !strcmp(container, "embed")) {
         toast("Este conteudo (embed) ainda nao toca no Switch");
@@ -738,7 +738,7 @@ static void draw_series(void) {
         fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    text_draw(gRen, "A assistir  L/R temporada  Y baixar  X lista  ZL/ZR audio", RX, WIN_H - 36, C_MUT, 0);
+    text_draw(gRen, "A assistir  L/R temporada  Y salvar na conta  X lista  ZL/ZR audio", RX, WIN_H - 36, C_MUT, 0);
 }
 
 // Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
@@ -750,7 +750,7 @@ static void open_dlmenu(void) {
 }
 static void draw_dlmenu(void) {
     fill_rect(0, 0, WIN_W, 66, C_BAR);
-    text_draw(gRen, "Baixar episodios", 40, 20, C_TEXT, 1);
+    text_draw(gRen, "Salvar na conta (fica no servidor, pronto pra assistir)", 40, 20, C_TEXT, 1);
     cJSON *s = ser_obj(); const char *title = jstr(s, "title");
     if (title) text_clip(title, 320, 22, C_MUT, 0, WIN_W - 360);
     int n = ser_nep(), cnt = 0;
@@ -769,7 +769,7 @@ static void draw_dlmenu(void) {
         text_draw(gRen, nb, 86, yy, sel ? C_ACC : C_MUT, 0);
         text_clip(ep_clean(jstr(ep, "title")), 170, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 240);
     }
-    char foot[110]; snprintf(foot, sizeof(foot), "%d selecionado(s)   -   A marca   X todos   Y baixa selecionados   B cancela", cnt);
+    char foot[110]; snprintf(foot, sizeof(foot), "%d selecionado(s)   -   A marca   X todos   Y salva selecionados   B cancela", cnt);
     text_draw(gRen, foot, 40, WIN_H - 40, C_MUT, 0);
 }
 static void input_dlmenu(int b) {
@@ -795,7 +795,7 @@ static void input_dlmenu(int b) {
         k += snprintf(body + k, sizeof(body) - k, "]}");
         if (cnt == 0) { toast("Selecione ao menos um episodio (A)"); return; }
         api_send("/api/accel/download-batch", "POST", body);
-        char m[64]; snprintf(m, sizeof(m), "%d episodio(s) enviados pra baixar", cnt);
+        char m[64]; snprintf(m, sizeof(m), "%d episodio(s) salvos na sua conta", cnt);
         toast(m); g_dlmenu = 0; g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
     }
 }
@@ -803,14 +803,14 @@ static void input_dlmenu(int b) {
 // ------------------------------------------------------------- render: downloads
 // Vista 1: GRADE de capas, uma por obra (serie agrupada / filme avulso).
 static void draw_dl_grid(void) {
-    text_draw(gRen, "Baixados", 40, 84, C_TEXT, 1);
+    text_draw(gRen, "Salvos na sua conta", 40, 78, C_TEXT, 1);
+    text_draw(gRen, "(ficam no servidor - assiste de qualquer aparelho, sem ocupar o Switch)", 40, 108, C_MUT, 0);
     if (g_dlgN == 0) {
-        text_draw(gRen, "Nenhum download ainda.", 40, 140, C_MUT, 0);
-        text_draw(gRen, "Abra um filme, serie ou anime e baixe: A no filme, ou Y numa serie", 40, 172, C_MUT, 0);
-        text_draw(gRen, "pra escolher os episodios. Aparecem aqui, por obra.", 40, 200, C_MUT, 0);
+        text_draw(gRen, "Nada salvo ainda.", 40, 152, C_MUT, 0);
+        text_draw(gRen, "Abra um filme e A, ou Y numa serie pra escolher os episodios.", 40, 184, C_MUT, 0);
         return;
     }
-    int top = 116;
+    int top = 138;
     for (int i = 0; i < g_dlgN; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -824,7 +824,7 @@ static void draw_dl_grid(void) {
         for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
         char badge[32];
         if (g_dlg[i].isMovie) { if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
-        else snprintf(badge, sizeof(badge), baixando ? "%d ep - baixando" : "%d ep", nJobs);
+        else snprintf(badge, sizeof(badge), baixando ? "%d ep - salvando" : "%d ep", nJobs);
         fill_rect(x, yy + GCOVERH - 26, GCOVERW, 26, C_BAR);
         text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
         const char *title = jstr(j0, "title"); if (!title) title = "";
@@ -864,7 +864,7 @@ static void draw_dl_detail(void) {
         char st[40];
         if (ready) snprintf(st, sizeof(st), "PRONTO");
         else if (erro) snprintf(st, sizeof(st), "ERRO");
-        else snprintf(st, sizeof(st), "baixando %d%%", pct);
+        else snprintf(st, sizeof(st), "salvando %d%%", pct);
         text_draw(gRen, st, WIN_W - 260, yy, ready ? C_GREEN : (erro ? C_ROSE : C_ACC), 0);
         int bx = WIN_W - 260, by = yy + 24, bw = 200, bh = 5;
         fill_rect(bx, by, bw, bh, C_BAR);
@@ -1006,7 +1006,7 @@ static void input_downloads(int b) {
             int idx = g_dlDetSel;
             while (idx < g_dlg[g].nJobs) {
                 cJSON *j = dlg_job(g, idx);
-                if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda baixando..."); break; }
+                if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda salvando..."); break; }
                 g_dlDetSel = idx;
                 if (dl_play(j) != 1) break;
                 idx++;
@@ -1023,16 +1023,16 @@ static void input_downloads(int b) {
     else if (b == JOY_DRIGHT) { if (g_dlSel + 1 < n) g_dlSel++; }
     else if (b == JOY_A) {
         if (g_dlSel < n) {
-            if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda baixando..."); }
+            if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda salvando..."); }
             else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; load_dl_done(jint(dlg_job(g_dlSel, 0), "series_id")); }
         }
     }
     else if (b == JOY_X) {   // remove a obra inteira
         if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
     }
-    int row = g_dlSel / GCOLS, rowTop = 116 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    int row = g_dlSel / GCOLS, rowTop = 138 + row * (GCH + GGAP), rowBot = rowTop + GCH;
     if (rowBot - g_dlScroll > WIN_H) g_dlScroll = rowBot - WIN_H + 16;
-    if (rowTop - g_dlScroll < 116) g_dlScroll = rowTop - 116;
+    if (rowTop - g_dlScroll < 138) g_dlScroll = rowTop - 138;
     if (g_dlScroll < 0) g_dlScroll = 0;
 }
 
@@ -1053,8 +1053,8 @@ static void draw_settings(void) {
     char u[180]; snprintf(u, sizeof(u), "Conta: %s", g_user[0] ? g_user : "-");
     text_draw(gRen, u, 40, 122, C_MUT, 0);
     text_draw(gRen, BASE, 40, 152, C_MUT, 0);
-    // onde os downloads ficam salvos + uso de disco
-    text_draw(gRen, "Downloads (salvos no servidor / Pi):", 40, 200, C_TEXT, 0);
+    // onde os arquivos salvos ficam + uso de disco
+    text_draw(gRen, "Arquivos salvos (ficam no servidor, nao no Switch):", 40, 200, C_TEXT, 0);
     if (g_accel_status) {
         cJSON *up = cJSON_GetObjectItem(g_accel_status, "used_bytes");
         cJSON *cp = cJSON_GetObjectItem(g_accel_status, "cap_bytes");
@@ -1062,7 +1062,7 @@ static void draw_settings(void) {
         const char *path = jstr(g_accel_status, "path");
         char pl[220]; snprintf(pl, sizeof(pl), "Pasta: %s", path ? path : "-");
         text_clip(pl, 40, 230, C_MUT, 0, WIN_W - 80);
-        char sl[140]; snprintf(sl, sizeof(sl), "Uso: %.1f GB de %.0f GB   -   %d download(s)   (pastas: Filmes/Series/Animes/Doramas)", used / 1e9, cap / 1e9, jint(g_accel_status, "count"));
+        char sl[140]; snprintf(sl, sizeof(sl), "Uso: %.1f GB de %.0f GB   -   %d item(ns) salvos   (pastas: Filmes/Series/Animes/Doramas)", used / 1e9, cap / 1e9, jint(g_accel_status, "count"));
         text_clip(sl, 40, 258, C_MUT, 0, WIN_W - 80);
         int bw = 500, fw = cap > 0 ? (int)(bw * used / cap) : 0; if (fw > bw) fw = bw; if (fw < 0) fw = 0;
         fill_rect(40, 288, bw, 10, C_BAR); fill_rect(40, 288, fw, 10, C_ACC2);
