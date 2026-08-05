@@ -81,9 +81,12 @@ static const char *stream_lang(AVFormatContext *fmt, int idx) {
     AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
     return (e && e->value) ? e->value : "und";
 }
-// (re)abre o decoder de audio + resample p/ o stream aidx. Fecha o anterior.
+// (re)abre SÓ o decoder de audio p/ o stream aidx (fecha o anterior). O resample
+// (swr) é montado no loop a partir dos parametros REAIS do frame — importante pra
+// HE-AAC e fontes que nao sao 48kHz (senao o audio sai errado e o video trava).
 static int open_audio_dec(AVFormatContext *fmt, int aidx, AVCodecContext **pactx, struct SwrContext **pswr, int OCH, int ORATE) {
-    if (*pswr) swr_free(pswr);
+    (void)OCH; (void)ORATE;
+    if (*pswr) swr_free(pswr);       // vira NULL -> o loop reconstroi
     if (*pactx) avcodec_free_context(pactx);
     if (aidx < 0) return -1;
     AVCodecParameters *apar = fmt->streams[aidx]->codecpar;
@@ -92,11 +95,7 @@ static int open_audio_dec(AVFormatContext *fmt, int aidx, AVCodecContext **pactx
     AVCodecContext *actx = avcodec_alloc_context3(adec);
     avcodec_parameters_to_context(actx, apar);
     if (avcodec_open2(actx, adec, NULL) != 0) { avcodec_free_context(&actx); return -1; }
-    AVChannelLayout outl; av_channel_layout_default(&outl, OCH);
-    struct SwrContext *swr = NULL;
-    if (swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE, &actx->ch_layout, actx->sample_fmt, actx->sample_rate, 0, NULL) == 0)
-        swr_init(swr);
-    *pactx = actx; *pswr = swr;
+    *pactx = actx;
     return 0;
 }
 // (re)abre o decoder de legenda p/ o stream sidx (-1 = desliga).
@@ -235,6 +234,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0;
+    int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
     Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     SDL_Event e;
 
@@ -309,6 +309,19 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         if (aidx >= 0 && pkt->stream_index == aidx && actx) {
             if (avcodec_send_packet(actx, pkt) == 0) {
                 while (avcodec_receive_frame(actx, frame) == 0) {
+                    // (re)configura o resample conforme os parametros REAIS do frame
+                    // (HE-AAC/SBR pode mudar a taxa; fontes 44.1kHz precisam disto).
+                    int fr = frame->sample_rate, ff = frame->format, fc = frame->ch_layout.nb_channels;
+                    if (!swr || fr != swr_rate || ff != swr_fmt || fc != swr_ch) {
+                        if (swr) swr_free(&swr);
+                        AVChannelLayout outl; av_channel_layout_default(&outl, OCH);
+                        AVChannelLayout inl; av_channel_layout_default(&inl, 2);
+                        const AVChannelLayout *pin = (fc > 0) ? &frame->ch_layout : &inl;
+                        if (swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE, pin, ff, fr > 0 ? fr : ORATE, 0, NULL) == 0)
+                            swr_init(swr);
+                        swr_rate = fr; swr_fmt = ff; swr_ch = fc;
+                    }
+                    if (!swr) continue;
                     if (frame->pts != AV_NOPTS_VALUE) audio_clock = frame->pts * av_q2d(atb);
                     uint8_t *ob = NULL;
                     int os = swr_get_out_samples(swr, frame->nb_samples);
