@@ -245,6 +245,10 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         wall_start = av_gettime() / 1000000.0 - start_sec;
     }
 
+    // Impede o Switch de escurecer/dormir enquanto o video toca (sem input o
+    // console apagaria a tela). So durante a reproducao; nos menus deixa dormir.
+    appletSetMediaPlaybackState(true);
+
     while (running) {
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
@@ -359,6 +363,8 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
 
     if (out_pos) *out_pos = cur_pos;
     if (out_dur) *out_dur = dur;
+
+    appletSetMediaPlaybackState(false);   // volta ao normal (pode dormir de novo)
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);
