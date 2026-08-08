@@ -232,6 +232,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     AVRational atb = (aidx >= 0) ? fmt->streams[aidx]->time_base : (AVRational){1, ORATE};
     double bps = (double)ORATE * OCH * 2.0;
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
+    double last_ac = -1, last_ac_wall = av_gettime() / 1000000.0;  // detecta audio travado
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0;
     int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
@@ -340,11 +341,17 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
             if (avcodec_send_packet(vctx, pkt) == 0) {
                 while (avcodec_receive_frame(vctx, frame) == 0) {
                     double vpts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(vtb) : 0;
-                    double master = adev ? (audio_clock - SDL_GetQueuedAudioSize(adev) / bps)
-                                         : (av_gettime() / 1000000.0 - wall_start);
+                    double now = av_gettime() / 1000000.0;
+                    // Se o relogio de AUDIO parou de avancar (decode travando), o video
+                    // NAO fica esperando: segue pelo relogio de parede (nao congela).
+                    if (audio_clock != last_ac) { last_ac = audio_clock; last_ac_wall = now; }
+                    int audio_ok = adev && (now - last_ac_wall < 0.7);
+                    double master;
+                    if (audio_ok) { master = audio_clock - SDL_GetQueuedAudioSize(adev) / bps; wall_start = now - master; }
+                    else master = now - wall_start;   // audio travado / sem audio: video toca sozinho
                     cur_pos = master;
                     double delay = vpts - master;
-                    if (delay > 0.001) { if (delay > 0.4) delay = 0.4; SDL_Delay((Uint32)(delay * 1000)); }
+                    if (delay > 0.001) { if (delay > 0.35) delay = 0.35; SDL_Delay((Uint32)(delay * 1000)); }
                     AVFrame *u = frame;
                     if (sws) { sws_scale(sws, (const uint8_t * const *)frame->data, frame->linesize, 0, vh, yuv->data, yuv->linesize); u = yuv; }
                     SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
