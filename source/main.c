@@ -21,87 +21,24 @@
 #define WIN_W 1280
 #define WIN_H 720
 
-#define JOY_A 0
-#define JOY_B 1
-#define JOY_X 2
-#define JOY_Y 3
-#define JOY_L 6
-#define JOY_R 7
-#define JOY_PLUS 10
-#define JOY_MINUS 11
-#define JOY_DLEFT 12
-#define JOY_UP 13
-#define JOY_DRIGHT 14
-#define JOY_DOWN 15
-#define JOY_ZL 8
-#define JOY_ZR 9
+
 
 static const char *BASE = "https://nplay.tonserverlocal.uk";
 
-static SDL_Renderer *gRen = NULL;
+SDL_Renderer *gRen = NULL;
 static SDL_Joystick *g_joy = NULL;
 static char g_token[640] = {0};
 static char g_status[160] = {0};
-static Uint32 g_toast_until = 0;
-static char g_toast[160] = {0};
+Uint32 g_toast_until = 0;
+char g_toast[160] = {0};
 static char g_self_path[600] = {0};
 static char g_user[128] = {0};
 static int g_do_update = 0;
 
-static const SDL_Color C_BG   = {  8, 10, 15, 255 };
-static const SDL_Color C_BAR  = { 12, 15, 23, 255 };
-static const SDL_Color C_CARD = { 20, 24, 36, 255 };
-static const SDL_Color C_TEXT = { 234, 240, 250, 255 };
-static const SDL_Color C_MUT  = { 139, 150, 173, 255 };
-static const SDL_Color C_ACC  = { 139, 92, 246, 255 };
-static const SDL_Color C_ACC2 = { 59, 130, 246, 255 };
-static const SDL_Color C_ROSE = { 251, 113, 133, 255 };
-static const SDL_Color C_GREEN= { 52, 211, 153, 255 };
+#include "ui.h"
+#include "screen_movie.h"
 
-// ------------------------------------------------------------- helpers
-static void fill_rect(int x, int y, int w, int h, SDL_Color c) {
-    SDL_SetRenderDrawColor(gRen, c.r, c.g, c.b, c.a);
-    SDL_Rect r = { x, y, w, h };
-    SDL_RenderFillRect(gRen, &r);
-}
-static void border_rect(int x, int y, int w, int h, int th, SDL_Color c) {
-    fill_rect(x, y, w, th, c);
-    fill_rect(x, y + h - th, w, th, c);
-    fill_rect(x, y, th, h, c);
-    fill_rect(x + w - th, y, th, h, c);
-}
-static void toast(const char *msg) {
-    strncpy(g_toast, msg, sizeof(g_toast) - 1);
-    g_toast[sizeof(g_toast) - 1] = '\0';
-    g_toast_until = SDL_GetTicks() + 2600;
-}
-static void short_title(const char *title, char *out, int cap) {
-    int k = 0;
-    for (const char *p = title; *p && k < cap - 1; p++, k++) out[k] = *p;
-    out[k] = '\0';
-    if (k >= cap - 1 && k >= 2) { out[k - 2] = '.'; out[k - 1] = '.'; }
-}
-// Desenha texto recortado a uma largura (evita vazar pro card/coluna vizinha).
-static void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw) {
-    SDL_Rect clip = { x, y - 3, maxw, big ? 40 : 30 };
-    SDL_RenderSetClipRect(gRen, &clip);
-    text_draw(gRen, s, x, y, c, big);
-    SDL_RenderSetClipRect(gRen, NULL);
-}
-static int prompt_text(const char *guide, char *out, size_t cap, int password) {
-    SwkbdConfig kbd;
-    if (R_FAILED(swkbdCreate(&kbd, 0))) return -1;
-    swkbdConfigMakePresetDefault(&kbd);
-    swkbdConfigSetGuideText(&kbd, guide);
-    swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
-    if (password) swkbdConfigSetPasswordFlag(&kbd, 1);
-    out[0] = '\0';
-    Result rc = swkbdShow(&kbd, out, cap);
-    swkbdClose(&kbd);
-    if (R_FAILED(rc)) return -1;
-    return out[0] ? 0 : -2;
-}
-static cJSON *api_get(const char *path) {
+cJSON *api_get(const char *path) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
@@ -113,7 +50,7 @@ static cJSON *api_get(const char *path) {
     return j;
 }
 // POST/DELETE simples (retorna o codigo HTTP). Body padrao "{}" evita 415.
-static long api_send(const char *path, const char *method, const char *body) {
+long api_send(const char *path, const char *method, const char *body) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
@@ -122,15 +59,15 @@ static long api_send(const char *path, const char *method, const char *body) {
     membuf_free(&out);
     return code;
 }
-static const char *jstr(cJSON *o, const char *k) {
-    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+const char *jstr(cJSON *o, const char *k) {
+    cJSON *v = o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
     return (v && v->valuestring) ? v->valuestring : NULL;
 }
-static int jint(cJSON *o, const char *k) {
-    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+int jint(cJSON *o, const char *k) {
+    cJSON *v = o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
     return v ? v->valueint : 0;
 }
-static int arr_len(cJSON *a) { return cJSON_IsArray(a) ? cJSON_GetArraySize(a) : 0; }
+int arr_len(cJSON *a) { return cJSON_IsArray(a) ? cJSON_GetArraySize(a) : 0; }
 
 // ============================================================= capas (threads)
 // state: 0 novo, 1 na fila/baixando, 2 surface pronta (main cria textura), 3 feito
@@ -143,7 +80,7 @@ static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0;
 static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
 static int g_run = 1;
 
-static SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
+SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     if (!url || !url[0]) return NULL;
     SDL_LockMutex(g_cov_mtx);
     int f = -1;
@@ -230,8 +167,7 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
 }
 
 // ============================================================= estado / telas
-typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES, SC_SEARCH, SC_CONFIG } Screen;
-static Screen g_screen = SC_LOGIN;
+Screen g_screen = SC_LOGIN;
 
 // Config saiu da barra de abas -> abre pelo botao (-). Assim L a partir do
 // Inicio ja cai em Baixados (ultima aba).
@@ -287,12 +223,12 @@ static void load_downloads(void);
 static void accel_start(int itemId);
 static void do_search(void);
 static void open_series(int id);
-static int resolve_and_play(int itemId, const char *title);
+int resolve_and_play(int itemId, const char *title);
 static int play_with_progress(int itemId, const char *title, const char *url);
 
 // ------------------------------------------------------------- favoritos
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
-static int is_fav_item(int id) { return idx_of(g_favItem, g_favItemN, id) >= 0; }
+
 static int is_fav_series(int id) { return idx_of(g_favSeries, g_favSeriesN, id) >= 0; }
 static void load_favs(void) {
     g_favItemN = g_favSeriesN = 0;
@@ -307,7 +243,8 @@ static void load_favs(void) {
     }
     cJSON_Delete(j);
 }
-static void toggle_fav_item(int id) {
+int is_fav_item(int id) { return idx_of(g_favItem, g_favItemN, id) >= 0; }
+void toggle_fav_item(int id) {
     char body[48]; snprintf(body, sizeof(body), "{\"item_id\":%d}", id);
     int i = idx_of(g_favItem, g_favItemN, id);
     if (i >= 0) { api_send("/api/sync/favorites", "DELETE", body); g_favItem[i] = g_favItem[--g_favItemN]; toast("Removido da Minha lista"); }
@@ -400,7 +337,7 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
 
 // Resolve a fonte e reproduz. Link direto (anime/dorama) toca na hora; torrent
 // (filme/serie) manda pro acelerador do servidor e abre a aba Baixados.
-static int resolve_and_play(int itemId, const char *title) {
+int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
     SDL_RenderPresent(gRen);
@@ -444,7 +381,10 @@ static void open_item(cJSON *item, int is_series) {
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
     if (is_series) open_series(id);
-    else resolve_and_play(id, jstr(item, "title"));
+    else {
+        if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
+        else toast("Falha ao carregar info do filme");
+    }
 }
 
 // ------------------------------------------------------------- downloads (acelerador)
@@ -1145,6 +1085,8 @@ static void handle_button(int b) {
         input_search(b);
     } else if (g_screen == SC_CONFIG) {
         input_settings(b);
+    } else if (g_screen == SC_MOVIE) {
+        input_movie(b);
     }
 }
 
@@ -1208,6 +1150,7 @@ int main(int argc, char **argv) {
         SDL_RenderClear(gRen);
         if (g_screen == SC_LOGIN) draw_login();
         else if (g_screen == SC_CONFIG) draw_settings();
+        else if (g_screen == SC_MOVIE) draw_movie();
         else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
         else if (g_screen == SC_SEARCH) draw_search();
         else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }

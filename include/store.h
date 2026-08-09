@@ -8,6 +8,12 @@ int  store_load_token(char *out, size_t cap);
 void store_save_token(const char *token);
 void store_clear_token(void);
 
+int  store_load_pref_audio(char *out, size_t cap);
+void store_save_pref_audio(const char *lang);
+
+int  store_load_pref_sub(char *out, size_t cap);
+void store_save_pref_sub(const char *lang);
+
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);
 
