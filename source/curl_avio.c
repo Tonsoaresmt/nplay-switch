@@ -16,9 +16,9 @@
 #include <strings.h>
 #include <stdio.h>
 
-#define BLOCK   (1024 * 1024)          // cada busca da thread
+#define BLOCK   (4 * 1024 * 1024)      // cada busca da thread (aumentado para 4MB)
 #define TMPCAP  (BLOCK + 65536)
-#define RINGCAP (16 * 1024 * 1024)     // ~16MB de leitura antecipada
+#define RINGCAP (32 * 1024 * 1024)     // ~32MB de leitura antecipada
 
 typedef struct {
     CURL *easy;
@@ -125,7 +125,15 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
     SDL_LockMutex(c->mtx);
     while (c->count == 0 && !c->eof && !c->err && c->running)
         SDL_CondWaitTimeout(c->c_data, c->mtx, 300);
-    if (c->count == 0) { int eof = c->eof; SDL_UnlockMutex(c->mtx); return eof ? AVERROR_EOF : AVERROR(EIO); }
+    if (c->count == 0) {
+        if (c->running && !c->err && !c->eof) {
+            SDL_UnlockMutex(c->mtx);
+            return AVERROR(EAGAIN);
+        }
+        int eof = c->eof;
+        SDL_UnlockMutex(c->mtx);
+        return eof ? AVERROR_EOF : AVERROR(EIO);
+    }
     size_t n = c->count < (size_t)want ? c->count : (size_t)want;
     size_t first = c->ring_cap - c->head; if (first > n) first = n;
     memcpy(out, c->ring + c->head, first);
@@ -190,6 +198,9 @@ AVIOContext *nplay_curl_avio_open(const char *url) {
     curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(c->easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPIDLE, 120L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPINTVL, 60L);
     curl_easy_setopt(c->easy, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, wr_tmp);

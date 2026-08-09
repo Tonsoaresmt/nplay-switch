@@ -185,26 +185,50 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     for (int i = 0; i < naud; i++) if (aidxs[i] == best) acur = i;
     
     char pref_aud[32] = ""; store_load_pref_audio(pref_aud, sizeof(pref_aud));
-    if (pref_aud[0]) {
+    char pref_sub[32] = ""; store_load_pref_sub(pref_sub, sizeof(pref_sub));
+    int scur = -1;                       // -1 = legenda desligada
+
+    if (!pref_aud[0] && !pref_sub[0]) {
+        // --- SMART DEFAULT (PORTUGUES) ---
+        int has_pt_audio = 0;
         for (int i = 0; i < naud; i++) {
             AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
-            if (tag && strncasecmp(tag->value, pref_aud, 3) == 0) { acur = i; break; }
+            if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
+                acur = i; 
+                has_pt_audio = 1;
+                break; 
+            }
+        }
+        if (!has_pt_audio) {
+            // Se nao tem audio PT, liga a legenda PT (se existir)
+            for (int i = 0; i < nsub; i++) {
+                AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
+                if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
+                    scur = i; 
+                    break; 
+                }
+            }
+        }
+    } else {
+        // --- PREFERENCIAS SALVAS ---
+        if (pref_aud[0]) {
+            for (int i = 0; i < naud; i++) {
+                AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
+                if (tag && strncasecmp(tag->value, pref_aud, 3) == 0) { acur = i; break; }
+            }
+        }
+        if (pref_sub[0]) {
+            if (strcasecmp(pref_sub, "off") == 0) scur = -1;
+            else {
+                for (int i = 0; i < nsub; i++) {
+                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
+                    if (tag && strncasecmp(tag->value, pref_sub, 3) == 0) { scur = i; break; }
+                }
+            }
         }
     }
     
     int aidx = naud ? aidxs[acur] : -1;
-    
-    int scur = -1;                       // -1 = legenda desligada
-    char pref_sub[32] = ""; store_load_pref_sub(pref_sub, sizeof(pref_sub));
-    if (pref_sub[0]) {
-        if (strcasecmp(pref_sub, "off") == 0) scur = -1;
-        else {
-            for (int i = 0; i < nsub; i++) {
-                AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
-                if (tag && strncasecmp(tag->value, pref_sub, 3) == 0) { scur = i; break; }
-            }
-        }
-    }
     AVCodecContext *sctx = NULL;
     char sub_text[512] = ""; double sub_end = 0;
 
@@ -332,6 +356,11 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         }
 
         int ret = av_read_frame(fmt, pkt);
+        if (ret == AVERROR(EAGAIN)) {
+            // Buffer vazio e/ou timeout de rede, thread de download ainda esta trabalhando.
+            SDL_Delay(50);
+            continue;
+        }
         if (ret < 0) {  // fim do arquivo
             if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) { reached_end = 1; break; }
             SDL_Delay(40); continue;
