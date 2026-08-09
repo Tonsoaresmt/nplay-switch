@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #ifndef APP_VERSION_STR
-#define APP_VERSION_STR "0.6.1"
+#define APP_VERSION_STR "0.6.2"
 #endif
 
 #ifndef UPDATE_REPO_OWNER
@@ -31,5 +31,8 @@ struct update_info {
 };
 
 int update_check(struct update_info *info);
-int update_apply(const struct update_info *info, const char *target_path, char *err, size_t errcap);
+// Retorna quantas copias instaladas foram atualizadas (>0) ou -1 em erro.
+int update_apply(const struct update_info *info, const char *target_path,
+                 char *installed_path, size_t installed_cap,
+                 char *err, size_t errcap);
 void update_resolve_target_path(const char *argv0, char *out, size_t cap);

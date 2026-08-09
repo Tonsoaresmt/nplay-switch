@@ -24,6 +24,7 @@
 #define FITM_F   DIR_APP "/fit_modes.json"
 #define PREFA_F  DIR_APP "/pref_audio.txt"
 #define PREFS_F  DIR_APP "/pref_sub.txt"
+#define PREFV_F  DIR_APP "/player_volume.txt"
 
 static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
@@ -170,6 +171,29 @@ void store_save_pref_sub(const char *lang) {
     FILE *f = fopen(PREFS_F, "wb");
     if (!f) return;
     fwrite(lang, 1, strlen(lang), f);
+    fclose(f);
+}
+
+int store_load_player_volume(int *volume) {
+    int value;
+    FILE *f;
+    if (!volume) return 0;
+    f = fopen(PREFV_F, "rb");
+    if (!f) return 0;
+    if (fscanf(f, "%d", &value) != 1) { fclose(f); return 0; }
+    fclose(f);
+    if (value < 0 || value > 100) return 0;
+    *volume = value;
+    return 1;
+}
+
+void store_save_player_volume(int volume) {
+    FILE *f;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    f = fopen(PREFV_F, "wb");
+    if (!f) return;
+    fprintf(f, "%d", volume);
     fclose(f);
 }
 

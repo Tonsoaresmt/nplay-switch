@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include "net.h"
 #include "store.h"
 #include "text.h"
@@ -72,26 +74,57 @@ int arr_len(cJSON *a) { return cJSON_IsArray(a) ? cJSON_GetArraySize(a) : 0; }
 // ============================================================= capas (threads)
 // state: 0 novo, 1 na fila/baixando, 2 surface pronta (main cria textura), 3 feito
 #define MAX_COV 3000
-typedef struct { char url[720]; SDL_Texture *tex; SDL_Surface *surf; int state; } Cover;
+#define COVER_HASH_SIZE 8192             // potencia de 2; carga < 37% com MAX_COV
+#define MAX_COVER_TEXTURES 160           // limita memoria de GPU/heap usada pelas capas
+typedef struct {
+    char url[720];
+    SDL_Texture *tex;
+    SDL_Surface *surf;
+    int state;
+    Uint32 last_used;
+} Cover;
 static Cover g_cov[MAX_COV];
 static int g_covN = 0;
+static int g_cov_hash[COVER_HASH_SIZE];   // indice + 1; zero = slot vazio
+static int g_cov_texN = 0;
 static SDL_mutex *g_cov_mtx;
 static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0;
 static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
+static int g_ready[MAX_COV]; static int g_rh = 0, g_rt = 0;
+static SDL_mutex *g_ready_mtx;
 static int g_run = 1;
+
+static unsigned cover_hash(const char *s) {
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+// Chamado com g_cov_mtx travado. O hash evita comparar ate 3000 URLs por card/frame.
+static int cover_find_locked(const char *url, int create) {
+    unsigned slot = cover_hash(url) & (COVER_HASH_SIZE - 1);
+    for (int probe = 0; probe < COVER_HASH_SIZE; probe++) {
+        int entry = g_cov_hash[slot];
+        if (!entry) {
+            if (!create || g_covN >= MAX_COV) return -1;
+            int idx = g_covN++;
+            snprintf(g_cov[idx].url, sizeof(g_cov[idx].url), "%s", url);
+            g_cov_hash[slot] = idx + 1;
+            return idx;
+        }
+        int idx = entry - 1;
+        if (!strcmp(g_cov[idx].url, url)) return idx;
+        slot = (slot + 1) & (COVER_HASH_SIZE - 1);
+    }
+    return -1;
+}
 
 SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     if (!url || !url[0]) return NULL;
     SDL_LockMutex(g_cov_mtx);
-    int f = -1;
-    for (int i = 0; i < g_covN; i++) if (!strcmp(g_cov[i].url, url)) { f = i; break; }
-    if (f < 0 && g_covN < MAX_COV) {
-        f = g_covN++;
-        strncpy(g_cov[f].url, url, sizeof(g_cov[0].url) - 1);
-        g_cov[f].url[sizeof(g_cov[0].url) - 1] = '\0';
-        g_cov[f].tex = NULL; g_cov[f].surf = NULL; g_cov[f].state = 0;
-    }
+    int f = cover_find_locked(url, 1);
     SDL_Texture *tex = (f >= 0) ? g_cov[f].tex : NULL;
+    if (tex) g_cov[f].last_used = SDL_GetTicks();
     if (f >= 0 && g_cov[f].state == 0) {
         g_cov[f].state = 1;
         SDL_LockMutex(g_q_mtx);
@@ -130,20 +163,43 @@ static int cover_worker(void *arg) {
         if (s) { g_cov[idx].surf = s; g_cov[idx].state = 2; }
         else g_cov[idx].state = 3;
         SDL_UnlockMutex(g_cov_mtx);
+        if (s) {
+            SDL_LockMutex(g_ready_mtx);
+            g_ready[g_rt] = idx; g_rt = (g_rt + 1) % MAX_COV;
+            SDL_UnlockMutex(g_ready_mtx);
+        }
     }
     return 0;
 }
 static void cover_pump(void) {   // main: converte surfaces prontas em texturas
     for (int done = 0; done < 6; done++) {
         int idx = -1; SDL_Surface *s = NULL;
-        SDL_LockMutex(g_cov_mtx);
-        for (int i = 0; i < g_covN; i++) if (g_cov[i].state == 2) { idx = i; s = g_cov[i].surf; g_cov[i].surf = NULL; g_cov[i].state = 3; break; }
-        SDL_UnlockMutex(g_cov_mtx);
+        SDL_LockMutex(g_ready_mtx);
+        if (g_rh != g_rt) { idx = g_ready[g_rh]; g_rh = (g_rh + 1) % MAX_COV; }
+        SDL_UnlockMutex(g_ready_mtx);
         if (idx < 0) break;
+        SDL_LockMutex(g_cov_mtx);
+        if (g_cov[idx].state == 2) { s = g_cov[idx].surf; g_cov[idx].surf = NULL; g_cov[idx].state = 3; }
+        SDL_UnlockMutex(g_cov_mtx);
+        if (!s) continue;
         SDL_Texture *tex = SDL_CreateTextureFromSurface(gRen, s);
         SDL_FreeSurface(s);
         SDL_LockMutex(g_cov_mtx);
+        if (tex && g_cov_texN >= MAX_COVER_TEXTURES) {
+            int victim = -1;
+            for (int i = 0; i < g_covN; i++) {
+                if (i != idx && g_cov[i].tex && (victim < 0 || g_cov[i].last_used < g_cov[victim].last_used)) victim = i;
+            }
+            if (victim >= 0) {
+                SDL_DestroyTexture(g_cov[victim].tex);
+                g_cov[victim].tex = NULL;
+                g_cov[victim].state = 0; // recarrega sob demanda se voltar a tela
+                g_cov_texN--;
+            }
+        }
         g_cov[idx].tex = tex;
+        g_cov[idx].last_used = SDL_GetTicks();
+        if (tex) g_cov_texN++;
         SDL_UnlockMutex(g_cov_mtx);
     }
 }
@@ -194,6 +250,8 @@ static int g_srchSel = 0, g_srchScroll = 0;
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
 static int g_dlSel = 0, g_dlScroll = 0; static Uint32 g_dl_next = 0;
+static Uint32 g_dl_last_ok = 0;
+static int g_download_awake = 0;
 // vista da aba: 0 = grade de capas (por obra), 1 = episodios de uma obra
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 // agrupamento dos jobs por obra (series_id) ou filme (item_id negativo)
@@ -325,13 +383,19 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
         cJSON_Delete(pr);
     }
     double pos = 0, dur = 0;
+    // Cobre tambem a abertura da rede/FFmpeg e todos os retornos de erro.
+    appletSetMediaPlaybackState(true);
     int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
-    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Nao consegui tocar (erro %d)", r); toast(m); return 0; }
+    appletSetMediaPlaybackState(false);
+    // O player controla a mesma flag de energia e sempre a desliga ao sair.
+    // Forca a aba Salvos a recalcular/reaplicar seu proprio estado no proximo frame.
+    g_download_awake = 0;
     if (dur > 0 && pos > 5) {
         char body[160];
         snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", itemId, (int)pos, (int)dur);
         api_send("/api/sync/progress", "POST", body);
     }
+    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", r); toast(m); return 0; }
     return r;   // 1 = terminou
 }
 
@@ -389,6 +453,29 @@ static void open_item(cJSON *item, int is_series) {
 
 // ------------------------------------------------------------- downloads (acelerador)
 static cJSON *dl_jobs(void) { return g_dl ? cJSON_GetObjectItem(g_dl, "jobs") : NULL; }
+
+static int dl_has_active(void) {
+    cJSON *jobs = dl_jobs(), *job;
+    if (!jobs || !g_dl_last_ok || SDL_GetTicks() - g_dl_last_ok > 30000) return 0;
+    cJSON_ArrayForEach(job, jobs) {
+        const char *state = jstr(job, "state");
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(job, "ready")) &&
+            !(state && (!strcmp(state, "erro") || !strcmp(state, "error") ||
+                        !strcmp(state, "failed") || !strcmp(state, "cancelled") ||
+                        !strcmp(state, "canceled")))) return 1;
+    }
+    return 0;
+}
+
+// Os jobs rodam no servidor e continuam ate com o app fechado. Mantemos o
+// console acordado somente enquanto o usuario acompanha a aba Salvos.
+static void update_download_awake(void) {
+    int want = (g_screen == SC_MAIN && g_tab == TAB_DOWNLOADS && dl_has_active());
+    if (want == g_download_awake) return;
+    appletSetMediaPlaybackState(want);
+    g_download_awake = want;
+}
+
 static void accel_start(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/download/%d", itemId);
     api_send(path, "POST", "{}");
@@ -430,9 +517,83 @@ static void load_dl_done(int series_id) {
     cJSON_Delete(sd);
 }
 static int dl_is_done(int item_id) { for (int i = 0; i < g_dlDoneN; i++) if (g_dlDone[i] == item_id) return 1; return 0; }
+
+#define LOCAL_DL_DIR "sdmc:/switch/Nplay/downloads"
+static void local_dl_path(int item_id, char *out, size_t cap) {
+    snprintf(out, cap, LOCAL_DL_DIR "/%d.media", item_id);
+}
+static int local_dl_exists(int item_id) {
+    char path[160]; local_dl_path(item_id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f); return 1;
+}
+static int local_dl_count(void) {
+    int n = 0; DIR *d = opendir(LOCAL_DL_DIR); if (!d) return 0;
+    struct dirent *e;
+    while ((e = readdir(d))) if (e->d_name[0] != '.' && strstr(e->d_name, ".media")) n++;
+    closedir(d); return n;
+}
+
+typedef struct { const char *title; Uint32 last_draw; int cancel; } LocalDlProgress;
+static int local_dl_progress(long long received, long long total, void *userdata) {
+    LocalDlProgress *p = (LocalDlProgress *)userdata;
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_QUIT || (ev.type == SDL_JOYBUTTONDOWN && ev.jbutton.button == JOY_B)) p->cancel = 1;
+    }
+    Uint32 now = SDL_GetTicks();
+    if (now - p->last_draw >= 100 || received == total) {
+        p->last_draw = now;
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+        text_draw(gRen, "Baixando para a microSD", 60, 82, C_TEXT, 1);
+        text_clip(p->title ? p->title : "Video", 60, 132, C_MUT, 0, WIN_W - 120);
+        int pct = total > 0 ? (int)(received * 100 / total) : 0;
+        if (pct > 100) pct = 100;
+        fill_rect(60, 210, WIN_W - 120, 18, C_CARD);
+        fill_rect(60, 210, (WIN_W - 120) * pct / 100, 18, C_ACC2);
+        char status[128];
+        if (total > 0) snprintf(status, sizeof(status), "%d%%  -  %.1f de %.1f MB", pct, received / 1048576.0, total / 1048576.0);
+        else snprintf(status, sizeof(status), "%.1f MB recebidos", received / 1048576.0);
+        text_draw(gRen, status, 60, 250, C_TEXT, 0);
+        text_draw(gRen, "Mantenha o app aberto  |  B cancela", 60, WIN_H - 54, C_MUT, 0);
+        SDL_RenderPresent(gRen);
+    }
+    return p->cancel;
+}
+
+static void download_to_switch(cJSON *job) {
+    if (!job || !cJSON_IsTrue(cJSON_GetObjectItem(job, "ready"))) { toast("O arquivo do servidor ainda nao esta pronto"); return; }
+    int item_id = jint(job, "item_id");
+    if (local_dl_exists(item_id)) { toast("Este item ja esta na microSD"); return; }
+    const char *fu = jstr(job, "file_url");
+    if (!fu) { toast("Link do arquivo indisponivel"); return; }
+    mkdir("sdmc:/switch/Nplay", 0777); mkdir(LOCAL_DL_DIR, 0777);
+    char url[1400], final[180], part[190];
+    if (!strncmp(fu, "http", 4)) snprintf(url, sizeof(url), "%s", fu);
+    else snprintf(url, sizeof(url), "%s%s", BASE, fu);
+    local_dl_path(item_id, final, sizeof(final));
+    snprintf(part, sizeof(part), "%s.part", final);
+    LocalDlProgress progress = { jstr(job, "title"), 0, 0 };
+    const char *err = NULL;
+    appletSetMediaPlaybackState(true);
+    long code = net_download_file_progress(url, NULL, part, &err, local_dl_progress, &progress);
+    appletSetMediaPlaybackState(false); g_download_awake = 0;
+    if (code == 200 && rename(part, final) == 0) toast("Download concluido na microSD");
+    else { remove(part); toast(progress.cancel ? "Download cancelado" : "Falha ao baixar para a microSD"); }
+}
+static void remove_from_switch(cJSON *job) {
+    if (!job) return;
+    char path[180]; local_dl_path(jint(job, "item_id"), path, sizeof(path));
+    if (remove(path) == 0) toast("Arquivo removido da microSD");
+    else toast("Este item nao esta na microSD");
+}
 static void load_downloads(void) {
-    if (g_dl) { cJSON_Delete(g_dl); g_dl = NULL; }
-    g_dl = api_get("/api/accel/jobs");
+    cJSON *fresh = api_get("/api/accel/jobs");
+    if (!fresh) return; // preserva a ultima lista numa falha transitoria de rede
+    if (g_dl) cJSON_Delete(g_dl);
+    g_dl = fresh;
+    g_dl_last_ok = SDL_GetTicks();
     build_dl_groups();
     if (g_dlSel >= g_dlgN) g_dlSel = g_dlgN > 0 ? g_dlgN - 1 : 0;
     if (g_dlView == 1) {
@@ -441,6 +602,9 @@ static void load_downloads(void) {
     }
 }
 static int dl_play(cJSON *job) {
+    char local[180]; local_dl_path(jint(job, "item_id"), local, sizeof(local));
+    if (local_dl_exists(jint(job, "item_id")))
+        return play_with_progress(jint(job, "item_id"), jstr(job, "title"), local);
     const char *fu = jstr(job, "file_url");
     if (!fu) { toast("Sem arquivo"); return 0; }
     char url[1400];
@@ -515,7 +679,7 @@ static void draw_landing(void) {
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
         text_draw(gRen, kl, 228, hy + 100, C_MUT, 0);
         text_draw(gRen, "A abre   -   D-pad esq/dir troca o destaque", 228, hy + HERO_H - 40, C_MUT, 0);
-        char cnt[24]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
+        char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
         text_draw(gRen, cnt, WIN_W - 128, hy + HERO_H - 40, C_MUT, 0);
     }
 
@@ -664,7 +828,7 @@ static void draw_series(void) {
         cJSON *ep = ser_ep_at(i);
         int yy = listTop + (i - g_epScroll) * rowH;
         if (i == g_epSel) fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD);
-        int en = jint(ep, "episode"); char nb[10]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
+        int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
         int done = cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed"));
         text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : (done ? C_GREEN : C_MUT), 0);
         text_clip(ep_clean(jstr(ep, "title")), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 110);
@@ -745,6 +909,7 @@ static void input_dlmenu(int b) {
 static void draw_dl_grid(void) {
     text_draw(gRen, "Salvos na sua conta", 40, 78, C_TEXT, 1);
     text_draw(gRen, "(ficam no servidor - assiste de qualquer aparelho, sem ocupar o Switch)", 40, 108, C_MUT, 0);
+    if (dl_has_active()) text_draw(gRen, "TELA ATIVA", WIN_W - 170, 84, C_GREEN, 0);
     if (g_dlgN == 0) {
         text_draw(gRen, "Nada salvo ainda.", 40, 152, C_MUT, 0);
         text_draw(gRen, "Abra um filme e A, ou Y numa serie pra escolher os episodios.", 40, 184, C_MUT, 0);
@@ -763,7 +928,7 @@ static void draw_dl_grid(void) {
         int nJobs = g_dlg[i].nJobs, baixando = 0;
         for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
         char badge[32];
-        if (g_dlg[i].isMovie) { if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
+        if (g_dlg[i].isMovie) { if (local_dl_exists(jint(j0, "item_id"))) snprintf(badge, sizeof(badge), "MICROSD"); else if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
         else snprintf(badge, sizeof(badge), baixando ? "%d ep - salvando" : "%d ep", nJobs);
         fill_rect(x, yy + GCOVERH - 26, GCOVERW, 26, C_BAR);
         text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
@@ -772,7 +937,7 @@ static void draw_dl_grid(void) {
         text_clip(sh, x, yy + GCOVERH + 6, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
         if (i == g_dlSel) border_rect(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 6, 3, C_ACC2);
     }
-    text_draw(gRen, "A abre a obra   -   X remove   -   atualiza sozinho", 40, WIN_H - 34, C_MUT, 0);
+    text_draw(gRen, "A abre  |  Y microSD  |  ZR apaga microSD  |  X remove do servidor", 40, WIN_H - 34, C_MUT, 0);
 }
 // Vista 2: episodios baixados de UMA obra (com status), estilo menu de serie.
 static void draw_dl_detail(void) {
@@ -781,6 +946,7 @@ static void draw_dl_detail(void) {
     cJSON *j0 = dlg_job(g, 0);
     const char *title = jstr(j0, "title"); if (!title) title = "";
     text_draw(gRen, "< (B) voltar", 40, 84, C_MUT, 0);
+    if (dl_has_active()) text_draw(gRen, "TELA ATIVA", WIN_W - 170, 84, C_GREEN, 0);
     text_clip(title, 200, 82, C_TEXT, 1, WIN_W - 240);
     int nj = g_dlg[g].nJobs;
     int listTop = 128, rowH = 46, visible = (WIN_H - listTop - 44) / rowH;
@@ -791,7 +957,10 @@ static void draw_dl_detail(void) {
         int yy = listTop + (i - g_dlDetScroll) * rowH, sel = (i == g_dlDetSel);
         if (sel) fill_rect(32, yy - 6, WIN_W - 64, rowH - 4, C_CARD);
         int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
-        const char *state = jstr(j, "state"); int erro = state && !strcmp(state, "erro");
+        const char *state = jstr(j, "state");
+        int erro = state && (!strcmp(state, "erro") || !strcmp(state, "error") ||
+                             !strcmp(state, "failed") || !strcmp(state, "cancelled") ||
+                             !strcmp(state, "canceled"));
         int pct = jint(j, "percent");
         int done = dl_is_done(jint(j, "item_id"));
         char lab[48];
@@ -802,7 +971,8 @@ static void draw_dl_detail(void) {
         text_clip(ep_clean(et), 200, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 500);
         if (done) text_draw(gRen, "visto", WIN_W - 340, yy, C_GREEN, 0);
         char st[40];
-        if (ready) snprintf(st, sizeof(st), "PRONTO");
+        if (local_dl_exists(jint(j, "item_id"))) snprintf(st, sizeof(st), "MICROSD");
+        else if (ready) snprintf(st, sizeof(st), "PRONTO");
         else if (erro) snprintf(st, sizeof(st), "ERRO");
         else snprintf(st, sizeof(st), "salvando %d%%", pct);
         text_draw(gRen, st, WIN_W - 260, yy, ready ? C_GREEN : (erro ? C_ROSE : C_ACC), 0);
@@ -817,7 +987,7 @@ static void draw_dl_detail(void) {
         fill_rect(WIN_W - 22, listTop, 4, trkH, C_CARD);
         fill_rect(WIN_W - 22, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
-    text_draw(gRen, "A assistir (quando pronto)   -   X remove este   -   B volta", 40, WIN_H - 34, C_MUT, 0);
+    text_draw(gRen, "A assistir  |  Y microSD  |  ZR apaga microSD  |  X remove servidor  |  B volta", 40, WIN_H - 34, C_MUT, 0);
 }
 static void draw_downloads(void) {
     draw_topbar();
@@ -952,6 +1122,8 @@ static void input_downloads(int b) {
                 idx++;
             }
         }
+        else if (b == JOY_Y) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) download_to_switch(j); }
+        else if (b == JOY_ZR) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) remove_from_switch(j); }
         else if (b == JOY_X) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) { accel_remove(jint(j, "item_id")); load_downloads(); toast("Removido"); } }
         return;
     }
@@ -967,6 +1139,13 @@ static void input_downloads(int b) {
             else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; load_dl_done(jint(dlg_job(g_dlSel, 0), "series_id")); }
         }
     }
+    else if (b == JOY_Y) {
+        if (g_dlSel < n) {
+            if (g_dlg[g_dlSel].isMovie) download_to_switch(dlg_job(g_dlSel, 0));
+            else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; toast("Escolha um episodio e pressione Y"); }
+        }
+    }
+    else if (b == JOY_ZR) { if (g_dlSel < n && g_dlg[g_dlSel].isMovie) remove_from_switch(dlg_job(g_dlSel, 0)); }
     else if (b == JOY_X) {   // remove a obra inteira
         if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
     }
@@ -992,27 +1171,23 @@ static void draw_settings(void) {
     text_draw(gRen, v, 40, 92, C_MUT, 0);
     char u[180]; snprintf(u, sizeof(u), "Conta: %s", g_user[0] ? g_user : "-");
     text_draw(gRen, u, 40, 122, C_MUT, 0);
-    text_draw(gRen, BASE, 40, 152, C_MUT, 0);
-    // onde os arquivos salvos ficam + uso de disco
-    text_draw(gRen, "Arquivos salvos (ficam no servidor, nao no Switch):", 40, 200, C_TEXT, 0);
+    text_draw(gRen, "ARMAZENAMENTO", 40, 180, C_ACC2, 0);
+    text_draw(gRen, "Salvos na conta", 40, 218, C_TEXT, 0);
+    text_draw(gRen, "Continuam no servidor mesmo com o app fechado e nao ocupam espaco no console.", 40, 248, C_MUT, 0);
     if (g_accel_status) {
-        cJSON *up = cJSON_GetObjectItem(g_accel_status, "used_bytes");
-        cJSON *cp = cJSON_GetObjectItem(g_accel_status, "cap_bytes");
-        double used = up ? up->valuedouble : 0, cap = cp ? cp->valuedouble : 0;
-        const char *path = jstr(g_accel_status, "path");
-        char pl[220]; snprintf(pl, sizeof(pl), "Pasta: %s", path ? path : "-");
-        text_clip(pl, 40, 230, C_MUT, 0, WIN_W - 80);
-        char sl[140]; snprintf(sl, sizeof(sl), "Uso: %.1f GB de %.0f GB   -   %d item(ns) salvos   (pastas: Filmes/Series/Animes/Doramas)", used / 1e9, cap / 1e9, jint(g_accel_status, "count"));
-        text_clip(sl, 40, 258, C_MUT, 0, WIN_W - 80);
-        int bw = 500, fw = cap > 0 ? (int)(bw * used / cap) : 0; if (fw > bw) fw = bw; if (fw < 0) fw = 0;
-        fill_rect(40, 288, bw, 10, C_BAR); fill_rect(40, 288, fw, 10, C_ACC2);
-    } else text_draw(gRen, "(carregando...)", 40, 230, C_MUT, 0);
+        char sl[96]; snprintf(sl, sizeof(sl), "%d item(ns) disponiveis na sua conta", jint(g_accel_status, "count"));
+        text_draw(gRen, sl, 40, 278, C_GREEN, 0);
+    } else text_draw(gRen, "Consultando sua conta...", 40, 278, C_MUT, 0);
+    text_draw(gRen, "Downloads no Switch", 40, 322, C_TEXT, 0);
+    text_draw(gRen, "Copias offline ficam somente na microSD. Use Y em um item pronto na aba Salvos.", 40, 352, C_MUT, 0);
+    char local[96]; snprintf(local, sizeof(local), "%d arquivo(s) offline na microSD", local_dl_count());
+    text_draw(gRen, local, 40, 382, C_GREEN, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 340 + i * 56;
+        int y = 448 + i * 56;
         if (i == g_setSel) fill_rect(36, y - 6, 470, 48, C_CARD);
         text_draw(gRen, SET_ITEMS[i], 48, y, (i == g_setSel) ? C_TEXT : C_MUT, 0);
     }
-    if (g_status[0]) text_draw(gRen, g_status, 40, 340 + NSET * 56 + 22, C_ACC, 0);
+    if (g_status[0]) text_draw(gRen, g_status, 40, 448 + NSET * 56 + 22, C_ACC, 0);
     text_draw(gRen, "A confirma   D-pad move   B volta", 40, WIN_H - 44, C_MUT, 0);
 }
 static void input_settings(int b) {
@@ -1029,15 +1204,21 @@ static void run_update(void) {
     int r = update_check(&info);
     if (r == UPDATE_CHECK_AVAILABLE) {
         char target[600]; update_resolve_target_path(g_self_path, target, sizeof(target));
+        char installed[600] = "";
         char err[256] = "";
-        if (update_apply(&info, target, err, sizeof(err)) == 0)
-            snprintf(g_status, sizeof(g_status), "Atualizado p/ %s! Feche e reabra o Nplay.", info.latest_version);
+        int updated = update_apply(&info, target, installed, sizeof(installed), err, sizeof(err));
+        if (updated > 0 && err[0])
+            snprintf(g_status, sizeof(g_status), "Atualizacao parcial: %.*s", 138, err);
+        else if (updated > 0)
+            snprintf(g_status, sizeof(g_status), "v%s instalada em %d copia(s). Feche com + e abra novamente.",
+                     info.latest_version, updated);
         else
             snprintf(g_status, sizeof(g_status), "Falha na atualizacao: %s", err[0] ? err : "download");
     } else if (r == UPDATE_CHECK_UP_TO_DATE) {
         snprintf(g_status, sizeof(g_status), "Voce ja esta na versao mais recente (%s).", APP_VERSION_STR);
     } else {
-        snprintf(g_status, sizeof(g_status), "%s", info.message[0] ? info.message : "Erro ao verificar atualizacao");
+        snprintf(g_status, sizeof(g_status), "%.*s", (int)sizeof(g_status) - 1,
+                 info.message[0] ? info.message : "Erro ao verificar atualizacao");
     }
 }
 
@@ -1105,7 +1286,8 @@ int main(int argc, char **argv) {
 
     text_init(); net_init(); store_init();
 
-    g_cov_mtx = SDL_CreateMutex(); g_q_mtx = SDL_CreateMutex(); g_q_sem = SDL_CreateSemaphore(0);
+    g_cov_mtx = SDL_CreateMutex(); g_q_mtx = SDL_CreateMutex(); g_ready_mtx = SDL_CreateMutex();
+    g_q_sem = SDL_CreateSemaphore(0);
     SDL_Thread *wk[3];
     for (int i = 0; i < 3; i++) wk[i] = SDL_CreateThread(cover_worker, "cov", NULL);
 
@@ -1145,6 +1327,7 @@ int main(int argc, char **argv) {
         if (g_screen == SC_MAIN && g_tab == TAB_DOWNLOADS && SDL_GetTicks() > g_dl_next) {
             load_downloads(); g_dl_next = SDL_GetTicks() + 2000;
         }
+        update_download_awake();
 
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
         SDL_RenderClear(gRen);
@@ -1171,11 +1354,19 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; i++) SDL_SemPost(g_q_sem);
     for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
 
+    if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
     if (g_land) cJSON_Delete(g_land);
     if (g_search) cJSON_Delete(g_search);
     if (g_dl) cJSON_Delete(g_dl);
     if (g_ser) cJSON_Delete(g_ser);
-    for (int i = 0; i < g_covN; i++) if (g_cov[i].tex) SDL_DestroyTexture(g_cov[i].tex);
+    for (int i = 0; i < g_covN; i++) {
+        if (g_cov[i].tex) SDL_DestroyTexture(g_cov[i].tex);
+        if (g_cov[i].surf) SDL_FreeSurface(g_cov[i].surf);
+    }
+    SDL_DestroySemaphore(g_q_sem);
+    SDL_DestroyMutex(g_ready_mtx);
+    SDL_DestroyMutex(g_q_mtx);
+    SDL_DestroyMutex(g_cov_mtx);
     text_exit(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
     SDL_DestroyRenderer(gRen); SDL_DestroyWindow(win);

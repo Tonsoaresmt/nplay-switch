@@ -14,6 +14,9 @@ void store_save_pref_audio(const char *lang);
 int  store_load_pref_sub(char *out, size_t cap);
 void store_save_pref_sub(const char *lang);
 
+int  store_load_player_volume(int *volume);
+void store_save_player_volume(int volume);
+
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);
 
