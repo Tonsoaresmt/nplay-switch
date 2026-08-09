@@ -1,10 +1,12 @@
 #include "update.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "net.h"
@@ -78,8 +80,21 @@ static int has_repo_config(void) {
 
 static int same_path(const char *a, const char *b) {
     if (!a || !b) return 0;
-    return strcmp(a, b) == 0;
+    return strcasecmp(a, b) == 0;
 }
+
+static int join_path(char *out, size_t cap, const char *dir, const char *name) {
+    size_t a, b;
+    if (!out || cap == 0 || !dir || !name) return -1;
+    a = strlen(dir); b = strlen(name);
+    if (a + 1 + b + 1 > cap) return -1;
+    memcpy(out, dir, a);
+    out[a] = '/';
+    memcpy(out + a + 1, name, b + 1);
+    return 0;
+}
+
+#define MAX_INSTALL_PATHS 16
 
 static void add_install_path(char paths[][640], int *count, const char *path) {
     int i;
@@ -87,9 +102,66 @@ static void add_install_path(char paths[][640], int *count, const char *path) {
     for (i = 0; i < *count; i++) {
         if (same_path(paths[i], path)) return;
     }
-    if (*count >= 4) return;
+    if (*count >= MAX_INSTALL_PATHS) return;
     snprintf(paths[*count], 640, "%s", path);
     (*count)++;
+}
+
+static int file_exists(const char *path) {
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static long long file_size(const char *path) {
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    long n;
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    n = ftell(f);
+    fclose(f);
+    return n < 0 ? -1 : (long long)n;
+}
+
+static int is_nplay_nro(const char *name) {
+    char lower[256];
+    size_t i;
+    if (!name || !ends_with_nro(name)) return 0;
+    for (i = 0; name[i] && i + 1 < sizeof(lower); i++)
+        lower[i] = (char)tolower((unsigned char)name[i]);
+    lower[i] = '\0';
+    return strstr(lower, "nplay") != NULL || strstr(lower, "meruem") != NULL;
+}
+
+// Procura o formato normal do hbmenu: sdmc:/switch/App/App.nro, alem de .nro
+// solto em sdmc:/switch. Limita a um nivel para manter a verificacao rapida.
+static void scan_install_paths(char paths[][640], int *count) {
+    const char *root_path = "sdmc:/switch";
+    DIR *root = opendir(root_path);
+    struct dirent *ent;
+    if (!root) return;
+    while ((ent = readdir(root)) != NULL && *count < MAX_INSTALL_PATHS) {
+        char path[640];
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        if (join_path(path, sizeof(path), root_path, ent->d_name) != 0) continue;
+        if (is_nplay_nro(ent->d_name) && file_exists(path)) {
+            add_install_path(paths, count, path);
+            continue;
+        }
+        DIR *sub = opendir(path);
+        if (sub) {
+            struct dirent *child;
+            while ((child = readdir(sub)) != NULL && *count < MAX_INSTALL_PATHS) {
+                char child_path[640];
+                if (!is_nplay_nro(child->d_name)) continue;
+                if (join_path(child_path, sizeof(child_path), path, child->d_name) != 0) continue;
+                if (file_exists(child_path)) add_install_path(paths, count, child_path);
+            }
+            closedir(sub);
+        }
+    }
+    closedir(root);
 }
 
 static int copy_file(const char *src, const char *dst, char *err, size_t errcap) {
@@ -139,8 +211,10 @@ static int make_backup_path(const char *dst, char *bak, size_t cap) {
 }
 
 static int replace_with_file(const char *src, const char *dst, char *err, size_t errcap) {
-    char bak[640];
+    char bak[640], staged[640];
     int renamed_old = 0;
+    int activate_errno;
+    long long expected;
     if (!dst || !dst[0]) {
         if (err && errcap) copy_text(err, errcap, "Caminho de destino vazio.");
         return -1;
@@ -149,26 +223,44 @@ static int replace_with_file(const char *src, const char *dst, char *err, size_t
         if (err && errcap) copy_text(err, errcap, "Caminho de destino grande demais.");
         return -1;
     }
+    if (snprintf(staged, sizeof(staged), "%s.new", dst) >= (int)sizeof(staged)) {
+        if (err && errcap) copy_text(err, errcap, "Caminho temporario grande demais.");
+        return -1;
+    }
+    expected = file_size(src);
+    if (expected <= 0) {
+        if (err && errcap) copy_text(err, errcap, "Update baixado esta vazio.");
+        return -1;
+    }
+    remove(staged);
+    if (copy_file(src, staged, err, errcap) != 0) {
+        remove(staged);
+        return -1;
+    }
+    if (file_size(staged) != expected) {
+        remove(staged);
+        if (err && errcap) copy_text(err, errcap, "Copia gravada ficou incompleta.");
+        return -1;
+    }
     remove(bak);
     if (rename(dst, bak) == 0) {
         renamed_old = 1;
     } else if (errno != ENOENT) {
         if (err && errcap) snprintf(err, errcap, "Nao preparei destino (%d).", errno);
+        remove(staged);
         return -1;
     }
-    // Caminho rapido: o arquivo temporario e o destino estao no SD, entao um
-    // rename evita copiar ~45 MB de novo. Se falhar, ainda temos fallback.
-    if (rename(src, dst) == 0) {
+    // A troca final e atomica no mesmo diretorio. O download original permanece
+    // disponivel para atualizar outras copias encontradas no SD.
+    if (rename(staged, dst) == 0) {
         if (renamed_old) remove(bak);
         return 0;
     }
-    if (copy_file(src, dst, err, errcap) != 0) {
-        remove(dst);
-        if (renamed_old) rename(bak, dst);
-        return -1;
-    }
-    if (renamed_old) remove(bak);
-    return 0;
+    activate_errno = errno;
+    remove(staged);
+    if (renamed_old) rename(bak, dst);
+    if (err && errcap) snprintf(err, errcap, "Nao ativei o novo arquivo (%d).", activate_errno);
+    return -1;
 }
 
 void update_resolve_target_path(const char *argv0, char *out, size_t cap) {
@@ -178,7 +270,7 @@ void update_resolve_target_path(const char *argv0, char *out, size_t cap) {
         copy_text(out, cap, argv0);
         return;
     }
-    copy_text(out, cap, "sdmc:/switch/Meruem.nro");
+    copy_text(out, cap, "sdmc:/switch/Nplay/Nplay.nro");
 }
 
 int update_check(struct update_info *info) {
@@ -265,9 +357,11 @@ done:
     return result;
 }
 
-int update_apply(const struct update_info *info, const char *target_path, char *err, size_t errcap) {
+int update_apply(const struct update_info *info, const char *target_path,
+                 char *installed_path, size_t installed_cap,
+                 char *err, size_t errcap) {
     char tmp[640];
-    char paths[4][640];
+    char paths[MAX_INSTALL_PATHS][640];
     char first_err[256];
     int path_count = 0;
     int ok_count = 0;
@@ -275,6 +369,7 @@ int update_apply(const struct update_info *info, const char *target_path, char *
     long code;
 
     if (err && errcap) err[0] = '\0';
+    if (installed_path && installed_cap) installed_path[0] = '\0';
     first_err[0] = '\0';
     if (!info || !info->download_url[0]) {
         if (err && errcap) copy_text(err, errcap, "URL do asset nao disponivel.");
@@ -285,7 +380,7 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         return -1;
     }
 
-    snprintf(tmp, sizeof(tmp), "sdmc:/switch/Meruem/update.download");
+    snprintf(tmp, sizeof(tmp), "sdmc:/switch/.nplay-update.download");
     remove(tmp);
 
     code = net_download_file(info->download_url, NULL, tmp, NULL);
@@ -295,12 +390,21 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         return -1;
     }
 
-    // Grava apenas no caminho do .nro que esta rodando (evita espalhar copias soltas).
-    add_install_path(paths, &path_count, target_path);
+    // argv[0] nem sempre chega pelo hbmenu. So aceita o alvo se ele realmente
+    // existe e procura copias conhecidas para nao anunciar sucesso no arquivo errado.
+    if (file_exists(target_path)) add_install_path(paths, &path_count, target_path);
+    scan_install_paths(paths, &path_count);
+    if (path_count <= 0) {
+        if (err && errcap) copy_text(err, errcap, "Nao localizei o Nplay.nro instalado no SD.");
+        remove(tmp);
+        return -1;
+    }
 
     for (i = 0; i < path_count; i++) {
         char one_err[256] = {0};
         if (replace_with_file(tmp, paths[i], one_err, sizeof(one_err)) == 0) {
+            if (ok_count == 0 && installed_path && installed_cap)
+                copy_text(installed_path, installed_cap, paths[i]);
             ok_count++;
         } else if (!first_err[0]) {
             copy_text(first_err, sizeof(first_err), one_err);
@@ -312,5 +416,9 @@ int update_apply(const struct update_info *info, const char *target_path, char *
         if (err && errcap) copy_text(err, errcap, first_err[0] ? first_err : "Nao consegui gravar o novo .nro.");
         return -1;
     }
-    return 0;
+    if (ok_count < path_count && err && errcap) {
+        snprintf(err, errcap, "Atualizei %d de %d copia(s): %s", ok_count, path_count,
+                 first_err[0] ? first_err : "uma copia falhou");
+    }
+    return ok_count;
 }

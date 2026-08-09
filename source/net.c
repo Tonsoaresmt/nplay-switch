@@ -2,6 +2,7 @@
 #include "net.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <curl/curl.h>
 #include <SDL.h>
@@ -16,23 +17,44 @@ void membuf_free(struct membuf *m) {
     free(m->data);
     m->data = NULL;
     m->len = 0;
+    m->cap = 0;
 }
 
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    if (size != 0 && nmemb > SIZE_MAX / size) return 0;
     size_t add = size * nmemb;
     struct membuf *m = (struct membuf *)userdata;
-    char *np = realloc(m->data, m->len + add + 1);
-    if (!np) return 0;                 // sem memoria -> aborta o download
-    m->data = np;
+    if (m->len == SIZE_MAX || add > SIZE_MAX - m->len - 1) return 0;
+    size_t need = m->len + add + 1;
+    if (need > m->cap) {
+        size_t cap = m->cap ? m->cap : 4096;
+        while (cap < need) {
+            if (cap > SIZE_MAX / 2) { cap = need; break; }
+            cap *= 2;
+        }
+        char *np = realloc(m->data, cap);
+        if (!np) return 0;             // sem memoria -> aborta o download
+        m->data = np;
+        m->cap = cap;
+    }
     memcpy(m->data + m->len, ptr, add);
     m->len += add;
     m->data[m->len] = '\0';
     return add;
 }
 
+struct file_download_ctx { FILE *file; net_progress_cb progress; void *userdata; };
+
 static size_t file_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    FILE *f = (FILE *)userdata;
-    return fwrite(ptr, size, nmemb, f);
+    struct file_download_ctx *ctx = (struct file_download_ctx *)userdata;
+    return fwrite(ptr, size, nmemb, ctx->file);
+}
+
+static int file_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
+                            curl_off_t ultotal, curl_off_t ulnow) {
+    (void)ultotal; (void)ulnow;
+    struct file_download_ctx *ctx = (struct file_download_ctx *)userdata;
+    return (ctx && ctx->progress) ? ctx->progress((long long)dlnow, (long long)dltotal, ctx->userdata) : 0;
 }
 
 // ---- conexao compartilhada (CURLSH) -----------------------------------------
@@ -150,6 +172,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
     struct curl_slist *headers = NULL;
     char authbuf[1024];
     FILE *f;
+    struct file_download_ctx dlctx = {0};
     long code = -1;
 
     if (err) *err = NULL;
@@ -163,6 +186,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
         if (err) *err = "fopen falhou";
         return -1;
     }
+    dlctx.file = f;
 
     curl = curl_easy_init();
     if (!curl) {
@@ -186,7 +210,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 256L * 1024L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &dlctx);
     net_apply_shared(curl);
 
     res = curl_easy_perform(curl);
@@ -201,6 +225,54 @@ long net_download_file_timeout(const char *url, const char *bearer,
     curl_easy_cleanup(curl);
     fclose(f);
 
+    if (code != 200) remove(path);
+    return code;
+}
+
+long net_download_file_progress(const char *url, const char *bearer,
+                                const char *path, const char **err,
+                                net_progress_cb progress, void *userdata) {
+    CURL *curl;
+    CURLcode res;
+    struct curl_slist *headers = NULL;
+    char authbuf[1024];
+    long code = -1;
+    FILE *f = NULL;
+    struct file_download_ctx dlctx = {0};
+    if (err) *err = NULL;
+    if (!url || !path) { if (err) *err = "parametro invalido"; return -1; }
+    f = fopen(path, "wb");
+    if (!f) { if (err) *err = "nao foi possivel criar arquivo na microSD"; return -1; }
+    dlctx.file = f; dlctx.progress = progress; dlctx.userdata = userdata;
+    curl = curl_easy_init();
+    if (!curl) { fclose(f); if (err) *err = "curl_easy_init falhou"; return -1; }
+    if (bearer && bearer[0]) {
+        snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
+        headers = curl_slist_append(headers, authbuf);
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 45L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 256L * 1024L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &dlctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, file_progress_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &dlctx);
+    net_apply_shared(curl);
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) { if (err) *err = curl_easy_strerror(res); code = -(long)res; }
+    else curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    fclose(f);
     if (code != 200) remove(path);
     return code;
 }

@@ -16,9 +16,9 @@
 #include <strings.h>
 #include <stdio.h>
 
-#define BLOCK   (1024 * 1024)          // cada busca da thread
+#define BLOCK   (512 * 1024)           // entrega dados cedo mesmo em fontes lentas
 #define TMPCAP  (BLOCK + 65536)
-#define RINGCAP (16 * 1024 * 1024)     // ~16MB de leitura antecipada
+#define RINGCAP (16 * 1024 * 1024)     // prefetch amplo sem reservar 32MB por video
 
 typedef struct {
     CURL *easy;
@@ -30,6 +30,7 @@ typedef struct {
     volatile int64_t size;             // total (-1 desconhecido)
     volatile int64_t seek_req;         // pedido de seek (-1 = nenhum)
     volatile int running, eof, err;
+    int delivered, fetch_complete;
     SDL_mutex *mtx;
     SDL_cond  *c_data, *c_space;
     SDL_Thread *th;
@@ -56,13 +57,19 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
 
 static int fetch_block(CurlIO *c, int64_t start) {
     c->tmp_len = 0;
+    c->fetch_complete = 0;
     char range[64];
     snprintf(range, sizeof(range), "%lld-%lld", (long long)start, (long long)(start + BLOCK - 1));
     curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
     CURLcode r = curl_easy_perform(c->easy);
-    if (r != CURLE_OK) return -1;
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    // Em uma queda depois de receber parte do range, preserve esses bytes e
+    // retome exatamente do offset seguinte. Antes todo o trecho parcial era
+    // descartado, causando o ciclo "carrega/toca/trava" em fontes lentas.
     if (code != 200 && code != 206) return -1;
+    if (start > 0 && code != 206) return -1; // servidor ignorou Range: seek inseguro
+    if (r != CURLE_OK && c->tmp_len == 0) return -1;
+    c->fetch_complete = (r == CURLE_OK);
     return (int)c->tmp_len;
 }
 // Encerra a thread e libera tudo do CurlIO.
@@ -112,7 +119,7 @@ static int producer(void *arg) {
         fails = 0;
         ring_put(c, c->tmp, (size_t)got);
         prod += got;
-        if (got < BLOCK && c->size < 0) c->size = prod;
+        if (c->fetch_complete && got < BLOCK && c->size < 0) c->size = prod;
         SDL_CondSignal(c->c_data);
         SDL_UnlockMutex(c->mtx);
     }
@@ -123,9 +130,21 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
     CurlIO *c = (CurlIO *)opaque;
     if (want <= 0) return 0;
     SDL_LockMutex(c->mtx);
-    while (c->count == 0 && !c->eof && !c->err && c->running)
+    // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
+    // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
+    // poder desenhar o estado CARREGANDO e continuar recebendo comandos.
+    int waits = c->delivered ? 1 : 67; // ate ~20 s apenas no primeiro acesso
+    while (c->count == 0 && !c->eof && !c->err && c->running && waits-- > 0)
         SDL_CondWaitTimeout(c->c_data, c->mtx, 300);
-    if (c->count == 0) { int eof = c->eof; SDL_UnlockMutex(c->mtx); return eof ? AVERROR_EOF : AVERROR(EIO); }
+    if (c->count == 0) {
+        if (c->running && !c->err && !c->eof) {
+            SDL_UnlockMutex(c->mtx);
+            return AVERROR(EAGAIN);
+        }
+        int eof = c->eof;
+        SDL_UnlockMutex(c->mtx);
+        return eof ? AVERROR_EOF : AVERROR(EIO);
+    }
     size_t n = c->count < (size_t)want ? c->count : (size_t)want;
     size_t first = c->ring_cap - c->head; if (first > n) first = n;
     memcpy(out, c->ring + c->head, first);
@@ -133,6 +152,7 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
     c->head = (c->head + n) % c->ring_cap;
     c->count -= n;
     c->base += n;
+    c->delivered = 1;
     SDL_CondSignal(c->c_space);
     SDL_UnlockMutex(c->mtx);
     return (int)n;
@@ -190,8 +210,15 @@ AVIOContext *nplay_curl_avio_open(const char *url) {
     curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(c->easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPIDLE, 120L);
+    curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPINTVL, 60L);
     curl_easy_setopt(c->easy, CURLOPT_CONNECTTIMEOUT, 20L);
-    curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, 60L);
+    // Nao use timeout total: um servidor valido pode levar mais de 60 s para
+    // um episodio longo. Detecte apenas conexao realmente parada.
+    curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, wr_tmp);
     curl_easy_setopt(c->easy, CURLOPT_WRITEDATA, c);
     curl_easy_setopt(c->easy, CURLOPT_HEADERFUNCTION, hdr_size);

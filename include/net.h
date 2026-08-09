@@ -5,6 +5,7 @@
 struct membuf {
     char  *data;   // sempre terminado em '\0' (ou NULL se vazio)
     size_t len;
+    size_t cap;    // capacidade alocada; evita realloc a cada callback do curl
 };
 
 void membuf_free(struct membuf *m);
@@ -38,6 +39,12 @@ long net_download_file(const char *url, const char *bearer,
 long net_download_file_timeout(const char *url, const char *bearer,
                                const char *path, const char **err,
                                long connect_timeout, long total_timeout);
+
+// Download com progresso. O callback retorna diferente de zero para cancelar.
+typedef int (*net_progress_cb)(long long received, long long total, void *userdata);
+long net_download_file_progress(const char *url, const char *bearer,
+                                const char *path, const char **err,
+                                net_progress_cb progress, void *userdata);
 
 // Codifica `in` para uso seguro em URL (percent-encoding) escrevendo em `out`.
 void net_urlencode(const char *in, char *out, size_t cap);

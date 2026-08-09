@@ -1,6 +1,6 @@
 // player.h - player de video via ffmpeg (decode) + SDL (render/audio).
 // Toca uma URL HTTP(S) direta (I/O via libcurl, ver curl_avio). Bloqueia ate o
-// usuario sair (B/+). Suporta retomar (start_sec) e reporta onde parou.
+// usuario sair (B/-). Suporta retomar (start_sec) e reporta onde parou.
 #pragma once
 #include <SDL.h>
 

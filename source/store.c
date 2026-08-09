@@ -22,6 +22,9 @@
 #define PROG_F   DIR_APP "/progress.json"
 #define OFFSER_F DIR_APP "/offline_series.json"
 #define FITM_F   DIR_APP "/fit_modes.json"
+#define PREFA_F  DIR_APP "/pref_audio.txt"
+#define PREFS_F  DIR_APP "/pref_sub.txt"
+#define PREFV_F  DIR_APP "/player_volume.txt"
 
 static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
@@ -134,6 +137,67 @@ static void trim_line(char *s) {
         s[--len] = '\0';
     }
 }
+
+int store_load_pref_audio(char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    FILE *f = fopen(PREFA_F, "rb");
+    if (!f) return 0;
+    size_t n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    trim_line(out);
+    return strlen(out) > 0 ? 1 : 0;
+}
+void store_save_pref_audio(const char *lang) {
+    if (!lang) return;
+    FILE *f = fopen(PREFA_F, "wb");
+    if (!f) return;
+    fwrite(lang, 1, strlen(lang), f);
+    fclose(f);
+}
+
+int store_load_pref_sub(char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    FILE *f = fopen(PREFS_F, "rb");
+    if (!f) return 0;
+    size_t n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    trim_line(out);
+    return strlen(out) > 0 ? 1 : 0;
+}
+void store_save_pref_sub(const char *lang) {
+    if (!lang) return;
+    FILE *f = fopen(PREFS_F, "wb");
+    if (!f) return;
+    fwrite(lang, 1, strlen(lang), f);
+    fclose(f);
+}
+
+int store_load_player_volume(int *volume) {
+    int value;
+    FILE *f;
+    if (!volume) return 0;
+    f = fopen(PREFV_F, "rb");
+    if (!f) return 0;
+    if (fscanf(f, "%d", &value) != 1) { fclose(f); return 0; }
+    fclose(f);
+    if (value < 0 || value > 100) return 0;
+    *volume = value;
+    return 1;
+}
+
+void store_save_player_volume(int volume) {
+    FILE *f;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    f = fopen(PREFV_F, "wb");
+    if (!f) return;
+    fprintf(f, "%d", volume);
+    fclose(f);
+}
+
+
 
 int store_load_server(char *out, size_t cap) {
     FILE *f;
