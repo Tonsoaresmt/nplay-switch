@@ -244,10 +244,10 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
 
     if (expanded) {
         int y = panel_y + 86;
-        draw_control(ren, 48,   y, 210, "A", paused ? "Continuar" : "Pausar", paused);
-        draw_control(ren, 355,  y, 200, "L/R", "- / + 10s", 0);
-        draw_control(ren, 660,  y, 220, "ZL/ZR", "- / + 60s", 0);
-        draw_control(ren, 1020, y, 212, "B", "Voltar", 0);
+        draw_control(ren, 48,  y, 250, "A", paused ? "Continuar" : "Pausar", paused);
+        draw_control(ren, 330, y, 250, "L/R", "- / + 10s", 0);
+        draw_control(ren, 612, y, 300, "ZL/ZR", "- / + 60s", 0);
+        draw_control(ren, 944, y, 288, "B", "Voltar", 0);
 
         char volume_value[24], audio_value[48], subtitle_value[48];
         char audio_label[48], subtitle_label[48];
@@ -268,11 +268,11 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
                           hud_pinned ? "Fixo" : "Automatico", hud_pinned);
     } else {
         int y = panel_y + 91;
-        draw_control(ren, 48,   y, 160, "A", "Pausar", 0);
-        draw_control(ren, 230,  y, 145, "L/R", "10s", 0);
-        draw_control(ren, 397,  y, 170, "ZL/ZR", "60s", 0);
-        draw_control(ren, 800,  y, 220, "+", "Opcoes", 0);
-        draw_control(ren, 1082, y, 152, "B", "Voltar", 0);
+        draw_control(ren, 48,   y, 190, "A", "Pausar", 0);
+        draw_control(ren, 258,  y, 190, "L/R", "10s", 0);
+        draw_control(ren, 468,  y, 220, "ZL/ZR", "60s", 0);
+        draw_control(ren, 708,  y, 280, "+", "Opcoes", 0);
+        draw_control(ren, 1008, y, 224, "B", "Voltar", 0);
     }
 }
 
@@ -348,14 +348,39 @@ static void ass_to_text(const char *ass, char *out, int cap) {
 // desenha a legenda centralizada perto do rodape (com faixa de fundo).
 static void draw_sub(SDL_Renderer *ren, const char *txt) {
     if (!txt || !txt[0]) return;
-    int w = 0, h = 0;
     SDL_Color white = { 245, 245, 245, 255 };
-    SDL_Texture *t = text_cached(ren, txt, white, 0, &w, &h);
-    if (w > PWIN_W - 80) w = PWIN_W - 80;
-    int x = (PWIN_W - w) / 2, y = PWIN_H - 205;
+    const int maxw = PWIN_W - 100;
+    char line1[512] = {0}, line2[512] = {0};
+    snprintf(line1, sizeof(line1), "%s", txt);
+    int full_w = 0, full_h = 0;
+    text_cached(ren, line1, white, 0, &full_w, &full_h);
+    if (full_w > maxw) {
+        size_t len = strlen(line1), middle = len / 2, split = middle;
+        while (split > 0 && line1[split] != ' ') split--;
+        if (split == 0) { split = middle; while (split < len && line1[split] != ' ') split++; }
+        if (split > 0 && split < len) {
+            snprintf(line2, sizeof(line2), "%s", line1 + split + 1);
+            line1[split] = '\0';
+        }
+    }
+    int w1 = 0, h1 = 0, w2 = 0, h2 = 0;
+    SDL_Texture *t1 = text_cached(ren, line1, white, 0, &w1, &h1);
+    SDL_Texture *t2 = line2[0] ? text_cached(ren, line2, white, 0, &w2, &h2) : NULL;
+    int boxw = w1 > w2 ? w1 : w2; if (boxw > maxw) boxw = maxw;
+    int boxh = h1 + (t2 ? h2 + 4 : 0);
+    int x = (PWIN_W - boxw) / 2, y = PWIN_H - 205 - (t2 ? h2 + 4 : 0);
     SDL_Color black = { 0, 0, 0, 255 };
-    pfill(ren, x - 14, y - 6, w + 28, h + 12, black, 165);
-    if (t) { SDL_Rect d = { x, y, w, h }; SDL_RenderCopy(ren, t, NULL, &d); }
+    pfill(ren, x - 16, y - 7, boxw + 32, boxh + 14, black, 175);
+    if (t1) {
+        int rw = w1 > maxw ? maxw : w1;
+        SDL_Rect src = { 0, 0, rw, h1 }, d = { (PWIN_W - rw) / 2, y, rw, h1 };
+        SDL_RenderCopy(ren, t1, w1 > maxw ? &src : NULL, &d);
+    }
+    if (t2) {
+        int rw = w2 > maxw ? maxw : w2;
+        SDL_Rect src = { 0, 0, rw, h2 }, d = { (PWIN_W - rw) / 2, y + h1 + 4, rw, h2 };
+        SDL_RenderCopy(ren, t2, w2 > maxw ? &src : NULL, &d);
+    }
 }
 int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                 const char *title, double start_sec, double *out_pos, double *out_dur) {

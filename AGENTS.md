@@ -167,3 +167,31 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Build validado sem erros nem avisos. Pendente no hardware: navegacao por mais de
   3.000 capas, Salvos durante perda de rede, TS/HLS com origem nao zero e comparacao
   de `player_stats.txt` entre um video fluido e um problemático.
+
+## Auditoria visual geral em 10/08/2026 (0.6.5)
+
+- `source/ui.c` concentra agora cabecalho de 72 px, rodape de 52 px, paineis com
+  barra de destaque, foco, badges, progresso, estado vazio e alinhamento de texto.
+  Novas telas devem reutilizar esses helpers em vez de criar medidas isoladas.
+- Login foi reconstruido como card central com acao principal, explicacao de
+  seguranca, erro contido e saida separada. Configuracoes usam dois cards claros
+  para diferenciar itens da conta e arquivos offline na microSD.
+- Inicio, busca, series, seletor de episodios e Salvos compartilham margens de
+  40 px, hierarquia de titulo/subtitulo, foco com barra lateral e rodape fixo.
+  O calculo de scroll reserva o rodape, evitando que a selecao fique escondida.
+- Cards de catalogo incluem uma area propria para titulo e o foco cobre capa e
+  texto. Telas vazias, carregando catalogo e atualizando Salvos ganharam mensagens
+  centralizadas com contexto, em vez de texto solto no canto.
+- Detalhes de filme ganharam poster em painel, metadados/sinopse organizados,
+  botoes com rotulo centralizado, divisao clara de elenco/relacionados e rodape.
+- A tela de serie organiza poster/metadados num painel lateral. Varias versoes de
+  audio aparecem como opcao atual + posicao (`1/2`) e instrucao `ZL/ZR`, sem uma
+  sequencia de rotulos capaz de ultrapassar a coluna.
+- Espera do servidor, resolucao inicial e download offline foram alinhados ao mesmo
+  sistema visual. O fluxo offline explica novamente que ocupa a microSD.
+- Player teve controles compactos/expandidos redistribuidos em grades regulares.
+  Legendas longas agora quebram em ate duas linhas, em vez de serem comprimidas e
+  deformadas horizontalmente.
+- Pendente no hardware: capturar login, Inicio com 2+ rails, busca com duas linhas,
+  serie com audio duplo, filme com elenco/relacionados, Salvos cheio/vazio, download
+  offline e HUD compacto/expandido. Conferir overscan e legibilidade a distancia.

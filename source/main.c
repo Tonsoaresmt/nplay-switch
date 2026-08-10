@@ -252,12 +252,13 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     else {
         fill_rect(x, y, cw, coverH, C_CARD);
         char ini[2] = { title[0] ? title[0] : '?', 0 };
-        text_draw(gRen, ini, x + cw / 2 - 8, y + coverH / 2 - 16, C_MUT, 1);
+        text_center_at(ini, x, cw, y + coverH / 2 - 18, C_MUT, 1);
     }
     if (fav) { fill_rect(x + cw - 26, y + 6, 20, 20, C_ROSE); text_draw(gRen, "*", x + cw - 21, y + 4, C_TEXT, 0); }
+    fill_rect(x, y + coverH, cw, 38, selected ? C_CARD : C_BG);
     char sh[48]; short_title(title, sh, (int)sizeof(sh));
     text_clip(sh, x, y + coverH + 6, selected ? C_TEXT : C_MUT, 0, cw);
-    if (selected) border_rect(x - 3, y - 3, cw + 6, coverH + 6, 3, C_ACC2);
+    if (selected) { ui_focus(x - 3, y - 3, cw + 6, coverH + 44); fill_rect(x, y + coverH + 35, cw, 3, C_ACC2); }
 }
 
 // ============================================================= estado / telas
@@ -445,7 +446,12 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
 // fica numa preparacao visual e inicia automaticamente quando estiver pronto.
 int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
-    text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
+    ui_header("NPLAY", "Abrindo video", "");
+    ui_panel(260, 210, WIN_W - 520, 250, C_ACC2);
+    text_draw(gRen, "PREPARANDO", 300, 244, C_ACC2, 0);
+    text_center_at(title && title[0] ? title : "Video", 300, WIN_W - 600, 286, C_TEXT, 1);
+    text_center_at("Localizando uma fonte compativel para reproducao...", 300, WIN_W - 600, 354, C_MUT, 0);
+    for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
     SDL_RenderPresent(gRen);
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
     struct membuf out = { 0 }; const char *err = NULL;
@@ -572,9 +578,7 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
     int peers = job ? jint(job, "peers") : 0;
 
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
-    fill_rect(0, 0, WIN_W, 68, C_BAR);
-    text_draw(gRen, "NPLAY  /  PREPARANDO REPRODUCAO", 42, 21, C_ACC, 0);
-    text_draw(gRen, "B  voltar e continuar em segundo plano", WIN_W - 430, 21, C_MUT, 0);
+    ui_header("NPLAY", "Preparando reproducao", "B Segundo plano");
     text_clip(title ? title : "Video", 70, 96, C_TEXT, 1, WIN_W - 140);
 
     // Oito barras em onda. O movimento continua mesmo enquanto o percentual
@@ -593,14 +597,14 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
         "Preparando o video para reproduzir";
     int hw = 0, hh = 0; text_cached(gRen, headline, C_TEXT, 1, &hw, &hh);
     text_draw(gRen, headline, (WIN_W - hw) / 2, 255, C_TEXT, 1);
-    text_draw(gRen, "O processamento acontece no servidor e nao ocupa espaco no seu Switch.", 246, 305, C_MUT, 0);
+    text_center("O processamento acontece no servidor e nao ocupa espaco no seu Switch.", 305, C_MUT, 0);
 
     int bx = 120, by = 365, bw = WIN_W - 240;
     fill_rect(bx, by, bw, 20, C_CARD);
     if (pct > 0) fill_rect(bx, by, bw * pct / 100, 20, C_ACC2);
     else { int iw = 150, ix = bx + (int)((now / 5) % (bw + iw)) - iw; if (ix < bx) iw -= bx - ix, ix = bx; if (ix + iw > bx + bw) iw = bx + bw - ix; if (iw > 0) fill_rect(ix, by, iw, 20, C_ACC2); }
     char percent[32]; snprintf(percent, sizeof(percent), "%d%%", pct);
-    text_draw(gRen, percent, WIN_W / 2 - 24, 399, C_TEXT, 1);
+    text_center(percent, 399, C_TEXT, 1);
 
     char amount[128], rate[96], remaining[96];
     if (size > 0) snprintf(amount, sizeof(amount), "Preparado: %.1f de %.1f MB", downloaded / 1048576.0, size / 1048576.0);
@@ -756,17 +760,20 @@ static int local_dl_progress(long long received, long long total, void *userdata
     if (now - p->last_draw >= 100 || received == total) {
         p->last_draw = now;
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
-        text_draw(gRen, "Baixando para a microSD", 60, 82, C_TEXT, 1);
-        text_clip(p->title ? p->title : "Video", 60, 132, C_MUT, 0, WIN_W - 120);
+        ui_header("DOWNLOAD OFFLINE", "Baixando para a microSD", "B Cancelar");
+        ui_panel(120, 150, WIN_W - 240, 300, C_ACC2);
+        text_draw(gRen, "ARQUIVO", 160, 180, C_ACC2, 0);
+        text_clip(p->title ? p->title : "Video", 160, 220, C_TEXT, 1, WIN_W - 320);
         int pct = total > 0 ? (int)(received * 100 / total) : 0;
         if (pct > 100) pct = 100;
-        fill_rect(60, 210, WIN_W - 120, 18, C_CARD);
-        fill_rect(60, 210, (WIN_W - 120) * pct / 100, 18, C_ACC2);
+        ui_progress(160, 298, WIN_W - 320, pct, C_ACC2);
         char status[128];
         if (total > 0) snprintf(status, sizeof(status), "%d%%  -  %.1f de %.1f MB", pct, received / 1048576.0, total / 1048576.0);
         else snprintf(status, sizeof(status), "%.1f MB recebidos", received / 1048576.0);
-        text_draw(gRen, status, 60, 250, C_TEXT, 0);
-        text_draw(gRen, "Mantenha o app aberto  |  B cancela", 60, WIN_H - 54, C_MUT, 0);
+        text_center_at(status, 160, WIN_W - 320, 330, C_TEXT, 1);
+        text_center_at("Este arquivo ocupa espaco na microSD e fica disponivel sem internet.",
+                       160, WIN_W - 320, 392, C_MUT, 0);
+        ui_footer("Mantenha o aplicativo aberto    B Cancelar download");
         SDL_RenderPresent(gRen);
     }
     return p->cancel;
@@ -868,15 +875,17 @@ static void do_search(void) {
 
 // ------------------------------------------------------------- render: barra
 static void draw_topbar(void) {
-    fill_rect(0, 0, WIN_W, 66, C_BAR);
+    fill_rect(0, 0, WIN_W, 72, C_BAR);
+    fill_rect(0, 0, 6, 72, C_ACC);
     text_draw(gRen, "Nplay", 40, 18, C_ACC, 1);
     int tx = 172;
     for (int t = 0; t < NTABS; t++) {
-        int w = text_draw(gRen, TAB_NAME[t], tx, 20, (t == g_tab) ? C_TEXT : C_MUT, 0);
-        if (t == g_tab) fill_rect(tx, 46, w, 3, C_ACC);
+        int w = text_draw(gRen, TAB_NAME[t], tx, 22, (t == g_tab) ? C_TEXT : C_MUT, 0);
+        if (t == g_tab) fill_rect(tx, 53, w, 3, C_ACC);
         tx += w + 24;
     }
-    text_draw(gRen, "Y busca   (-) config   (+) sair", WIN_W - 330, 24, C_MUT, 0);
+    text_right("Y Busca   - Config.   + Sair", WIN_W - 40, 24, C_MUT, 0);
+    fill_rect(40, 71, WIN_W - 80, 1, C_CARD);
 }
 
 // ------------------------------------------------------------- render: landing
@@ -887,7 +896,11 @@ static void draw_topbar(void) {
 #define RAILS_TOP (108 + HERO_H + 24)
 static void draw_landing(void) {
     draw_topbar();
-    if (!g_land) { text_draw(gRen, g_status[0] ? g_status : "Carregando...", 40, 110, C_MUT, 0); return; }
+    if (!g_land) {
+        ui_empty_state(g_status[0] ? g_status : "Carregando catalogo", "Verifique a conexao caso esta tela demore para responder.");
+        ui_footer("Y Buscar    L/R Trocar categoria    - Configuracoes");
+        return;
+    }
     char hi[180]; snprintf(hi, sizeof(hi), "Bem-vindo de volta%s%s", g_user[0] ? ", " : "", g_user[0] ? g_user : "");
     if (g_tab == 0) text_draw(gRen, hi, 40, 76 - g_homeScroll, C_MUT, 0);
     else text_draw(gRen, TAB_NAME[g_tab], 40, 76 - g_homeScroll, C_MUT, 0);
@@ -896,20 +909,19 @@ static void draw_landing(void) {
     int hy = 108 - g_homeScroll;
     if (nh > 0) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
-        fill_rect(40, hy, WIN_W - 80, HERO_H, C_BAR);
-        if (g_railSel == -1) border_rect(37, hy - 3, WIN_W - 74, HERO_H + 6, 3, C_ACC2);
+        ui_panel(40, hy, WIN_W - 80, HERO_H, C_ACC);
+        if (g_railSel == -1) ui_focus(36, hy - 4, WIN_W - 72, HERO_H + 8);
         SDL_Texture *tex = cover_get(jstr(h, "logo"));
         SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
         if (tex) SDL_RenderCopy(gRen, tex, NULL, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
         text_draw(gRen, "DESTAQUE", 228, hy + 28, C_ACC, 0);
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
-        char ht2[42]; short_title(ht, ht2, (int)sizeof(ht2));
-        text_draw(gRen, ht2, 228, hy + 54, C_TEXT, 1);
+        text_clip(ht, 228, hy + 54, C_TEXT, 1, WIN_W - 228 - 180);
         const char *hk = jstr(h, "kind");
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
         text_draw(gRen, kl, 228, hy + 100, C_MUT, 0);
-        text_draw(gRen, "A abre   -   D-pad esq/dir troca o destaque", 228, hy + HERO_H - 40, C_MUT, 0);
+        text_draw(gRen, "A Abrir     Esquerda/direita Trocar destaque", 228, hy + HERO_H - 40, C_MUT, 0);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
         text_draw(gRen, cnt, WIN_W - 128, hy + HERO_H - 40, C_MUT, 0);
     }
@@ -935,7 +947,8 @@ static void draw_landing(void) {
         y += 30 + RCH + 40;
         if (y > WIN_H + 240) break;
     }
-    if (g_railsN == 0 && nh == 0) text_draw(gRen, "Nada por aqui ainda.", 40, 140, C_MUT, 0);
+    if (g_railsN == 0 && nh == 0) ui_empty_state("Nada por aqui ainda", "Tente atualizar a pagina ou escolher outra categoria.");
+    ui_footer("A Abrir    X Minha lista    Y Buscar    L/R Trocar categoria");
 }
 
 // ------------------------------------------------------------- render: busca (grade)
@@ -949,10 +962,16 @@ static void draw_landing(void) {
 static void draw_search(void) {
     draw_topbar();
     int nm = srch_movies(), ns = srch_series(), n = nm + ns;
-    char hd[200]; snprintf(hd, sizeof(hd), "Busca: \"%s\"  -  %d resultado%s   (B volta, Y nova busca)", g_srchQuery, n, n == 1 ? "" : "s");
-    text_draw(gRen, hd, 40, 78, C_TEXT, 0);
-    if (n == 0) { text_draw(gRen, "Nada encontrado. Aperte Y pra tentar outro termo.", 40, 130, C_MUT, 0); return; }
-    int top = 108;
+    char hd[200]; snprintf(hd, sizeof(hd), "Resultados para \"%s\"", g_srchQuery);
+    text_clip(hd, 40, 88, C_TEXT, 1, 850);
+    char count[64]; snprintf(count, sizeof(count), "%d resultado%s", n, n == 1 ? "" : "s");
+    text_right(count, WIN_W - 40, 94, C_MUT, 0);
+    if (n == 0) {
+        ui_empty_state("Nenhum resultado", "Pressione Y para buscar usando outro nome.");
+        ui_footer("Y Nova busca    B Voltar");
+        return;
+    }
+    int top = 138;
     for (int i = 0; i < n; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -962,6 +981,7 @@ static void draw_search(void) {
         int fav = is ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
         draw_card(x, yy, GCOVERW, GCOVERH, it, i == g_srchSel, fav);
     }
+    ui_footer("A Abrir    X Minha lista    Y Nova busca    B Voltar");
 }
 
 // ------------------------------------------------------------- render: serie
@@ -1006,40 +1026,39 @@ static void draw_series(void) {
     cJSON *s = ser_obj();
     int sid = jint(s, "id");
     int fav = is_fav_series(sid);
-    fill_rect(0, 0, WIN_W, 66, C_BAR);
-    text_draw(gRen, "< (B) voltar", 40, 22, C_MUT, 0);
     const char *title = jstr(s, "title"); if (!title) title = "Serie";
-    text_clip(title, 200, 16, C_TEXT, 1, WIN_W - 420);
-    fill_rect(WIN_W - 300, 14, 260, 40, fav ? C_ROSE : C_CARD);
-    text_draw(gRen, fav ? "* Na Minha lista (X)" : "+ Minha lista (X)", WIN_W - 288, 22, C_TEXT, 0);
+    ui_header("NPLAY / SERIE", title, "B Voltar");
 
-    int LX = 40, LW = 220;
+    int LX = 48, LW = 212;
+    ui_panel(32, 88, 244, 548, C_ACC);
     SDL_Texture *tex = cover_get(jstr(s, "logo"));
-    SDL_Rect cr = { LX, 100, LW, 314 };
-    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr); else fill_rect(LX, 100, LW, 314, C_CARD);
+    SDL_Rect cr = { LX, 104, LW, 302 };
+    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr); else fill_rect(LX, 104, LW, 302, C_BAR);
     const char *year = jstr(s, "year");
     double rating = 0; cJSON *jr = cJSON_GetObjectItem(s, "rating"); if (jr && cJSON_IsNumber(jr)) rating = jr->valuedouble;
     char l1[80];
     if (rating > 0) snprintf(l1, sizeof(l1), "%s%sNota %.1f", year ? year : "", year ? "   " : "", rating);
     else snprintf(l1, sizeof(l1), "%s", year ? year : "");
-    if (l1[0]) text_clip(l1, LX, 426, C_TEXT, 0, LW);
+    if (l1[0]) text_clip(l1, LX, 420, C_TEXT, 0, LW);
     const char *genre = jstr(s, "genre");
-    if (genre) text_clip(genre, LX, 456, C_MUT, 0, LW);
+    if (genre) text_clip(genre, LX, 452, C_MUT, 0, LW);
     char epc[48]; snprintf(epc, sizeof(epc), "%d episodios", jint(s, "episode_count"));
-    text_clip(epc, LX, 486, C_MUT, 0, LW);
+    text_clip(epc, LX, 484, C_MUT, 0, LW);
 
     // versoes de audio (Legendado/Dublado) - troca com Y
     cJSON *au = ser_audio();
     if (arr_len(au) > 1) {
-        text_draw(gRen, "Audio (ZL/ZR):", LX, 520, C_MUT, 0);
-        int axx = LX; cJSON *av;
+        text_draw(gRen, "VERSAO DE AUDIO", LX, 526, C_ACC2, 0);
+        int ai = 0, current = 0; const char *current_label = "?"; cJSON *av;
         cJSON_ArrayForEach(av, au) {
-            int cur = cJSON_IsTrue(cJSON_GetObjectItem(av, "current"));
-            const char *lb = jstr(av, "label"); if (!lb) lb = "?";
-            int w = text_draw(gRen, lb, axx, 548, cur ? C_TEXT : C_MUT, 0);
-            if (cur) fill_rect(axx, 570, w, 3, C_ACC);
-            axx += w + 20;
+            if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) {
+                current = ai; current_label = jstr(av, "label"); if (!current_label) current_label = "?";
+            }
+            ai++;
         }
+        char audio_state[96]; snprintf(audio_state, sizeof(audio_state), "%s  %d/%d", current_label, current + 1, arr_len(au));
+        text_clip(audio_state, LX, 558, C_TEXT, 0, LW);
+        text_draw(gRen, "ZL/ZR para trocar", LX, 594, C_MUT, 0);
     }
 
     int RX = 300, REND = WIN_W - 40;
@@ -1048,8 +1067,11 @@ static void draw_series(void) {
     char sh[64];
     if (grouped) snprintf(sh, sizeof(sh), "Temporada %d de %d", ser_group_idx() + 1, nsea);
     else { cJSON *sa = season_arr(); snprintf(sh, sizeof(sh), "Temporada %s", (sa && sa->string) ? sa->string : "1"); }
-    text_draw(gRen, sh, RX, 100, C_ACC, 1);
-    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R troca temporada  (%d)", nsea); text_draw(gRen, hint, RX + 300, 108, C_MUT, 0); }
+    text_draw(gRen, sh, RX, 96, C_TEXT, 1);
+    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R  %d temporadas", nsea); text_draw(gRen, hint, RX + 300, 104, C_MUT, 0); }
+    fill_rect(WIN_W - 276, 92, 236, 42, fav ? C_ROSE : C_CARD);
+    text_center_at(fav ? "X  Na Minha lista" : "X  Adicionar a lista",
+                   WIN_W - 276, 236, 99, C_TEXT, 0);
     fill_rect(RX, 148, REND - RX, 2, C_CARD);
 
     int listTop = 168, rowH = 40, visible = (WIN_H - listTop - 44) / rowH;
@@ -1058,7 +1080,7 @@ static void draw_series(void) {
     for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
         cJSON *ep = ser_ep_at(i);
         int yy = listTop + (i - g_epScroll) * rowH;
-        if (i == g_epSel) fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD);
+        if (i == g_epSel) { fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD); fill_rect(RX - 8, yy - 5, 4, rowH - 2, C_ACC2); }
         int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
         int done = cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed"));
         text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : (done ? C_GREEN : C_MUT), 0);
@@ -1073,7 +1095,7 @@ static void draw_series(void) {
         fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    text_draw(gRen, "A assistir  L/R temporada  Y salvar na conta  X lista  ZL/ZR audio", RX, WIN_H - 36, C_MUT, 0);
+    ui_footer("A Assistir    L/R Temporada    Y Salvar na conta    X Minha lista    ZL/ZR Audio");
 }
 
 // Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
@@ -1084,19 +1106,18 @@ static void open_dlmenu(void) {
     g_dlmenu = 1;
 }
 static void draw_dlmenu(void) {
-    fill_rect(0, 0, WIN_W, 66, C_BAR);
-    text_draw(gRen, "Salvar na conta (fica no servidor, pronto pra assistir)", 40, 20, C_TEXT, 1);
     cJSON *s = ser_obj(); const char *title = jstr(s, "title");
-    if (title) text_clip(title, 320, 22, C_MUT, 0, WIN_W - 360);
+    ui_header("SALVAR NA CONTA", title ? title : "Escolher episodios", "B Cancelar");
+    text_center("Selecione os episodios que o servidor deve preparar", 78, C_MUT, 0);
     int n = ser_nep(), cnt = 0;
     for (int i = 0; i < g_epChkN; i++) if (g_epChk[i]) cnt++;
-    int listTop = 92, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
+    int listTop = 118, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
     if (g_epSel < g_epScroll) g_epScroll = g_epSel;
     if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
     for (int i = g_epScroll; i < n && i < g_epScroll + visible; i++) {
         cJSON *ep = ser_ep_at(i);
         int yy = listTop + (i - g_epScroll) * rowH, sel = (i == g_epSel);
-        if (sel) fill_rect(32, yy - 5, WIN_W - 64, rowH - 2, C_CARD);
+        if (sel) { fill_rect(32, yy - 5, WIN_W - 64, rowH - 2, C_CARD); fill_rect(32, yy - 5, 4, rowH - 2, C_ACC2); }
         int chk = (i < g_epChkN) && g_epChk[i];
         border_rect(48, yy + 1, 22, 22, 2, chk ? C_ACC : C_MUT);
         if (chk) fill_rect(53, yy + 6, 12, 12, C_ACC);
@@ -1104,8 +1125,8 @@ static void draw_dlmenu(void) {
         text_draw(gRen, nb, 86, yy, sel ? C_ACC : C_MUT, 0);
         text_clip(ep_clean(jstr(ep, "title")), 170, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 240);
     }
-    char foot[110]; snprintf(foot, sizeof(foot), "%d selecionado(s)   -   A marca   X todos   Y salva selecionados   B cancela", cnt);
-    text_draw(gRen, foot, 40, WIN_H - 40, C_MUT, 0);
+    char foot[140]; snprintf(foot, sizeof(foot), "%d selecionado%s    A Marcar    X Todos    Y Salvar selecionados    B Cancelar", cnt, cnt == 1 ? "" : "s");
+    ui_footer(foot);
 }
 static void input_dlmenu(int b) {
     int n = ser_nep();
@@ -1138,15 +1159,20 @@ static void input_dlmenu(int b) {
 // ------------------------------------------------------------- render: downloads
 // Vista 1: GRADE de capas, uma por obra (serie agrupada / filme avulso).
 static void draw_dl_grid(void) {
-    text_draw(gRen, "Salvos na sua conta", 40, 78, C_TEXT, 1);
-    text_draw(gRen, "(ficam no servidor - assiste de qualquer aparelho, sem ocupar o Switch)", 40, 108, C_MUT, 0);
-    if (dl_has_active()) text_draw(gRen, "TELA ATIVA", WIN_W - 170, 84, C_GREEN, 0);
-    if (g_dlgN == 0) {
-        text_draw(gRen, "Nada salvo ainda.", 40, 152, C_MUT, 0);
-        text_draw(gRen, "Abra um filme e A, ou Y numa serie pra escolher os episodios.", 40, 184, C_MUT, 0);
+    text_draw(gRen, "Salvos na sua conta", 40, 88, C_TEXT, 1);
+    text_draw(gRen, "Disponiveis em qualquer aparelho e sem ocupar espaco no Switch", 40, 126, C_MUT, 0);
+    if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 90, C_GREEN);
+    if (!g_dl && g_dl_thread) {
+        ui_empty_state("Atualizando seus itens", "Buscando o estado mais recente da sua conta...");
+        ui_footer("B Voltar");
         return;
     }
-    int top = 138;
+    if (g_dlgN == 0) {
+        ui_empty_state("Nenhum item salvo", "Abra um filme ou pressione Y em uma serie para preparar episodios.");
+        ui_footer("Y em uma serie Escolher episodios    A em um filme Preparar");
+        return;
+    }
+    int top = 164;
     for (int i = 0; i < g_dlgN; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -1165,10 +1191,11 @@ static void draw_dl_grid(void) {
         text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
         const char *title = jstr(j0, "title"); if (!title) title = "";
         char sh[48]; short_title(title, sh, sizeof(sh));
+        fill_rect(x, yy + GCOVERH, GCOVERW, 38, i == g_dlSel ? C_CARD : C_BG);
         text_clip(sh, x, yy + GCOVERH + 6, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
-        if (i == g_dlSel) border_rect(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 6, 3, C_ACC2);
+        if (i == g_dlSel) { ui_focus(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 44); fill_rect(x, yy + GCOVERH + 35, GCOVERW, 3, C_ACC2); }
     }
-    text_draw(gRen, "A abre  |  Y microSD  |  ZR apaga microSD  |  X remove do servidor", 40, WIN_H - 34, C_MUT, 0);
+    ui_footer("A Abrir    Y Baixar na microSD    ZR Apagar da microSD    X Remover da conta");
 }
 // Vista 2: episodios baixados de UMA obra (com status), estilo menu de serie.
 static void draw_dl_detail(void) {
@@ -1176,17 +1203,17 @@ static void draw_dl_detail(void) {
     if (g >= g_dlgN) { g_dlView = 0; return; }
     cJSON *j0 = dlg_job(g, 0);
     const char *title = jstr(j0, "title"); if (!title) title = "";
-    text_draw(gRen, "< (B) voltar", 40, 84, C_MUT, 0);
-    if (dl_has_active()) text_draw(gRen, "TELA ATIVA", WIN_W - 170, 84, C_GREEN, 0);
-    text_clip(title, 200, 82, C_TEXT, 1, WIN_W - 240);
+    text_draw(gRen, "EPISODIOS SALVOS", 40, 92, C_ACC2, 0);
+    text_clip(title, 40, 124, C_TEXT, 1, WIN_W - 300);
+    if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 96, C_GREEN);
     int nj = g_dlg[g].nJobs;
-    int listTop = 128, rowH = 46, visible = (WIN_H - listTop - 44) / rowH;
+    int listTop = 176, rowH = 46, visible = (WIN_H - listTop - 56) / rowH;
     if (g_dlDetSel < g_dlDetScroll) g_dlDetScroll = g_dlDetSel;
     if (g_dlDetSel >= g_dlDetScroll + visible) g_dlDetScroll = g_dlDetSel - visible + 1;
     for (int i = g_dlDetScroll; i < nj && i < g_dlDetScroll + visible; i++) {
         cJSON *j = dlg_job(g, i);
         int yy = listTop + (i - g_dlDetScroll) * rowH, sel = (i == g_dlDetSel);
-        if (sel) fill_rect(32, yy - 6, WIN_W - 64, rowH - 4, C_CARD);
+        if (sel) { fill_rect(32, yy - 6, WIN_W - 64, rowH - 4, C_CARD); fill_rect(32, yy - 6, 4, rowH - 4, C_ACC2); }
         int ready = cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"));
         const char *state = jstr(j, "state");
         int erro = state && (!strcmp(state, "erro") || !strcmp(state, "error") ||
@@ -1207,10 +1234,7 @@ static void draw_dl_detail(void) {
         else if (erro) snprintf(st, sizeof(st), "ERRO");
         else snprintf(st, sizeof(st), "salvando %d%%", pct);
         text_draw(gRen, st, WIN_W - 260, yy, ready ? C_GREEN : (erro ? C_ROSE : C_ACC), 0);
-        int bx = WIN_W - 260, by = yy + 24, bw = 200, bh = 5;
-        fill_rect(bx, by, bw, bh, C_BAR);
-        int fw = bw * pct / 100; if (fw > bw) fw = bw; if (fw < 0) fw = 0;
-        fill_rect(bx, by, fw, bh, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
+        ui_progress(WIN_W - 260, yy + 27, 200, pct, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
     }
     if (nj > visible) {
         int trkH = visible * rowH, thumbH = trkH * visible / nj;
@@ -1218,7 +1242,7 @@ static void draw_dl_detail(void) {
         fill_rect(WIN_W - 22, listTop, 4, trkH, C_CARD);
         fill_rect(WIN_W - 22, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
-    text_draw(gRen, "A assistir  |  Y microSD  |  ZR apaga microSD  |  X remove servidor  |  B volta", 40, WIN_H - 34, C_MUT, 0);
+    ui_footer("A Assistir    Y Baixar na microSD    ZR Apagar local    X Remover da conta    B Voltar");
 }
 static void draw_downloads(void) {
     draw_topbar();
@@ -1256,10 +1280,18 @@ static int do_login(void) {
     return ok;
 }
 static void draw_login(void) {
-    text_draw(gRen, "Nplay", WIN_W / 2 - 70, 220, C_ACC, 1);
-    text_draw(gRen, "Aperte  A  para entrar com sua conta", WIN_W / 2 - 220, 320, C_TEXT, 0);
-    text_draw(gRen, "(+) para sair do app", WIN_W / 2 - 110, 360, C_MUT, 0);
-    if (g_status[0]) text_draw(gRen, g_status, WIN_W / 2 - 220, 420, C_ROSE, 0);
+    const int x = 330, y = 138, w = 620, h = 430;
+    ui_panel(x, y, w, h, C_ACC);
+    text_center_at("NPLAY", x, w, y + 52, C_ACC, 1);
+    text_center_at("Entre para continuar no Nintendo Switch", x, w, y + 105, C_MUT, 0);
+    fill_rect(x + 90, y + 174, w - 180, 58, C_ACC);
+    text_center_at("A   Entrar com minha conta", x + 90, w - 180, y + 187, C_TEXT, 0);
+    text_center_at("Sua senha e digitada pelo teclado seguro do console", x, w, y + 258, C_MUT, 0);
+    if (g_status[0]) {
+        fill_rect(x + 36, y + 308, w - 72, 48, C_BAR);
+        text_center_at(g_status, x + 52, w - 104, y + 318, C_ROSE, 0);
+    }
+    text_center("+  Sair do aplicativo", WIN_H - 70, C_MUT, 0);
 }
 
 // ------------------------------------------------------------- input
@@ -1291,8 +1323,8 @@ static void input_landing(int b) {
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
     else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { if (g_rails[g_railSel].is_series) toggle_fav_series(jint(it, "id")); else toggle_fav_item(jint(it, "id")); } }
     int ry = (nh > 0 ? RAILS_TOP : 120) + g_railSel * (30 + RCH + 40);
-    if (ry + RCH + 60 - g_homeScroll > WIN_H) g_homeScroll = ry + RCH + 60 - WIN_H + 20;
-    if (ry - g_homeScroll < 76) g_homeScroll = ry - 76;
+    if (ry + RCH + 60 - g_homeScroll > WIN_H - 52) g_homeScroll = ry + RCH + 60 - (WIN_H - 52) + 20;
+    if (ry - g_homeScroll < 80) g_homeScroll = ry - 80;
     if (g_homeScroll < 0) g_homeScroll = 0;
 }
 static void input_search(int b) {
@@ -1304,9 +1336,9 @@ static void input_search(int b) {
     else if (b == JOY_DRIGHT) { if (g_srchSel + 1 < n) g_srchSel++; }
     else if (b == JOY_A) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) open_item(it, is); }
     else if (b == JOY_X) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) { if (is) toggle_fav_series(jint(it, "id")); else toggle_fav_item(jint(it, "id")); } }
-    int row = g_srchSel / GCOLS, rowTop = 108 + row * (GCH + GGAP), rowBot = rowTop + GCH;
-    if (rowBot - g_srchScroll > WIN_H) g_srchScroll = rowBot - WIN_H + 16;
-    if (rowTop - g_srchScroll < 108) g_srchScroll = rowTop - 108;
+    int row = g_srchSel / GCOLS, rowTop = 138 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    if (rowBot - g_srchScroll > WIN_H - 52) g_srchScroll = rowBot - (WIN_H - 52) + 16;
+    if (rowTop - g_srchScroll < 138) g_srchScroll = rowTop - 138;
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
 static void input_series(int b) {
@@ -1383,9 +1415,9 @@ static void input_downloads(int b) {
     else if (b == JOY_X) {   // remove a obra inteira
         if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
     }
-    int row = g_dlSel / GCOLS, rowTop = 138 + row * (GCH + GGAP), rowBot = rowTop + GCH;
-    if (rowBot - g_dlScroll > WIN_H) g_dlScroll = rowBot - WIN_H + 16;
-    if (rowTop - g_dlScroll < 138) g_dlScroll = rowTop - 138;
+    int row = g_dlSel / GCOLS, rowTop = 164 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    if (rowBot - g_dlScroll > WIN_H - 52) g_dlScroll = rowBot - (WIN_H - 52) + 16;
+    if (rowTop - g_dlScroll < 164) g_dlScroll = rowTop - 164;
     if (g_dlScroll < 0) g_dlScroll = 0;
 }
 
@@ -1398,31 +1430,40 @@ static void load_accel_status(void) {
     g_accel_status = api_get("/api/accel/status");
 }
 static void draw_settings(void) {
-    fill_rect(0, 0, WIN_W, 66, C_BAR);
-    text_draw(gRen, "Nplay - Configuracoes", 40, 20, C_ACC, 1);
-    text_draw(gRen, "(B) volta", WIN_W - 150, 24, C_MUT, 0);
-    char v[96]; snprintf(v, sizeof(v), "Versao do app: %s", APP_VERSION_STR);
-    text_draw(gRen, v, 40, 92, C_MUT, 0);
-    char u[180]; snprintf(u, sizeof(u), "Conta: %s", g_user[0] ? g_user : "-");
-    text_draw(gRen, u, 40, 122, C_MUT, 0);
-    text_draw(gRen, "ARMAZENAMENTO", 40, 180, C_ACC2, 0);
-    text_draw(gRen, "Salvos na conta", 40, 218, C_TEXT, 0);
-    text_draw(gRen, "Continuam no servidor mesmo com o app fechado e nao ocupam espaco no console.", 40, 248, C_MUT, 0);
+    ui_header("NPLAY", "Configuracoes", "B Voltar");
+    char v[96]; snprintf(v, sizeof(v), "Versao %s", APP_VERSION_STR);
+    char u[180]; snprintf(u, sizeof(u), "Conta  %s", g_user[0] ? g_user : "-");
+    text_draw(gRen, u, 40, 92, C_TEXT, 0);
+    text_right(v, WIN_W - 40, 92, C_MUT, 0);
+    text_draw(gRen, "ARMAZENAMENTO", 40, 138, C_ACC2, 0);
+
+    ui_panel(40, 174, 580, 170, C_ACC);
+    text_draw(gRen, "SALVOS NA CONTA", 68, 194, C_ACC, 0);
+    text_draw(gRen, "Prontos para assistir em qualquer aparelho.", 68, 232, C_TEXT, 0);
+    text_draw(gRen, "Nao usam o armazenamento do console.", 68, 264, C_MUT, 0);
     if (g_accel_status) {
-        char sl[96]; snprintf(sl, sizeof(sl), "%d item(ns) disponiveis na sua conta", jint(g_accel_status, "count"));
-        text_draw(gRen, sl, 40, 278, C_GREEN, 0);
-    } else text_draw(gRen, "Consultando sua conta...", 40, 278, C_MUT, 0);
-    text_draw(gRen, "Downloads no Switch", 40, 322, C_TEXT, 0);
-    text_draw(gRen, "Copias offline ficam somente na microSD. Use Y em um item pronto na aba Salvos.", 40, 352, C_MUT, 0);
-    char local[96]; snprintf(local, sizeof(local), "%d arquivo(s) offline na microSD", local_dl_count());
-    text_draw(gRen, local, 40, 382, C_GREEN, 0);
+        int count = jint(g_accel_status, "count");
+        char sl[96]; snprintf(sl, sizeof(sl), count == 1 ? "%d item disponivel" : "%d itens disponiveis", count);
+        text_draw(gRen, sl, 68, 302, C_GREEN, 0);
+    } else text_draw(gRen, "Consultando sua conta...", 68, 302, C_MUT, 0);
+
+    ui_panel(644, 174, 596, 170, C_ACC2);
+    text_draw(gRen, "OFFLINE NA MICROSD", 672, 194, C_ACC2, 0);
+    text_draw(gRen, "Copias para assistir sem internet.", 672, 232, C_TEXT, 0);
+    text_draw(gRen, "Use Y em um item pronto na aba Salvos.", 672, 264, C_MUT, 0);
+    char local[96]; snprintf(local, sizeof(local), "%d arquivo%s offline", local_dl_count(), local_dl_count() == 1 ? "" : "s");
+    text_draw(gRen, local, 672, 302, C_GREEN, 0);
+
+    text_draw(gRen, "ACOES", 40, 382, C_ACC2, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 448 + i * 56;
-        if (i == g_setSel) fill_rect(36, y - 6, 470, 48, C_CARD);
-        text_draw(gRen, SET_ITEMS[i], 48, y, (i == g_setSel) ? C_TEXT : C_MUT, 0);
+        int y = 422 + i * 60;
+        fill_rect(260, y, 760, 48, C_CARD);
+        if (i == g_setSel) { ui_focus(256, y - 4, 768, 56); fill_rect(260, y, 4, 48, C_ACC2); }
+        text_draw(gRen, SET_ITEMS[i], 286, y + 9, (i == g_setSel) ? C_TEXT : C_MUT, 0);
+        text_right(i == 0 ? "A Verificar" : "A Confirmar", 994, y + 9, C_MUT, 0);
     }
-    if (g_status[0]) text_draw(gRen, g_status, 40, 448 + NSET * 56 + 22, C_ACC, 0);
-    text_draw(gRen, "A confirma   D-pad move   B volta", 40, WIN_H - 44, C_MUT, 0);
+    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 558, C_ACC, 0);
+    ui_footer("Cima/baixo Navegar    A Confirmar    B Voltar");
 }
 static void input_settings(int b) {
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
@@ -1579,8 +1620,9 @@ int main(int argc, char **argv) {
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
             int w = 0, h = 0;
             SDL_Texture *tx = text_cached(gRen, g_toast, C_TEXT, 0, &w, &h);
-            fill_rect(WIN_W / 2 - w / 2 - 18, WIN_H - 90, w + 36, h + 20, C_BAR);
-            if (tx) { SDL_Rect d = { WIN_W / 2 - w / 2, WIN_H - 80, w, h }; SDL_RenderCopy(gRen, tx, NULL, &d); }
+            fill_rect(WIN_W / 2 - w / 2 - 18, WIN_H - 120, w + 36, h + 20, C_BAR);
+            fill_rect(WIN_W / 2 - w / 2 - 18, WIN_H - 120, 4, h + 20, C_ACC);
+            if (tx) { SDL_Rect d = { WIN_W / 2 - w / 2, WIN_H - 110, w, h }; SDL_RenderCopy(gRen, tx, NULL, &d); }
         }
         SDL_RenderPresent(gRen);
         if (g_do_update) { g_do_update = 0; run_update(); }

@@ -83,9 +83,10 @@ void close_movie_details(void) {
 }
 
 static void draw_button(int x, int y, int w, const char *label, int selected) {
-    if (selected) fill_rect(x, y, w, 44, C_ACC);
-    else border_rect(x, y, w, 44, 2, C_MUT);
-    text_draw(gRen, label, x + 18, y + 9, selected ? C_TEXT : C_MUT, 0);
+    fill_rect(x, y, w, 48, selected ? C_ACC : C_CARD);
+    if (selected) ui_focus(x - 3, y - 3, w + 6, 54);
+    else border_rect(x, y, w, 48, 1, C_MUT);
+    text_center_at(label, x, w, y + 10, selected ? C_TEXT : C_MUT, 0);
 }
 
 void draw_movie(void) {
@@ -97,23 +98,22 @@ void draw_movie(void) {
     int year = jint(g_movie, "year");
     int duration = jint(g_movie, "duration");
 
-    fill_rect(0, 0, WIN_W, 66, C_BAR);
-    text_draw(gRen, "NPLAY  /  FILME", 40, 20, C_ACC, 0);
-    text_draw(gRen, "B  Voltar", WIN_W - 145, 20, C_MUT, 0);
+    ui_header("NPLAY / FILME", title ? title : "Filme", "B Voltar");
 
+    ui_panel(28, 86, 234, 343, C_ACC);
     SDL_Texture *poster = cover_get(logo);
-    if (poster) { SDL_Rect cr = {40, 90, 210, 315}; SDL_RenderCopy(gRen, poster, NULL, &cr); }
-    else { fill_rect(40, 90, 210, 315, C_CARD); text_draw(gRen, "Sem capa", 98, 230, C_MUT, 0); }
+    if (poster) { SDL_Rect cr = {40, 98, 210, 315}; SDL_RenderCopy(gRen, poster, NULL, &cr); }
+    else { fill_rect(40, 98, 210, 315, C_BAR); text_center_at("Sem capa", 40, 210, 242, C_MUT, 0); }
 
     const int dx = 280;
-    text_clip(title ? title : "Filme", dx, 88, C_TEXT, 1, WIN_W - dx - 40);
+    text_draw(gRen, "INFORMACOES", dx, 94, C_ACC2, 0);
     char meta[320] = {0};
     if (year > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%d", year);
     if (duration > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%d min", meta[0] ? "  |  " : "", duration);
     if (genre && genre[0]) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%s", meta[0] ? "  |  " : "", genre);
-    text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 130, C_MUT, 0, WIN_W - dx - 40);
+    text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 126, C_MUT, 0, WIN_W - dx - 40);
 
-    text_draw(gRen, "SINOPSE", dx, 171, C_ACC2, 0);
+    text_draw(gRen, "SINOPSE", dx, 168, C_ACC2, 0);
     int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
     if (g_plot_scroll > max_scroll) g_plot_scroll = max_scroll;
     for (int i = 0; i < PLOT_LINES && i + g_plot_scroll < g_plot_line_count; i++)
@@ -121,7 +121,7 @@ void draw_movie(void) {
     if (g_plot_line_count > PLOT_LINES) {
         char page[80];
         snprintf(page, sizeof(page), "Sinopse %d/%d  -  cima/baixo para ler", g_plot_scroll + 1, max_scroll + 1);
-        text_draw(gRen, page, WIN_W - 390, 344, C_MUT, 0);
+        text_right(page, WIN_W - 40, 344, C_MUT, 0);
     }
     if (director && director[0]) {
         char credit[260]; snprintf(credit, sizeof(credit), "Direcao: %s", director);
@@ -129,28 +129,29 @@ void draw_movie(void) {
     }
 
     int is_fav = is_fav_item(jint(g_movie, "id"));
-    draw_button(dx, 408, 150, "A  Assistir", g_movie_sel == 0);
-    draw_button(dx + 168, 408, 215, is_fav ? "Na Minha Lista" : "+ Minha Lista", g_movie_sel == 1);
+    draw_button(dx, 408, 172, "A  Assistir", g_movie_sel == 0);
+    draw_button(dx + 188, 408, 230, is_fav ? "Na Minha Lista" : "+ Minha Lista", g_movie_sel == 1);
 
     cJSON *cast = cJSON_GetObjectItemCaseSensitive(g_movie, "cast_list");
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int cast_n = arr_len(cast);
     int related_n = arr_len(related);
-    text_draw(gRen, g_info_tab ? "RELACIONADOS" : "ELENCO", 40, 474, C_ACC2, 0);
-    if (related_n > 0) text_draw(gRen, g_info_tab ? "L  Elenco" : "R  Relacionados", WIN_W - 210, 474, C_MUT, 0);
+    fill_rect(40, 474, WIN_W - 80, 2, C_CARD);
+    text_draw(gRen, g_info_tab ? "RELACIONADOS" : "ELENCO", 40, 488, C_ACC2, 0);
+    if (related_n > 0) text_right(g_info_tab ? "L  Ver elenco" : "R  Ver relacionados", WIN_W - 40, 488, C_MUT, 0);
     if (!g_info_tab && cast_n <= 0) {
-        text_draw(gRen, "Elenco ainda nao disponivel para este titulo.", 40, 516, C_MUT, 0);
+        text_draw(gRen, "Elenco ainda nao disponivel para este titulo.", 40, 530, C_MUT, 0);
     } else if (!g_info_tab) {
         int shown = cast_n > 8 ? 8 : cast_n;
         for (int i = 0; i < shown; i++) {
             cJSON *person = cJSON_GetArrayItem(cast, i);
             int x = 40 + i * 152;
             SDL_Texture *photo = cover_get(cast_photo(person));
-            if (photo) { SDL_Rect pr = {x, 510, 64, 82}; SDL_RenderCopy(gRen, photo, NULL, &pr); }
-            else { fill_rect(x, 510, 64, 82, C_CARD); text_draw(gRen, "?", x + 24, 535, C_MUT, 1); }
-            text_clip(jstr(person, "name") ? jstr(person, "name") : "-", x, 600, C_TEXT, 0, 140);
+            if (photo) { SDL_Rect pr = {x, 524, 64, 82}; SDL_RenderCopy(gRen, photo, NULL, &pr); }
+            else { fill_rect(x, 524, 64, 82, C_CARD); text_draw(gRen, "?", x + 24, 549, C_MUT, 1); }
+            text_clip(jstr(person, "name") ? jstr(person, "name") : "-", x, 612, C_TEXT, 0, 140);
             const char *character = jstr(person, "character");
-            if (character && character[0]) text_clip(character, x, 628, C_MUT, 0, 140);
+            if (character && character[0]) text_clip(character, x, 640, C_MUT, 0, 140);
         }
     } else {
         int shown = related_n > 10 ? 10 : related_n;
@@ -158,12 +159,12 @@ void draw_movie(void) {
             cJSON *item = cJSON_GetArrayItem(related, i);
             int x = 40 + i * 122;
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
-            if (cover) { SDL_Rect rr = {x, 510, 88, 126}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
-            else fill_rect(x, 510, 88, 126, C_CARD);
-            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, 644, C_TEXT, 0, 112);
+            if (cover) { SDL_Rect rr = {x, 524, 88, 106}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
+            else fill_rect(x, 524, 88, 106, C_CARD);
+            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, 638, C_TEXT, 0, 112);
         }
     }
-    text_draw(gRen, "Esquerda/direita seleciona  |  A confirma  |  B volta", 40, WIN_H - 42, C_MUT, 0);
+    ui_footer("Esquerda/direita Selecionar    A Confirmar    Cima/baixo Ler sinopse    B Voltar");
 }
 
 void input_movie(int b) {
