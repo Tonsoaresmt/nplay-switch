@@ -446,35 +446,61 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     if (scur >= 0 && open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
 
     double dur = (fmt->duration > 0) ? fmt->duration / (double)AV_TIME_BASE : 0;
+    double timeline_origin = (fmt->start_time != AV_NOPTS_VALUE)
+        ? fmt->start_time / (double)AV_TIME_BASE : 0;
     if (out_dur) *out_dur = dur;
+
+    AVCodecContext *vctx = NULL, *actx = NULL;
+    struct SwrContext *swr = NULL;
+    SDL_AudioDeviceID adev = 0;
+    SDL_Texture *tex = NULL;
+    struct SwsContext *sws = NULL;
+    AVFrame *yuv = NULL, *frame = NULL;
+    AVPacket *pkt = NULL;
+#define PLAYER_SETUP_FAIL(code) do { \
+    if (adev) SDL_CloseAudioDevice(adev); \
+    if (sws) sws_freeContext(sws); \
+    if (yuv) av_frame_free(&yuv); \
+    if (swr) swr_free(&swr); \
+    if (actx) avcodec_free_context(&actx); \
+    if (sctx) avcodec_free_context(&sctx); \
+    if (vctx) avcodec_free_context(&vctx); \
+    if (frame) av_frame_free(&frame); \
+    if (pkt) av_packet_free(&pkt); \
+    if (tex) SDL_DestroyTexture(tex); \
+    avformat_close_input(&fmt); nplay_curl_avio_close(avio); \
+    return (code); \
+} while (0)
 
     // ---- decoder de video ----
     AVCodecParameters *vpar = fmt->streams[vidx]->codecpar;
     const AVCodec *vdec = avcodec_find_decoder(vpar->codec_id);
-    AVCodecContext *vctx = avcodec_alloc_context3(vdec);
-    avcodec_parameters_to_context(vctx, vpar);
+    if (!vdec) PLAYER_SETUP_FAIL(-4);
+    vctx = avcodec_alloc_context3(vdec);
+    if (!vctx || avcodec_parameters_to_context(vctx, vpar) < 0) PLAYER_SETUP_FAIL(-4);
     vctx->thread_count = 4;
-    if (!vdec || avcodec_open2(vctx, vdec, NULL) < 0) { avcodec_free_context(&vctx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -4; }
+    if (avcodec_open2(vctx, vdec, NULL) < 0) PLAYER_SETUP_FAIL(-4);
 
     // ---- decoder de audio + resample + saida SDL ----
-    AVCodecContext *actx = NULL;
-    struct SwrContext *swr = NULL;
-    SDL_AudioDeviceID adev = 0;
     const int OCH = 2, ORATE = 48000;
     if (aidx >= 0 && open_audio_dec(fmt, aidx, &actx, &swr, OCH, ORATE) == 0) {
         SDL_AudioSpec want; SDL_zero(want);
         want.freq = ORATE; want.format = AUDIO_S16SYS; want.channels = OCH; want.samples = 2048;
         adev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
         if (adev) SDL_PauseAudioDevice(adev, 0);
+        else { if (swr) swr_free(&swr); avcodec_free_context(&actx); }
     }
 
     int vw = vctx->width, vh = vctx->height;
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, vw, vh);
-    struct SwsContext *sws = NULL; AVFrame *yuv = NULL;
+    if (vw <= 0 || vh <= 0) PLAYER_SETUP_FAIL(-4);
+    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, vw, vh);
+    if (!tex) PLAYER_SETUP_FAIL(-4);
     if (vctx->pix_fmt != AV_PIX_FMT_YUV420P) {
         sws = sws_getContext(vw, vh, vctx->pix_fmt, vw, vh, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
-        yuv = av_frame_alloc(); yuv->format = AV_PIX_FMT_YUV420P; yuv->width = vw; yuv->height = vh;
-        av_frame_get_buffer(yuv, 32);
+        yuv = av_frame_alloc();
+        if (!sws || !yuv) PLAYER_SETUP_FAIL(-4);
+        yuv->format = AV_PIX_FMT_YUV420P; yuv->width = vw; yuv->height = vh;
+        if (av_frame_get_buffer(yuv, 32) < 0) PLAYER_SETUP_FAIL(-4);
     }
 
     // retangulo com letterbox (1280x720)
@@ -484,8 +510,10 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     if (ar > dar) { dst.w = dw; dst.h = (int)(dw / ar); } else { dst.h = dh; dst.w = (int)(dh * ar); }
     dst.x = (dw - dst.w) / 2; dst.y = (dh - dst.h) / 2;
 
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame *frame = av_frame_alloc();
+    pkt = av_packet_alloc();
+    frame = av_frame_alloc();
+    if (!pkt || !frame) PLAYER_SETUP_FAIL(-4);
+#undef PLAYER_SETUP_FAIL
     AVRational vtb = fmt->streams[vidx]->time_base;
     AVRational atb = (aidx >= 0) ? fmt->streams[aidx]->time_base : (AVRational){1, ORATE};
     double bps = (double)ORATE * OCH * 2.0;
@@ -493,6 +521,8 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     double last_ac = -1, last_ac_wall = av_gettime() / 1000000.0;  // detecta audio travado
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0;
+    int decoded_video = 0, dropped_video = 0, buffering_events = 0;
+    unsigned max_audio_queue = 0;
     store_load_player_volume(&vol);
     int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
     uint8_t *audio_buf = NULL;
@@ -507,7 +537,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
 
     // Retoma de onde parou (só se fizer sentido: > 3s e não no finzinho).
     if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
-        av_seek_frame(fmt, -1, (int64_t)(start_sec * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+        av_seek_frame(fmt, -1, (int64_t)((start_sec + timeline_origin) * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
         audio_clock = start_sec; cur_pos = start_sec;
         wall_start = av_gettime() / 1000000.0 - start_sec;
     }
@@ -536,7 +566,9 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                                 snprintf(notice, sizeof(notice), "Audio atual mantido");
                             } else {
                                 int next_idx = aidxs[track_sel];
-                                if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
+                                if (!adev) {
+                                    snprintf(notice, sizeof(notice), "Saida de audio indisponivel");
+                                } else if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
                                     acur = track_sel; aidx = next_idx;
                                     atb = fmt->streams[aidx]->time_base;
                                     if (adev) SDL_ClearQueuedAudio(adev);
@@ -591,7 +623,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     if (t < 0) t = 0;
                     if (dur > 0 && t > dur - 1) t = dur - 1;
                     int back = (b == JOY_L || b == JOY_ZL);
-                    if (av_seek_frame(fmt, -1, (int64_t)(t * AV_TIME_BASE), back ? AVSEEK_FLAG_BACKWARD : 0) >= 0) {
+                    if (av_seek_frame(fmt, -1, (int64_t)((t + timeline_origin) * AV_TIME_BASE), back ? AVSEEK_FLAG_BACKWARD : 0) >= 0) {
                         avcodec_flush_buffers(vctx); if (actx) avcodec_flush_buffers(actx);
                         if (sctx) avcodec_flush_buffers(sctx);
                         if (adev) SDL_ClearQueuedAudio(adev);
@@ -648,7 +680,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         if (ret == AVERROR(EAGAIN)) {
             // Buffer vazio e/ou timeout de rede, thread de download ainda esta trabalhando.
             Uint32 now_ticks = SDL_GetTicks();
-            if (!buffering_since) buffering_since = now_ticks;
+            if (!buffering_since) { buffering_since = now_ticks; buffering_events++; }
             if (now_ticks - buffering_since >= 250) {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                 if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -684,12 +716,17 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                         AVChannelLayout outl; av_channel_layout_default(&outl, OCH);
                         AVChannelLayout inl; av_channel_layout_default(&inl, 2);
                         const AVChannelLayout *pin = (fc > 0) ? &frame->ch_layout : &inl;
-                        if (swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE, pin, ff, fr > 0 ? fr : ORATE, 0, NULL) == 0)
-                            swr_init(swr);
+                        int swr_ok = swr_alloc_set_opts2(&swr, &outl, AV_SAMPLE_FMT_S16, ORATE,
+                                                        pin, ff, fr > 0 ? fr : ORATE, 0, NULL);
+                        av_channel_layout_uninit(&outl);
+                        av_channel_layout_uninit(&inl);
+                        if (swr_ok < 0 || !swr || swr_init(swr) < 0) swr_free(&swr);
                         swr_rate = fr; swr_fmt = ff; swr_ch = fc;
                     }
                     if (!swr) continue;
-                    if (frame->pts != AV_NOPTS_VALUE) audio_clock = frame->pts * av_q2d(atb);
+                    int64_t ats = frame->best_effort_timestamp != AV_NOPTS_VALUE
+                        ? frame->best_effort_timestamp : frame->pts;
+                    if (ats != AV_NOPTS_VALUE) audio_clock = ats * av_q2d(atb) - timeline_origin;
                     int os = swr_get_out_samples(swr, frame->nb_samples);
                     int bytes = av_samples_get_buffer_size(NULL, OCH, os, AV_SAMPLE_FMT_S16, 0);
                     if (bytes > 0) av_fast_malloc(&audio_buf, &audio_buf_cap, (size_t)bytes);
@@ -699,14 +736,21 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                             int16_t *sm = (int16_t *)audio_buf; int cnt = n * OCH;
                             for (int i = 0; i < cnt; i++) { int v = sm[i] * vol / 100; sm[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v); }
                         }
-                        if (n > 0 && adev) SDL_QueueAudio(adev, audio_buf, n * OCH * 2);
+                        if (n > 0 && adev) {
+                            SDL_QueueAudio(adev, audio_buf, n * OCH * 2);
+                            unsigned queued = SDL_GetQueuedAudioSize(adev);
+                            if (queued > max_audio_queue) max_audio_queue = queued;
+                        }
                     }
                 }
             }
         } else if (pkt->stream_index == vidx) {
             if (avcodec_send_packet(vctx, pkt) == 0) {
                 while (avcodec_receive_frame(vctx, frame) == 0) {
-                    double vpts = (frame->pts != AV_NOPTS_VALUE) ? frame->pts * av_q2d(vtb) : 0;
+                    decoded_video++;
+                    int64_t vts = frame->best_effort_timestamp != AV_NOPTS_VALUE
+                        ? frame->best_effort_timestamp : frame->pts;
+                    double vpts = (vts != AV_NOPTS_VALUE) ? vts * av_q2d(vtb) - timeline_origin : cur_pos;
                     double now = av_gettime() / 1000000.0;
                     // Se o relogio de AUDIO parou de avancar (decode travando), o video
                     // NAO fica esperando: segue pelo relogio de parede (nao congela).
@@ -717,6 +761,10 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     else master = now - wall_start;   // audio travado / sem audio: video toca sozinho
                     cur_pos = master;
                     double delay = vpts - master;
+                    // Se ja perdeu o prazo por mais de 120 ms, converter e enviar
+                    // este quadro para a GPU so aumenta o atraso. Descartar aqui
+                    // permite recuperar sincronismo em fontes pesadas/instaveis.
+                    if (delay < -0.12) { dropped_video++; continue; }
                     if (delay > 0.001) { if (delay > 0.35) delay = 0.35; SDL_Delay((Uint32)(delay * 1000)); }
                     AVFrame *u = frame;
                     if (sws) { sws_scale(sws, (const uint8_t * const *)frame->data, frame->linesize, 0, vh, yuv->data, yuv->linesize); u = yuv; }
@@ -742,7 +790,8 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     else if (rc->type == SUBTITLE_TEXT && rc->text) snprintf(tmp, sizeof(tmp), "%s", rc->text);
                     if (tmp[0]) { size_t rem = sizeof(sub_text) - strlen(sub_text) - 1; if (sub_text[0] && rem > 1) { strncat(sub_text, " ", rem); rem--; } strncat(sub_text, tmp, rem); }
                 }
-                double base = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts * av_q2d(fmt->streams[sidxs[scur]]->time_base) : cur_pos;
+                double base = (pkt->pts != AV_NOPTS_VALUE)
+                    ? pkt->pts * av_q2d(fmt->streams[sidxs[scur]]->time_base) - timeline_origin : cur_pos;
                 double sd = (sub.end_display_time > sub.start_display_time) ? (sub.end_display_time - sub.start_display_time) / 1000.0 : 4.0;
                 sub_end = base + sd;
                 avsubtitle_free(&sub);
@@ -754,6 +803,8 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     if (out_pos) *out_pos = cur_pos;
     if (out_dur) *out_dur = dur;
     store_save_player_volume(vol);
+    store_save_player_stats(vw, vh, decoded_video, dropped_video,
+                            buffering_events, max_audio_queue, playback_error);
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);

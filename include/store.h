@@ -16,6 +16,9 @@ void store_save_pref_sub(const char *lang);
 
 int  store_load_player_volume(int *volume);
 void store_save_player_volume(int volume);
+void store_save_player_stats(int width, int height, int decoded_frames,
+                             int dropped_frames, int buffering_events,
+                             unsigned max_audio_bytes, int playback_error);
 
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);

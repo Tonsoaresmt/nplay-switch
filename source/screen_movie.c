@@ -13,6 +13,8 @@ static int g_info_tab = 0;  // 0=Elenco, 1=Relacionados
 #define PLOT_LINES 5
 #define PLOT_MAX_LINES 32
 #define PLOT_LINE_CAP 180
+static char g_plot_lines[PLOT_MAX_LINES][PLOT_LINE_CAP];
+static int g_plot_line_count = 0;
 
 // Quebra por palavras usando a largura real da fonte. Isso evita cortar a
 // sinopse no meio, como acontecia com o clip de uma unica linha.
@@ -65,6 +67,10 @@ int open_movie_details(int movie_id) {
     g_movie_sel = 0;
     g_plot_scroll = 0;
     g_info_tab = 0;
+    memset(g_plot_lines, 0, sizeof(g_plot_lines));
+    const char *plot = jstr(g_movie, "plot");
+    g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
+                                  g_plot_lines, PLOT_MAX_LINES, WIN_W - 280 - 48);
     return 0;
 }
 
@@ -72,6 +78,8 @@ void close_movie_details(void) {
     if (g_movie) { cJSON_Delete(g_movie); g_movie = NULL; }
     g_plot_scroll = 0;
     g_info_tab = 0;
+    g_plot_line_count = 0;
+    memset(g_plot_lines, 0, sizeof(g_plot_lines));
 }
 
 static void draw_button(int x, int y, int w, const char *label, int selected) {
@@ -83,7 +91,6 @@ static void draw_button(int x, int y, int w, const char *label, int selected) {
 void draw_movie(void) {
     if (!g_movie) return;
     const char *title = jstr(g_movie, "title");
-    const char *plot = jstr(g_movie, "plot");
     const char *logo = jstr(g_movie, "logo");
     const char *genre = jstr(g_movie, "genre");
     const char *director = jstr(g_movie, "director");
@@ -107,13 +114,11 @@ void draw_movie(void) {
     text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 130, C_MUT, 0, WIN_W - dx - 40);
 
     text_draw(gRen, "SINOPSE", dx, 171, C_ACC2, 0);
-    char lines[PLOT_MAX_LINES][PLOT_LINE_CAP] = {{0}};
-    int line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.", lines, PLOT_MAX_LINES, WIN_W - dx - 48);
-    int max_scroll = line_count > PLOT_LINES ? line_count - PLOT_LINES : 0;
+    int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
     if (g_plot_scroll > max_scroll) g_plot_scroll = max_scroll;
-    for (int i = 0; i < PLOT_LINES && i + g_plot_scroll < line_count; i++)
-        text_draw(gRen, lines[i + g_plot_scroll], dx, 201 + i * 28, C_TEXT, 0);
-    if (line_count > PLOT_LINES) {
+    for (int i = 0; i < PLOT_LINES && i + g_plot_scroll < g_plot_line_count; i++)
+        text_draw(gRen, g_plot_lines[i + g_plot_scroll], dx, 201 + i * 28, C_TEXT, 0);
+    if (g_plot_line_count > PLOT_LINES) {
         char page[80];
         snprintf(page, sizeof(page), "Sinopse %d/%d  -  cima/baixo para ler", g_plot_scroll + 1, max_scroll + 1);
         text_draw(gRen, page, WIN_W - 390, 344, C_MUT, 0);

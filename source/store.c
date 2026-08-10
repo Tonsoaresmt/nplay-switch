@@ -25,6 +25,7 @@
 #define PREFA_F  DIR_APP "/pref_audio.txt"
 #define PREFS_F  DIR_APP "/pref_sub.txt"
 #define PREFV_F  DIR_APP "/player_volume.txt"
+#define PLAYER_STATS_F DIR_APP "/player_stats.txt"
 
 static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
@@ -194,6 +195,18 @@ void store_save_player_volume(int volume) {
     f = fopen(PREFV_F, "wb");
     if (!f) return;
     fprintf(f, "%d", volume);
+    fclose(f);
+}
+
+void store_save_player_stats(int width, int height, int decoded_frames,
+                             int dropped_frames, int buffering_events,
+                             unsigned max_audio_bytes, int playback_error) {
+    FILE *f = fopen(PLAYER_STATS_F, "wb");
+    if (!f) return;
+    fprintf(f, "resolution=%dx%d\ndecoded_frames=%d\ndropped_frames=%d\n"
+               "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n",
+            width, height, decoded_frames, dropped_frames,
+            buffering_events, max_audio_bytes, playback_error);
     fclose(f);
 }
 

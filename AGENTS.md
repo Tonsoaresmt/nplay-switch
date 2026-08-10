@@ -134,3 +134,36 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Build local de `source/main.c` validado em 10/08/2026 sem erros nem avisos.
   Pendente no hardware: conferir fluidez da animacao durante polling, legibilidade
   dos tres cards e transicao automatica para o player em job novo e ja pronto.
+
+## Auditoria de lag e estabilidade em 10/08/2026 (0.6.4)
+
+- Removido I/O da microSD por frame na aba Salvos. Os IDs offline agora ficam em
+  memoria e a pasta e relida apenas ao entrar na aba, concluir ou remover download.
+- A lista de jobs deixou de bloquear o loop principal a cada dois segundos: fetch e
+  parse JSON rodam em thread com timeout, e o resultado e aplicado no frame seguinte.
+- A sinopse do filme e quebrada/medida uma unica vez ao abrir o detalhe, nao 60 vezes
+  por segundo. Isso reduz rasterizacao de texto e churn no cache de fontes.
+- Criacao de texturas de capas foi limitada a duas por frame. Workers de capa usam
+  timeout proprio de 15 s para uma URL morta nao ocupar a fila por 45 s.
+- O cache de metadados de capas agora recicla entradas LRU ociosas ao atingir 3.000
+  URLs. Antes, capas novas ficavam vazias permanentemente ate reiniciar o app.
+  Filas de download e surfaces prontas passaram a contar ocupacao explicitamente,
+  evitando a ambiguidade `head == tail` quando circulares ficam cheias.
+  Criacao e expulsao de texturas ocorrem antes do desenho, evitando destruir uma
+  textura que ja havia sido enviada ao renderer no mesmo quadro.
+- Player valida codec, contexts, textura, conversor, frames e packets antes de usar;
+  formatos sem decoder e falhas de memoria retornam erro em vez de acessar NULL.
+- Frames com mais de 120 ms de atraso sao descartados antes de conversao/upload para
+  recuperar sincronismo, em vez de gastar CPU/GPU desenhando quadros vencidos.
+- Timestamps de audio/video/legenda e seek sao normalizados por `fmt->start_time` e
+  usam `best_effort_timestamp`. Corrige fontes TS/HLS cujo relogio interno nao inicia
+  em zero e que podiam parecer congeladas ou muito lentas.
+- Reconfiguracao do resampler verifica `swr_init` e libera layouts temporarios. Se a
+  saida SDL de audio falhar, o decoder nao continua consumindo CPU sem produzir som.
+- Endpoints JSON da UI agora tem teto de 15/20 s em vez de congelar ate 45 s.
+- Cada reproducao grava `sdmc:/switch/Meruem/player_stats.txt` com resolucao, frames
+  decodificados/descartados, eventos de buffering, maior fila de audio e erro final.
+  Esse arquivo deve acompanhar relatos futuros de travamento.
+- Build validado sem erros nem avisos. Pendente no hardware: navegacao por mais de
+  3.000 capas, Salvos durante perda de rede, TS/HLS com origem nao zero e comparacao
+  de `player_stats.txt` entre um video fluido e um problemático.
