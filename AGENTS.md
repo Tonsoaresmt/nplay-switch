@@ -113,3 +113,24 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Bootstrap necessario: uma instalacao que ainda executa o atualizador antigo deve
   receber este `Nplay.nro` manualmente uma vez; so depois as proximas releases usam
   o instalador corrigido.
+
+## Preparacao para reproducao em 10/08/2026 (0.6.3)
+
+- `resolve_and_play` nao redireciona mais filmes/torrents para a aba Salvos.
+  Depois de solicitar o preparo no acelerador, permanece no contexto atual e abre
+  uma tela de espera; quando `ready=true`, inicia o player automaticamente.
+- A espera mostra animacao continua, percentual real, bytes preparados, tamanho,
+  velocidade, previsao restante e numero de fontes quando a API disponibiliza.
+- O polling de status roda numa thread com timeout curto; lentidao/reconexao da API
+  nao congela a animacao nem impede que o usuario pressione `B`.
+- O texto diferencia explicitamente preparo no servidor de download no Switch:
+  nenhum espaco da microSD e ocupado por esse fluxo. Download offline continua
+  sendo uma acao separada (`Y` na aba Salvos).
+- `B`/`-` sai da espera sem cancelar o job; o servidor continua trabalhando e o
+  item permanece acessivel em Salvos. Erros definitivos do job encerram a espera
+  com a mensagem retornada pelo servidor.
+- A tela fica ativa durante toda a espera. Ao iniciar o player ou voltar, a flag
+  de energia e restaurada e recalculada pelo loop principal.
+- Build local de `source/main.c` validado em 10/08/2026 sem erros nem avisos.
+  Pendente no hardware: conferir fluidez da animacao durante polling, legibilidade
+  dos tres cards e transicao automatica para o player em job novo e ja pronto.

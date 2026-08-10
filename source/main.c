@@ -36,6 +36,7 @@ char g_toast[160] = {0};
 static char g_self_path[600] = {0};
 static char g_user[128] = {0};
 static int g_do_update = 0;
+static int g_running; // definido/inicializado na secao de roteamento de input
 
 #include "ui.h"
 #include "screen_movie.h"
@@ -278,7 +279,8 @@ static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
 static void enter_tab(int tab);
 static void load_landing(int tab);
 static void load_downloads(void);
-static void accel_start(int itemId);
+static int accel_start(int itemId);
+static int accel_wait_and_play(int itemId, const char *title);
 static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
@@ -400,7 +402,7 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
 }
 
 // Resolve a fonte e reproduz. Link direto (anime/dorama) toca na hora; torrent
-// (filme/serie) manda pro acelerador do servidor e abre a aba Baixados.
+// fica numa preparacao visual e inicia automaticamente quando estiver pronto.
 int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     text_draw(gRen, "Carregando video...", WIN_W / 2 - 120, WIN_H / 2 - 16, C_TEXT, 1);
@@ -419,9 +421,7 @@ int resolve_and_play(int itemId, const char *title) {
     }
     int rc = 0;
     if (container && !strcmp(container, "torrent")) {
-        accel_start(itemId);
-        toast("Salvando na sua conta (no servidor) - veja em Salvos");
-        g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
+        rc = accel_wait_and_play(itemId, title);
     } else if (container && !strcmp(container, "embed")) {
         toast("Este conteudo (embed) ainda nao toca no Switch");
     } else if (purl[0]) {
@@ -476,9 +476,167 @@ static void update_download_awake(void) {
     g_download_awake = want;
 }
 
-static void accel_start(int itemId) {
+static int accel_start(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/download/%d", itemId);
-    api_send(path, "POST", "{}");
+    return api_send(path, "POST", "{}") == 200 ? 0 : -1;
+}
+
+static int accel_state_error(const char *state) {
+    return state && (!strcmp(state, "erro") || !strcmp(state, "error") ||
+                     !strcmp(state, "failed") || !strcmp(state, "cancelled") ||
+                     !strcmp(state, "canceled"));
+}
+
+static void format_wait_time(int seconds, char *out, size_t cap) {
+    if (seconds <= 0) { snprintf(out, cap, "calculando..."); return; }
+    if (seconds < 60) snprintf(out, cap, "%d s", seconds);
+    else if (seconds < 3600) snprintf(out, cap, "%d min %02d s", seconds / 60, seconds % 60);
+    else snprintf(out, cap, "%d h %02d min", seconds / 3600, (seconds % 3600) / 60);
+}
+
+typedef struct {
+    char path[80];
+    cJSON *result;
+    SDL_atomic_t done;
+} AccelPoll;
+
+// Poll curto em thread: a animacao nao para se a API estiver lenta ou durante
+// uma reconexao. O player continua usando os timeouts normais mais tolerantes.
+static int accel_poll_thread(void *userdata) {
+    AccelPoll *poll = (AccelPoll *)userdata;
+    char url[1024]; snprintf(url, sizeof(url), "%s%s", BASE, poll->path);
+    struct membuf out = {0}; const char *err = NULL;
+    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 2L, 4L);
+    if (code == 200 && out.data) poll->result = cJSON_Parse(out.data);
+    membuf_free(&out);
+    SDL_AtomicSet(&poll->done, 1);
+    return 0;
+}
+
+// Tela de espera deliberadamente animada: informa que o preparo ocorre no
+// servidor, mostra dados reais do job e evita a falsa impressao de download no SD.
+static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 now) {
+    int pct = job ? jint(job, "percent") : 0;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    const char *state = job ? jstr(job, "state") : NULL;
+    cJSON *sz = job ? cJSON_GetObjectItem(job, "size") : NULL;
+    cJSON *dl = job ? cJSON_GetObjectItem(job, "downloaded") : NULL;
+    cJSON *sp = job ? cJSON_GetObjectItem(job, "speed") : NULL;
+    double size = cJSON_IsNumber(sz) ? sz->valuedouble : 0;
+    double downloaded = cJSON_IsNumber(dl) ? dl->valuedouble : 0;
+    double speed = cJSON_IsNumber(sp) ? sp->valuedouble : 0;
+    int eta = job ? jint(job, "eta_seconds") : 0;
+    int peers = job ? jint(job, "peers") : 0;
+
+    SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+    fill_rect(0, 0, WIN_W, 68, C_BAR);
+    text_draw(gRen, "NPLAY  /  PREPARANDO REPRODUCAO", 42, 21, C_ACC, 0);
+    text_draw(gRen, "B  voltar e continuar em segundo plano", WIN_W - 430, 21, C_MUT, 0);
+    text_clip(title ? title : "Video", 70, 96, C_TEXT, 1, WIN_W - 140);
+
+    // Oito barras em onda. O movimento continua mesmo enquanto o percentual
+    // ainda e desconhecido (fila, busca de peers ou leitura de metadados).
+    int phase = (int)((now / 90) % 8);
+    for (int i = 0; i < 8; i++) {
+        int d = (i - phase + 8) % 8;
+        int h = 18 + (7 - d) * 5;
+        SDL_Color c = d < 2 ? C_ACC : (d < 5 ? C_ACC2 : C_CARD);
+        fill_rect(WIN_W / 2 - 94 + i * 24, 178 + (54 - h) / 2, 14, h, c);
+    }
+
+    const char *headline = offline ? "Reconectando ao servidor..." :
+        (state && !strcmp(state, "fila")) ? "Seu pedido esta na fila" :
+        (state && !strcmp(state, "baixando") && pct == 0) ? "Localizando fontes e preparando o arquivo" :
+        "Preparando o video para reproduzir";
+    int hw = 0, hh = 0; text_cached(gRen, headline, C_TEXT, 1, &hw, &hh);
+    text_draw(gRen, headline, (WIN_W - hw) / 2, 255, C_TEXT, 1);
+    text_draw(gRen, "O processamento acontece no servidor e nao ocupa espaco no seu Switch.", 246, 305, C_MUT, 0);
+
+    int bx = 120, by = 365, bw = WIN_W - 240;
+    fill_rect(bx, by, bw, 20, C_CARD);
+    if (pct > 0) fill_rect(bx, by, bw * pct / 100, 20, C_ACC2);
+    else { int iw = 150, ix = bx + (int)((now / 5) % (bw + iw)) - iw; if (ix < bx) iw -= bx - ix, ix = bx; if (ix + iw > bx + bw) iw = bx + bw - ix; if (iw > 0) fill_rect(ix, by, iw, 20, C_ACC2); }
+    char percent[32]; snprintf(percent, sizeof(percent), "%d%%", pct);
+    text_draw(gRen, percent, WIN_W / 2 - 24, 399, C_TEXT, 1);
+
+    char amount[128], rate[96], remaining[96];
+    if (size > 0) snprintf(amount, sizeof(amount), "Preparado: %.1f de %.1f MB", downloaded / 1048576.0, size / 1048576.0);
+    else snprintf(amount, sizeof(amount), "Preparado: %.1f MB", downloaded / 1048576.0);
+    if (speed > 0) snprintf(rate, sizeof(rate), "Velocidade: %.1f MB/s", speed / 1048576.0);
+    else snprintf(rate, sizeof(rate), "Velocidade: calculando...");
+    char eta_text[48]; format_wait_time(eta, eta_text, sizeof(eta_text));
+    snprintf(remaining, sizeof(remaining), "Tempo restante: %s", eta_text);
+    fill_rect(120, 466, 330, 82, C_CARD); fill_rect(475, 466, 300, 82, C_CARD); fill_rect(800, 466, 360, 82, C_CARD);
+    text_draw(gRen, "PROGRESSO", 140, 478, C_ACC2, 0); text_clip(amount, 140, 512, C_TEXT, 0, 290);
+    text_draw(gRen, "VELOCIDADE", 495, 478, C_ACC2, 0); text_clip(rate, 495, 512, C_TEXT, 0, 260);
+    text_draw(gRen, "PREVISAO", 820, 478, C_ACC2, 0); text_clip(remaining, 820, 512, C_TEXT, 0, 320);
+    if (peers > 0) { char ps[64]; snprintf(ps, sizeof(ps), "%d fonte%s conectada%s", peers, peers == 1 ? "" : "s", peers == 1 ? "" : "s"); text_draw(gRen, ps, 120, 579, C_GREEN, 0); }
+    text_draw(gRen, "Quando ficar pronto, a reproducao comeca automaticamente.", 120, 618, C_TEXT, 0);
+    text_draw(gRen, "B volta sem cancelar: o servidor continua preparando e o item aparece em Salvos.", 120, 654, C_MUT, 0);
+    SDL_RenderPresent(gRen);
+}
+
+static int accel_wait_and_play(int itemId, const char *title) {
+    if (accel_start(itemId) != 0) { toast("Nao foi possivel preparar este video"); return 0; }
+    cJSON *status = NULL;
+    Uint32 next_poll = 0;
+    int failures = 0, waiting = 1, rc = 0, user_back = 0;
+    AccelPoll poll = {0};
+    SDL_Thread *poll_thread = NULL;
+    appletSetMediaPlaybackState(true);
+    while (waiting) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) { g_running = 0; waiting = 0; }
+            else if (e.type == SDL_JOYBUTTONDOWN &&
+                     (e.jbutton.button == JOY_B || e.jbutton.button == JOY_MINUS)) {
+                user_back = 1; waiting = 0;
+            }
+        }
+        Uint32 now = SDL_GetTicks();
+        if (poll_thread && SDL_AtomicGet(&poll.done)) {
+            SDL_WaitThread(poll_thread, NULL); poll_thread = NULL;
+            if (poll.result) {
+                if (status) cJSON_Delete(status);
+                status = poll.result; poll.result = NULL; failures = 0;
+            } else failures++;
+            next_poll = SDL_GetTicks() + 900;
+        }
+        if (waiting && !poll_thread && (next_poll == 0 || now >= next_poll)) {
+            snprintf(poll.path, sizeof(poll.path), "/api/accel/jobs/%d", itemId);
+            poll.result = NULL; SDL_AtomicSet(&poll.done, 0);
+            poll_thread = SDL_CreateThread(accel_poll_thread, "accel-poll", &poll);
+            if (!poll_thread) { failures++; next_poll = now + 900; }
+        }
+        cJSON *job = status ? cJSON_GetObjectItem(status, "job") : NULL;
+        if (job && cJSON_IsTrue(cJSON_GetObjectItem(job, "ready"))) {
+            const char *fu = jstr(status, "file_url");
+            if (fu) {
+                char url[1400];
+                if (!strncmp(fu, "http", 4)) snprintf(url, sizeof(url), "%s", fu);
+                else snprintf(url, sizeof(url), "%s%s", BASE, fu);
+                appletSetMediaPlaybackState(false); g_download_awake = 0;
+                rc = play_with_progress(itemId, title, url);
+                waiting = 0;
+                break;
+            }
+        }
+        if (job && accel_state_error(jstr(job, "state"))) {
+            const char *msg = jstr(job, "error");
+            toast(msg && msg[0] ? msg : "Falha ao preparar o video");
+            waiting = 0; break;
+        }
+        draw_accel_wait(title, job, failures > 0, now);
+        SDL_Delay(16);
+    }
+    if (poll_thread) SDL_WaitThread(poll_thread, NULL);
+    if (poll.result) cJSON_Delete(poll.result);
+    if (status) cJSON_Delete(status);
+    appletSetMediaPlaybackState(false); g_download_awake = 0;
+    if (user_back) toast("Preparacao continua no servidor");
+    return rc;
 }
 static void accel_remove(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/jobs/%d", itemId);
