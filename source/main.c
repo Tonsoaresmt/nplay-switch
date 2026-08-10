@@ -46,7 +46,10 @@ cJSON *api_get(const char *path) {
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
-    long code = net_request(url, "GET", NULL, g_token[0] ? g_token : NULL, &out, &err);
+    // Chamadas de UI nao podem congelar a tela por 45 s. Endpoints JSON devem
+    // responder rapido; falhas continuam tratadas pelas telas sem derrubar o app.
+    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 5L, 15L);
     cJSON *j = NULL;
     if (code == 200 && out.data) j = cJSON_Parse(out.data);
     membuf_free(&out);
@@ -58,7 +61,8 @@ long api_send(const char *path, const char *method, const char *body) {
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
-    long code = net_request(url, method, body ? body : "{}", g_token[0] ? g_token : NULL, &out, &err);
+    long code = net_request_timeout(url, method, body ? body : "{}",
+                                    g_token[0] ? g_token : NULL, &out, &err, 5L, 20L);
     membuf_free(&out);
     return code;
 }
@@ -86,14 +90,14 @@ typedef struct {
 } Cover;
 static Cover g_cov[MAX_COV];
 static int g_covN = 0;
-static int g_cov_hash[COVER_HASH_SIZE];   // indice + 1; zero = slot vazio
+static int g_cov_hash[COVER_HASH_SIZE];   // indice+1; zero=vazio; -1=tumulo
 static int g_cov_texN = 0;
 static SDL_mutex *g_cov_mtx;
-static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0;
+static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0, g_qn = 0;
 static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
-static int g_ready[MAX_COV]; static int g_rh = 0, g_rt = 0;
+static int g_ready[MAX_COV]; static int g_rh = 0, g_rt = 0, g_rn = 0;
 static SDL_mutex *g_ready_mtx;
-static int g_run = 1;
+static volatile int g_run = 1;
 
 static unsigned cover_hash(const char *s) {
     unsigned h = 2166136261u;
@@ -104,20 +108,43 @@ static unsigned cover_hash(const char *s) {
 // Chamado com g_cov_mtx travado. O hash evita comparar ate 3000 URLs por card/frame.
 static int cover_find_locked(const char *url, int create) {
     unsigned slot = cover_hash(url) & (COVER_HASH_SIZE - 1);
+    int insert_slot = -1;
     for (int probe = 0; probe < COVER_HASH_SIZE; probe++) {
         int entry = g_cov_hash[slot];
-        if (!entry) {
-            if (!create || g_covN >= MAX_COV) return -1;
-            int idx = g_covN++;
-            snprintf(g_cov[idx].url, sizeof(g_cov[idx].url), "%s", url);
-            g_cov_hash[slot] = idx + 1;
-            return idx;
+        if (entry == 0) { if (insert_slot < 0) insert_slot = (int)slot; break; }
+        if (entry < 0) { if (insert_slot < 0) insert_slot = (int)slot; }
+        else {
+            int idx = entry - 1;
+            if (!strcmp(g_cov[idx].url, url)) return idx;
         }
-        int idx = entry - 1;
-        if (!strcmp(g_cov[idx].url, url)) return idx;
         slot = (slot + 1) & (COVER_HASH_SIZE - 1);
     }
-    return -1;
+    if (!create || insert_slot < 0) return -1;
+
+    int idx;
+    if (g_covN < MAX_COV) idx = g_covN++;
+    else {
+        // Recicla apenas uma entrada ociosa. Workers nunca perdem o indice que
+        // estao usando e o teto de memoria continua fixo mesmo apos navegar por
+        // catalogos com mais de MAX_COV capas diferentes.
+        idx = -1;
+        for (int i = 0; i < g_covN; i++) {
+            if (g_cov[i].state == 3 && !g_cov[i].surf &&
+                (idx < 0 || g_cov[i].last_used < g_cov[idx].last_used)) idx = i;
+        }
+        if (idx < 0) return -1;
+        unsigned old = cover_hash(g_cov[idx].url) & (COVER_HASH_SIZE - 1);
+        for (int probe = 0; probe < COVER_HASH_SIZE; probe++) {
+            if (g_cov_hash[old] == idx + 1) { g_cov_hash[old] = -1; break; }
+            if (g_cov_hash[old] == 0) break;
+            old = (old + 1) & (COVER_HASH_SIZE - 1);
+        }
+        if (g_cov[idx].tex) { SDL_DestroyTexture(g_cov[idx].tex); g_cov_texN--; }
+        memset(&g_cov[idx], 0, sizeof(g_cov[idx]));
+    }
+    snprintf(g_cov[idx].url, sizeof(g_cov[idx].url), "%s", url);
+    g_cov_hash[insert_slot] = idx + 1;
+    return idx;
 }
 
 SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
@@ -127,11 +154,11 @@ SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     SDL_Texture *tex = (f >= 0) ? g_cov[f].tex : NULL;
     if (tex) g_cov[f].last_used = SDL_GetTicks();
     if (f >= 0 && g_cov[f].state == 0) {
-        g_cov[f].state = 1;
+        int queued = 0;
         SDL_LockMutex(g_q_mtx);
-        g_q[g_qt] = f; g_qt = (g_qt + 1) % MAX_COV;
+        if (g_qn < MAX_COV) { g_q[g_qt] = f; g_qt = (g_qt + 1) % MAX_COV; g_qn++; queued = 1; }
         SDL_UnlockMutex(g_q_mtx);
-        SDL_SemPost(g_q_sem);
+        if (queued) { g_cov[f].state = 1; SDL_SemPost(g_q_sem); }
     }
     SDL_UnlockMutex(g_cov_mtx);
     return tex;
@@ -143,7 +170,7 @@ static int cover_worker(void *arg) {
         if (!g_run) break;
         int idx = -1;
         SDL_LockMutex(g_q_mtx);
-        if (g_qh != g_qt) { idx = g_q[g_qh]; g_qh = (g_qh + 1) % MAX_COV; }
+        if (g_qn > 0) { idx = g_q[g_qh]; g_qh = (g_qh + 1) % MAX_COV; g_qn--; }
         SDL_UnlockMutex(g_q_mtx);
         if (idx < 0) continue;
         char url[900];
@@ -153,7 +180,8 @@ static int cover_worker(void *arg) {
         SDL_UnlockMutex(g_cov_mtx);
         struct membuf out = { 0 };
         const char *err = NULL;
-        long code = net_request(url, "GET", NULL, NULL, &out, &err);
+        // Capa morta nao pode prender um dos tres workers por 45 segundos.
+        long code = net_request_timeout(url, "GET", NULL, NULL, &out, &err, 6L, 15L);
         SDL_Surface *s = NULL;
         if (code == 200 && out.data && out.len > 32) {
             SDL_RWops *rw = SDL_RWFromMem(out.data, (int)out.len);
@@ -165,18 +193,27 @@ static int cover_worker(void *arg) {
         else g_cov[idx].state = 3;
         SDL_UnlockMutex(g_cov_mtx);
         if (s) {
+            int queued = 0;
             SDL_LockMutex(g_ready_mtx);
-            g_ready[g_rt] = idx; g_rt = (g_rt + 1) % MAX_COV;
+            if (g_rn < MAX_COV) { g_ready[g_rt] = idx; g_rt = (g_rt + 1) % MAX_COV; g_rn++; queued = 1; }
             SDL_UnlockMutex(g_ready_mtx);
+            if (!queued) {
+                SDL_LockMutex(g_cov_mtx);
+                if (g_cov[idx].surf == s) { g_cov[idx].surf = NULL; g_cov[idx].state = 0; }
+                SDL_UnlockMutex(g_cov_mtx);
+                SDL_FreeSurface(s);
+            }
         }
     }
     return 0;
 }
 static void cover_pump(void) {   // main: converte surfaces prontas em texturas
-    for (int done = 0; done < 6; done++) {
+    // Criar textura e eventualmente expulsar uma LRU custa CPU/GPU. Limitar a
+    // duas por frame evita os picos visiveis quando varias capas chegam juntas.
+    for (int done = 0; done < 2; done++) {
         int idx = -1; SDL_Surface *s = NULL;
         SDL_LockMutex(g_ready_mtx);
-        if (g_rh != g_rt) { idx = g_ready[g_rh]; g_rh = (g_rh + 1) % MAX_COV; }
+        if (g_rn > 0) { idx = g_ready[g_rh]; g_rh = (g_rh + 1) % MAX_COV; g_rn--; }
         SDL_UnlockMutex(g_ready_mtx);
         if (idx < 0) break;
         SDL_LockMutex(g_cov_mtx);
@@ -253,6 +290,9 @@ static cJSON *g_dl = NULL;
 static int g_dlSel = 0, g_dlScroll = 0; static Uint32 g_dl_next = 0;
 static Uint32 g_dl_last_ok = 0;
 static int g_download_awake = 0;
+static SDL_Thread *g_dl_thread = NULL;
+static SDL_atomic_t g_dl_done;
+static cJSON *g_dl_pending = NULL;
 // vista da aba: 0 = grade de capas (por obra), 1 = episodios de uma obra
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 // agrupamento dos jobs por obra (series_id) ou filme (item_id negativo)
@@ -409,7 +449,8 @@ int resolve_and_play(int itemId, const char *title) {
     SDL_RenderPresent(gRen);
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
     struct membuf out = { 0 }; const char *err = NULL;
-    long code = net_request(url, "POST", "{}", g_token[0] ? g_token : NULL, &out, &err);
+    long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
+                                    &out, &err, 8L, 20L);
     if (code != 200 || !out.data) { membuf_free(&out); toast("Falha ao resolver o stream"); return 0; }
     cJSON *j = cJSON_Parse(out.data);
     const char *container = jstr(j, "container");
@@ -677,20 +718,31 @@ static void load_dl_done(int series_id) {
 static int dl_is_done(int item_id) { for (int i = 0; i < g_dlDoneN; i++) if (g_dlDone[i] == item_id) return 1; return 0; }
 
 #define LOCAL_DL_DIR "sdmc:/switch/Nplay/downloads"
+#define LOCAL_DL_MAX 2048
+static int g_local_dl[LOCAL_DL_MAX];
+static int g_local_dl_n = 0, g_local_dl_loaded = 0;
+
 static void local_dl_path(int item_id, char *out, size_t cap) {
     snprintf(out, cap, LOCAL_DL_DIR "/%d.media", item_id);
 }
+static void local_dl_refresh(void) {
+    g_local_dl_n = 0; g_local_dl_loaded = 1;
+    DIR *d = opendir(LOCAL_DL_DIR); if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && g_local_dl_n < LOCAL_DL_MAX) {
+        char *end = NULL; long id = strtol(e->d_name, &end, 10);
+        if (id > 0 && end && !strcmp(end, ".media")) g_local_dl[g_local_dl_n++] = (int)id;
+    }
+    closedir(d);
+}
 static int local_dl_exists(int item_id) {
-    char path[160]; local_dl_path(item_id, path, sizeof(path));
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    fclose(f); return 1;
+    if (!g_local_dl_loaded) local_dl_refresh();
+    for (int i = 0; i < g_local_dl_n; i++) if (g_local_dl[i] == item_id) return 1;
+    return 0;
 }
 static int local_dl_count(void) {
-    int n = 0; DIR *d = opendir(LOCAL_DL_DIR); if (!d) return 0;
-    struct dirent *e;
-    while ((e = readdir(d))) if (e->d_name[0] != '.' && strstr(e->d_name, ".media")) n++;
-    closedir(d); return n;
+    if (!g_local_dl_loaded) local_dl_refresh();
+    return g_local_dl_n;
 }
 
 typedef struct { const char *title; Uint32 last_draw; int cancel; } LocalDlProgress;
@@ -737,17 +789,28 @@ static void download_to_switch(cJSON *job) {
     appletSetMediaPlaybackState(true);
     long code = net_download_file_progress(url, NULL, part, &err, local_dl_progress, &progress);
     appletSetMediaPlaybackState(false); g_download_awake = 0;
-    if (code == 200 && rename(part, final) == 0) toast("Download concluido na microSD");
+    if (code == 200 && rename(part, final) == 0) { local_dl_refresh(); toast("Download concluido na microSD"); }
     else { remove(part); toast(progress.cancel ? "Download cancelado" : "Falha ao baixar para a microSD"); }
 }
 static void remove_from_switch(cJSON *job) {
     if (!job) return;
     char path[180]; local_dl_path(jint(job, "item_id"), path, sizeof(path));
-    if (remove(path) == 0) toast("Arquivo removido da microSD");
+    if (remove(path) == 0) { local_dl_refresh(); toast("Arquivo removido da microSD"); }
     else toast("Este item nao esta na microSD");
 }
-static void load_downloads(void) {
-    cJSON *fresh = api_get("/api/accel/jobs");
+static int downloads_fetch_thread(void *unused) {
+    (void)unused;
+    char url[1024]; snprintf(url, sizeof(url), "%s/api/accel/jobs", BASE);
+    struct membuf out = {0}; const char *err = NULL;
+    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 6L);
+    if (code == 200 && out.data) g_dl_pending = cJSON_Parse(out.data);
+    membuf_free(&out);
+    SDL_AtomicSet(&g_dl_done, 1);
+    return 0;
+}
+
+static void apply_downloads(cJSON *fresh) {
     if (!fresh) return; // preserva a ultima lista numa falha transitoria de rede
     if (g_dl) cJSON_Delete(g_dl);
     g_dl = fresh;
@@ -758,6 +821,16 @@ static void load_downloads(void) {
         if (g_dlGroup >= g_dlgN) { g_dlView = 0; g_dlGroup = 0; g_dlDetSel = 0; }
         else { int nj = g_dlg[g_dlGroup].nJobs; if (g_dlDetSel >= nj) g_dlDetSel = nj > 0 ? nj - 1 : 0; }
     }
+}
+static void load_downloads(void) {
+    if (g_dl_thread) return;
+    g_dl_pending = NULL; SDL_AtomicSet(&g_dl_done, 0);
+    g_dl_thread = SDL_CreateThread(downloads_fetch_thread, "jobs-fetch", NULL);
+}
+static void pump_downloads(void) {
+    if (!g_dl_thread || !SDL_AtomicGet(&g_dl_done)) return;
+    SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL;
+    if (g_dl_pending) { cJSON *fresh = g_dl_pending; g_dl_pending = NULL; apply_downloads(fresh); }
 }
 static int dl_play(cJSON *job) {
     char local[180]; local_dl_path(jint(job, "item_id"), local, sizeof(local));
@@ -1163,7 +1236,7 @@ static int do_login(void) {
         user, pass);
     char url[512]; snprintf(url, sizeof(url), "%s/api/auth/login", BASE);
     struct membuf out = { 0 }; const char *err = NULL;
-    long code = net_request(url, "POST", body, NULL, &out, &err);
+    long code = net_request_timeout(url, "POST", body, NULL, &out, &err, 8L, 20L);
     int ok = -1;
     if (out.data) {
         cJSON *j = cJSON_Parse(out.data);
@@ -1193,7 +1266,10 @@ static void draw_login(void) {
 static void enter_tab(int tab) {
     g_tab = tab;
     g_status[0] = '\0';
-    if (tab == TAB_DOWNLOADS) { g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; load_downloads(); g_dl_next = SDL_GetTicks() + 2000; return; }
+    if (tab == TAB_DOWNLOADS) {
+        g_dlSel = 0; g_dlScroll = 0; g_dlView = 0;
+        local_dl_refresh(); load_downloads(); g_dl_next = SDL_GetTicks() + 2000; return;
+    }
     load_landing(tab);
 }
 static void input_landing(int b) {
@@ -1485,7 +1561,11 @@ int main(int argc, char **argv) {
         if (g_screen == SC_MAIN && g_tab == TAB_DOWNLOADS && SDL_GetTicks() > g_dl_next) {
             load_downloads(); g_dl_next = SDL_GetTicks() + 2000;
         }
+        pump_downloads();
         update_download_awake();
+        // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.
+        // Assim nenhuma textura usada neste frame e destruida antes do Present.
+        cover_pump();
 
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
         SDL_RenderClear(gRen);
@@ -1495,8 +1575,6 @@ int main(int argc, char **argv) {
         else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
         else if (g_screen == SC_SEARCH) draw_search();
         else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
-
-        cover_pump();
 
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
             int w = 0, h = 0;
@@ -1511,6 +1589,8 @@ int main(int argc, char **argv) {
     g_run = 0;
     for (int i = 0; i < 3; i++) SDL_SemPost(g_q_sem);
     for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
+    if (g_dl_thread) { SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL; }
+    if (g_dl_pending) { cJSON_Delete(g_dl_pending); g_dl_pending = NULL; }
 
     if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
     if (g_land) cJSON_Delete(g_land);
