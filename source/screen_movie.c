@@ -12,6 +12,14 @@ static int g_movie_zone = 0; // 0=acoes, 1=relacionados
 static int g_related_sel = 0;
 static int g_related_panel_y = 458;
 
+#define MOVIE_BACK_MAX 6
+typedef struct {
+    cJSON *movie;
+    int movie_sel, plot_scroll, movie_zone, related_sel, panel_y;
+} MovieBackState;
+static MovieBackState g_movie_back[MOVIE_BACK_MAX];
+static int g_movie_back_n = 0;
+
 #define PLOT_LINES 5
 #define PLOT_MAX_LINES 32
 #define PLOT_LINE_CAP 180
@@ -51,31 +59,83 @@ static int wrap_text(const char *text, char lines[][PLOT_LINE_CAP], int max_line
     return count;
 }
 
-int open_movie_details(int movie_id) {
+static cJSON *fetch_movie_details(int movie_id) {
     char path[128];
     snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", movie_id);
     cJSON *resp = api_get(path);
-    if (!resp) return -1;
+    if (!resp) return NULL;
     cJSON *next_movie = cJSON_GetObjectItemCaseSensitive(resp, "item");
-    if (!next_movie) { cJSON_Delete(resp); return -1; }
+    if (!next_movie) { cJSON_Delete(resp); return NULL; }
     cJSON_DetachItemViaPointer(resp, next_movie);
     cJSON_Delete(resp);
-    close_movie_details();
-    g_movie = next_movie;
+    return next_movie;
+}
+
+static void rebuild_movie_plot(void) {
+    memset(g_plot_lines, 0, sizeof(g_plot_lines));
+    const char *plot = jstr(g_movie, "plot");
+    g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
+                                  g_plot_lines, PLOT_MAX_LINES, WIN_W - 280 - 48);
+}
+
+static void activate_movie(cJSON *movie) {
+    g_movie = movie;
     g_movie_sel = 0;
     g_plot_scroll = 0;
     g_movie_zone = 0;
     g_related_sel = 0;
     g_related_panel_y = 458;
-    memset(g_plot_lines, 0, sizeof(g_plot_lines));
-    const char *plot = jstr(g_movie, "plot");
-    g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
-                                  g_plot_lines, PLOT_MAX_LINES, WIN_W - 280 - 48);
+    rebuild_movie_plot();
+}
+
+int open_movie_details(int movie_id) {
+    cJSON *next_movie = fetch_movie_details(movie_id);
+    if (!next_movie) return -1;
+    close_movie_details();
+    activate_movie(next_movie);
     return 0;
+}
+
+static int open_related_details(int movie_id) {
+    cJSON *next_movie = fetch_movie_details(movie_id);
+    if (!next_movie) return -1;
+    if (g_movie_back_n == MOVIE_BACK_MAX) {
+        cJSON_Delete(g_movie_back[0].movie);
+        memmove(&g_movie_back[0], &g_movie_back[1], sizeof(g_movie_back[0]) * (MOVIE_BACK_MAX - 1));
+        g_movie_back_n--;
+    }
+    MovieBackState *back = &g_movie_back[g_movie_back_n++];
+    back->movie = g_movie;
+    back->movie_sel = g_movie_sel;
+    back->plot_scroll = g_plot_scroll;
+    back->movie_zone = g_movie_zone;
+    back->related_sel = g_related_sel;
+    back->panel_y = g_related_panel_y;
+    g_movie = NULL;
+    activate_movie(next_movie);
+    return 0;
+}
+
+static int restore_previous_movie(void) {
+    if (g_movie_back_n <= 0) return 0;
+    if (g_movie) cJSON_Delete(g_movie);
+    MovieBackState *back = &g_movie_back[--g_movie_back_n];
+    g_movie = back->movie;
+    g_movie_sel = back->movie_sel;
+    g_plot_scroll = back->plot_scroll;
+    g_movie_zone = back->movie_zone;
+    g_related_sel = back->related_sel;
+    g_related_panel_y = back->panel_y;
+    memset(back, 0, sizeof(*back));
+    rebuild_movie_plot();
+    return 1;
 }
 
 void close_movie_details(void) {
     if (g_movie) { cJSON_Delete(g_movie); g_movie = NULL; }
+    for (int i = 0; i < g_movie_back_n; i++) if (g_movie_back[i].movie) cJSON_Delete(g_movie_back[i].movie);
+    memset(g_movie_back, 0, sizeof(g_movie_back));
+    g_movie_back_n = 0;
     g_plot_scroll = 0;
     g_movie_zone = 0;
     g_related_sel = 0;
@@ -204,7 +264,10 @@ void draw_movie(void) {
 
 void input_movie(int b) {
     if (!g_movie) return;
-    if (b == JOY_B || b == JOY_MINUS) { close_movie_details(); g_screen = SC_MAIN; return; }
+    if (b == JOY_B || b == JOY_MINUS) {
+        if (!restore_previous_movie()) { close_movie_details(); detail_return_to_origin(); }
+        return;
+    }
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int related_n = arr_len(related);
     int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
@@ -239,7 +302,7 @@ void input_movie(int b) {
         if (g_movie_zone == 1 && g_related_sel < related_n) {
             cJSON *item = cJSON_GetArrayItem(related, g_related_sel);
             int id = jint(item, "id");
-            if (id > 0 && open_movie_details(id) != 0) toast("Nao foi possivel abrir este titulo");
+            if (id > 0 && open_related_details(id) != 0) toast("Nao foi possivel abrir este titulo");
         } else {
             int id = jint(g_movie, "id");
             if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));

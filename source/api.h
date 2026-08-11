@@ -20,3 +20,5 @@ int is_fav_item(int id);
 void toggle_fav_item(int id);
 int media_list_prompt_add(int id, int is_series, const char *title, const char *logo);
 int media_list_add_named(const char *name, int id, int is_series, const char *title, const char *logo);
+void detail_capture_origin(void);
+void detail_return_to_origin(void);
