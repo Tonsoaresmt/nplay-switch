@@ -164,6 +164,17 @@ void draw_movie(void) {
     if (related_n <= 0) {
         text_draw(gRen, "Ainda nao encontramos obras relacionadas a este titulo.", 40, 540, C_MUT, 0);
     } else {
+        // Mantem somente a vizinhanca imediata aquecida. Cinco chamadas no maximo
+        // entram na fila existente e respeitam o mesmo LRU/teto de 160 texturas.
+        // Assim o proximo card tende a aparecer pronto sem baixar a lista inteira.
+        if (g_movie_zone == 1) {
+            int first = g_related_sel - 2; if (first < 0) first = 0;
+            int last = g_related_sel + 2; if (last >= related_n) last = related_n - 1;
+            for (int i = first; i <= last; i++) {
+                cJSON *nearby = cJSON_GetArrayItem(related, i);
+                cover_get(jstr(nearby, "logo"));
+            }
+        }
         int card_w = expanded ? 176 : 142;
         int cover_w = expanded ? 152 : 104;
         int cover_h = expanded ? 216 : 136;

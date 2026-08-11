@@ -244,3 +244,32 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente no hardware: validar zona morta e sentido do analogico nos Joy-Con,
   velocidade da busca em videos curtos/longos, painel relacionado com 1 e 10+ itens,
   legibilidade dos cards do Historico e carregamento tardio das capas expandidas.
+
+## Recuperacao, diagnostico e sincronizacao em 10/08/2026 (0.6.8)
+
+- Historico ganhou menu por `X`: continuar, recomecar, marcar concluido e remover.
+  As duas ultimas acoes atualizam a API e retiram o card imediatamente da tela.
+- `Assistir mais tarde` agora usa `/api/sync/watchlater`: itens da conta sao
+  mesclados na lista local ao carregar o Historico, inclusoes sao espelhadas e uma
+  remocao so e aplicada localmente depois da confirmacao remota. A lista sincronizada
+  mantem nome fixo; as demais colecoes continuam locais e editaveis.
+- Relacionados pre-carregam somente os dois vizinhos de cada lado da selecao. O
+  mecanismo reutiliza a fila e o LRU existentes, sem alterar o teto de 160 texturas.
+- `source/curl_avio.c` diferencia HTTP 4xx definitivo de queda transitoria. O erro
+  antigo podia permanecer ativo mesmo depois da thread voltar a receber bytes;
+  agora sucesso limpa a flag e quedas recebem uma janela de ate 120 s para recuperar.
+- O card de buffering evolui de Carregando para Recuperando e informa `B` apos
+  30 s, mantendo controles responsivos enquanto a thread tenta reconectar.
+- Configuracoes ganhou `X Diagnostico do player`, que traduz `player_stats.txt` em
+  resolucao, quadros descartados, bufferings, fila maxima de audio e resultado
+  amigavel. Relatos devem incluir foto dessa tela, titulo e momento do problema.
+- A busca pela timeline mostra capitulos embutidos do arquivo e usa cima/baixo para
+  saltar entre eles. Fontes sem metadados continuam com busca analogica normal.
+- Miniaturas de seek nao foram geradas no console: isso exigiria seeks/decodes extras
+  em fontes lentas. Proximo caminho seguro e um endpoint de sprite WebP/JPEG com
+  intervalos e timestamps; o Switch deve manter no maximo um sprite pequeno em RAM.
+- Listas nomeadas ainda exigem backend futuro (`collections`, `collection_items`,
+  CRUD por perfil e `updated_at` para merge). Nao simular sincronizacao delas no
+  cliente ate esse contrato existir.
+- Pendente no hardware: todas as pendencias de 0.6.7 mais queda de rede por 10/40/120 s,
+  diagnostico apos saida/erro, arquivo com capitulos e Assistir mais tarde em dois aparelhos.

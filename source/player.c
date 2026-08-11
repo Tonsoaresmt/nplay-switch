@@ -291,8 +291,47 @@ static void draw_center_state(SDL_Renderer *ren, const char *state, const char *
     if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 65, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
 }
 
-static void draw_timeline_seek(SDL_Renderer *ren, double from, double target, double dur) {
-    const int x = 330, y = 142, w = 620, h = 176;
+static int chapter_at(AVFormatContext *fmt, double target, double timeline_origin,
+                      char *label, size_t label_cap) {
+    if (label && label_cap) label[0] = 0;
+    if (!fmt || fmt->nb_chapters == 0) return -1;
+    int current = -1;
+    for (unsigned i = 0; i < fmt->nb_chapters; i++) {
+        AVChapter *chapter = fmt->chapters[i];
+        double start = chapter->start * av_q2d(chapter->time_base) - timeline_origin;
+        if (start <= target + 0.25) current = (int)i;
+        else break;
+    }
+    if (current >= 0 && label && label_cap) {
+        AVDictionaryEntry *title = av_dict_get(fmt->chapters[current]->metadata, "title", NULL, 0);
+        if (title && title->value && title->value[0]) snprintf(label, label_cap, "%s", title->value);
+        else snprintf(label, label_cap, "Capitulo %d", current + 1);
+    }
+    return current;
+}
+
+static double adjacent_chapter(AVFormatContext *fmt, double target, int forward,
+                               double timeline_origin) {
+    if (!fmt || fmt->nb_chapters == 0) return target;
+    if (forward) {
+        for (unsigned i = 0; i < fmt->nb_chapters; i++) {
+            double start = fmt->chapters[i]->start * av_q2d(fmt->chapters[i]->time_base) - timeline_origin;
+            if (start > target + 1.0) return start;
+        }
+    } else {
+        for (int i = (int)fmt->nb_chapters - 1; i >= 0; i--) {
+            double start = fmt->chapters[i]->start * av_q2d(fmt->chapters[i]->time_base) - timeline_origin;
+            if (start < target - 1.0) return start;
+        }
+        return 0;
+    }
+    return target;
+}
+
+static void draw_timeline_seek(SDL_Renderer *ren, AVFormatContext *fmt,
+                               double from, double target, double dur,
+                               double timeline_origin) {
+    const int x = 330, y = 126, w = 620, h = 214;
     char target_time[20], total_time[20], delta[72];
     fmt_time(target, target_time, sizeof(target_time));
     fmt_time(dur, total_time, sizeof(total_time));
@@ -304,9 +343,17 @@ static void draw_timeline_seek(SDL_Renderer *ren, double from, double target, do
     text_draw(ren, "ESCOLHER PONTO DO VIDEO", x + 34, y + 22, PC_ACC, 0);
     text_draw(ren, target_time, x + 34, y + 56, PC_TEXT, 1);
     draw_clipped_text(ren, delta, x + 190, y + 64, w - 224, PC_MUT, 0);
-    text_draw(ren, "Mova o analogico para ajustar", x + 34, y + 108, PC_MUT, 0);
-    text_draw(ren, "A Ir para este ponto", x + 34, y + 142, PC_TEXT, 0);
-    text_draw(ren, "B Cancelar", x + 382, y + 142, PC_MUT, 0);
+    char chapter[160];
+    int chapter_index = chapter_at(fmt, target, timeline_origin, chapter, sizeof(chapter));
+    if (chapter_index >= 0) {
+        char chapter_line[196];
+        snprintf(chapter_line, sizeof(chapter_line), "CAPITULO %d/%u  %s", chapter_index + 1, fmt->nb_chapters, chapter);
+        draw_clipped_text(ren, chapter_line, x + 34, y + 104, w - 68, PC_ACC2, 0);
+    } else text_draw(ren, "Mova o analogico para ajustar", x + 34, y + 104, PC_MUT, 0);
+    text_draw(ren, chapter_index >= 0 ? "Cima/baixo Capitulos" : "Analogico Ajustar",
+              x + 34, y + 140, PC_MUT, 0);
+    text_draw(ren, "A Ir para este ponto", x + 34, y + 176, PC_TEXT, 0);
+    text_draw(ren, "B Cancelar", x + 382, y + 176, PC_MUT, 0);
 }
 
 static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
@@ -644,6 +691,11 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
                         snprintf(notice, sizeof(notice), "Busca cancelada");
                         notice_until = SDL_GetTicks() + 1500;
+                    } else if ((b == JOY_UP || b == JOY_DOWN) && fmt->nb_chapters > 0) {
+                        timeline_seek_target = adjacent_chapter(fmt, timeline_seek_target,
+                                                               b == JOY_DOWN, timeline_origin);
+                        if (timeline_seek_target < 0) timeline_seek_target = 0;
+                        if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
                     } else if (b == JOY_DLEFT || b == JOY_DRIGHT ||
                                b == JOY_L || b == JOY_R || b == JOY_ZL || b == JOY_ZR) {
                         double step = (b == JOY_ZL || b == JOY_ZR) ? 60.0 : 10.0;
@@ -783,7 +835,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
             draw_hud(ren, title, timeline_seek_target, dur, 1, vol, fmt, aidx,
                      acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, 1);
-            draw_timeline_seek(ren, timeline_seek_from, timeline_seek_target, dur);
+            draw_timeline_seek(ren, fmt, timeline_seek_from, timeline_seek_target, dur, timeline_origin);
             SDL_RenderPresent(ren);
             SDL_Delay(16);
             continue;
@@ -822,8 +874,11 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                 if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
                 char dots[48];
                 int ndots = (int)((now_ticks / 350) % 3) + 1;
-                snprintf(dots, sizeof(dots), "Aguardando dados%.*s", ndots, "...");
-                draw_center_state(ren, "CARREGANDO", dots, 0);
+                Uint32 stalled = now_ticks - buffering_since;
+                if (stalled < 8000) snprintf(dots, sizeof(dots), "Aguardando dados%.*s", ndots, "...");
+                else if (stalled < 30000) snprintf(dots, sizeof(dots), "Tentando reconectar%.*s", ndots, "...");
+                else snprintf(dots, sizeof(dots), "Conexao lenta  |  B para voltar");
+                draw_center_state(ren, stalled < 8000 ? "CARREGANDO" : "RECUPERANDO", dots, stalled >= 30000);
                 draw_hud(ren, title, cur_pos, dur, 0, vol, fmt, aidx,
                          acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
                 if (now_ticks < notice_until) draw_notice(ren, notice);
