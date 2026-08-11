@@ -195,3 +195,33 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente no hardware: capturar login, Inicio com 2+ rails, busca com duas linhas,
   serie com audio duplo, filme com elenco/relacionados, Salvos cheio/vazio, download
   offline e HUD compacto/expandido. Conferir overscan e legibilidade a distancia.
+
+## Historico, listas e reinicio em 10/08/2026 (0.6.6)
+
+- A antiga aba `Salvos` virou `Historico`. `/api/sync/progress` e carregado em uma
+  thread propria e mostra filmes/episodios em andamento com barra de progresso;
+  `A` resolve o item diretamente e retoma da posicao sincronizada.
+- O inicio do Historico tem uma segunda linha de atalhos. `Biblioteca` preserva os
+  jobs preparados e downloads offline, mas detalhes de infraestrutura deixaram de
+  aparecer. Estados de espera usam mensagens de streaming e dicas rotativas.
+- Listas pessoais sao persistidas em `sdmc:/switch/Meruem/media_lists.json`, com
+  limite atual de 8 listas e 64 itens por lista. A primeira instalacao cria
+  `Assistir mais tarde`; criar, renomear, excluir (com confirmacao), abrir e remover
+  itens pode ser feito no Historico. Estas listas sao locais: o backend atual nao
+  possui API para listas arbitrarias; sincronizacao entre aparelhos e futura.
+- Filmes aceitam `Y` para inclusao rapida em `Assistir mais tarde` e `X` para uma
+  lista nomeada. Series usam `+` para uma lista nomeada sem conflitar com preparar
+  episodios (`Y`) ou Minha lista (`X`).
+- O detalhe de filme nao mostra mais Elenco. Relacionados aparecem por padrao,
+  aceitam foco horizontal, `A` abre a obra, `Y` adiciona a Assistir mais tarde e
+  `X` adiciona/cria outra lista. A troca de filme e transacional: falha de API nao
+  apaga o detalhe que ja estava aberto.
+- Configuracoes ganharam `Reiniciar Nplay` e `Fechar Nplay`. Quando hbloader oferece
+  `envSetNextLoad`, reiniciar agenda o NRO atual e encerra depois de 1,4 s. Uma
+  atualizacao completa tambem reinicia automaticamente; carregadores sem suporte
+  recebem mensagem clara e continuam exigindo reabertura manual.
+- `update_resolve_target_path` valida `argv[0]`, prioriza caminhos conhecidos e so
+  depois varre a pasta `switch`, reduzindo o risco de reiniciar uma copia errada.
+- Pendente no hardware: validar retorno automatico pelo hbmenu usado no console,
+  Historico com filmes e episodios, listas com muitas capas, teclado de nome/confirmacao
+  e navegacao por mais de dez relacionados.

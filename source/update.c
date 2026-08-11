@@ -266,10 +266,22 @@ static int replace_with_file(const char *src, const char *dst, char *err, size_t
 void update_resolve_target_path(const char *argv0, char *out, size_t cap) {
     if (!out || cap == 0) return;
     out[0] = '\0';
-    if (argv0 && argv0[0] && strstr(argv0, ".nro")) {
+    if (argv0 && argv0[0] && strstr(argv0, ".nro") && file_exists(argv0)) {
         copy_text(out, cap, argv0);
         return;
     }
+    static const char *known[] = {
+        "sdmc:/switch/Nplay/Nplay.nro",
+        "sdmc:/switch/Nplay.nro",
+        "sdmc:/switch/Meruem/Meruem.nro",
+        "sdmc:/switch/Meruem.nro"
+    };
+    for (unsigned i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        if (file_exists(known[i])) { copy_text(out, cap, known[i]); return; }
+    }
+    char paths[MAX_INSTALL_PATHS][640]; int count = 0;
+    scan_install_paths(paths, &count);
+    if (count > 0) { copy_text(out, cap, paths[0]); return; }
     copy_text(out, cap, "sdmc:/switch/Nplay/Nplay.nro");
 }
 
