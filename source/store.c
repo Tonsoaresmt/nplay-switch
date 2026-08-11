@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <sys/stat.h>
 #include "cJSON.h"
@@ -26,10 +27,47 @@
 #define PREFS_F  DIR_APP "/pref_sub.txt"
 #define PREFV_F  DIR_APP "/player_volume.txt"
 #define PLAYER_STATS_F DIR_APP "/player_stats.txt"
+#define MEDIA_LISTS_F DIR_APP "/media_lists.json"
+#define MEDIA_LISTS_TMP DIR_APP "/media_lists.json.tmp"
+#define MEDIA_LISTS_BAK DIR_APP "/media_lists.json.bak"
 
 static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
 static cJSON *g_fitm = NULL;     // { seriesId: modo de ajuste 0=Auto 1=Conter 2=Largura }
+static cJSON *g_media_lists = NULL; // { lists: [{ name, items: [{id,series,title,logo}] }] }
+
+static cJSON *load_json_file(const char *path, long max_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    cJSON *json = NULL;
+    if (n > 0 && n < max_size) {
+        char *buf = (char *)malloc((size_t)n + 1);
+        if (buf) { size_t rd = fread(buf, 1, (size_t)n, f); buf[rd] = '\0'; json = cJSON_Parse(buf); free(buf); }
+    }
+    fclose(f);
+    return json;
+}
+
+static void save_media_lists(void) {
+    if (!g_media_lists) return;
+    char *text = cJSON_PrintUnformatted(g_media_lists);
+    if (!text) return;
+    FILE *f = fopen(MEDIA_LISTS_TMP, "wb");
+    size_t len = strlen(text); int written = 0;
+    if (f) { written = fwrite(text, 1, len, f) == len; fclose(f); }
+    if (written) {
+        remove(MEDIA_LISTS_BAK);
+        int backed_up = rename(MEDIA_LISTS_F, MEDIA_LISTS_BAK) == 0;
+        if (rename(MEDIA_LISTS_TMP, MEDIA_LISTS_F) == 0) {
+            if (backed_up) remove(MEDIA_LISTS_BAK);
+        } else {
+            remove(MEDIA_LISTS_TMP);
+            if (backed_up) rename(MEDIA_LISTS_BAK, MEDIA_LISTS_F);
+        }
+    } else remove(MEDIA_LISTS_TMP);
+    free(text);
+}
 
 void store_init(void) {
     mkdir(DIR_BASE, 0777);
@@ -66,6 +104,118 @@ void store_init(void) {
         fclose(ff);
     }
     if (!g_fitm) g_fitm = cJSON_CreateObject();
+
+    g_media_lists = load_json_file(MEDIA_LISTS_F, 4 * 1024 * 1024);
+    if (!g_media_lists || !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(g_media_lists, "lists"))) {
+        if (g_media_lists) cJSON_Delete(g_media_lists);
+        g_media_lists = cJSON_CreateObject();
+        cJSON *lists = cJSON_AddArrayToObject(g_media_lists, "lists");
+        cJSON *later = cJSON_CreateObject();
+        cJSON_AddStringToObject(later, "name", "Assistir mais tarde");
+        cJSON_AddItemToObject(later, "items", cJSON_CreateArray());
+        cJSON_AddItemToArray(lists, later);
+        save_media_lists();
+    }
+}
+
+static cJSON *media_lists_array(void) {
+    return g_media_lists ? cJSON_GetObjectItemCaseSensitive(g_media_lists, "lists") : NULL;
+}
+
+static cJSON *media_list_at(int index) {
+    cJSON *lists = media_lists_array();
+    return cJSON_IsArray(lists) ? cJSON_GetArrayItem(lists, index) : NULL;
+}
+
+int store_media_list_count(void) { return cJSON_GetArraySize(media_lists_array()); }
+
+const char *store_media_list_name(int list_index) {
+    cJSON *name = cJSON_GetObjectItemCaseSensitive(media_list_at(list_index), "name");
+    return cJSON_IsString(name) && name->valuestring ? name->valuestring : "Lista";
+}
+
+int store_media_list_create(const char *name) {
+    cJSON *lists = media_lists_array();
+    if (!cJSON_IsArray(lists) || !name || !name[0]) return -1;
+    for (int i = 0; i < cJSON_GetArraySize(lists); i++)
+        if (!strcasecmp(store_media_list_name(i), name)) return i;
+    if (cJSON_GetArraySize(lists) >= 8) return -1;
+    cJSON *list = cJSON_CreateObject();
+    if (!list) return -1;
+    cJSON_AddStringToObject(list, "name", name);
+    cJSON_AddItemToObject(list, "items", cJSON_CreateArray());
+    cJSON_AddItemToArray(lists, list);
+    save_media_lists();
+    return cJSON_GetArraySize(lists) - 1;
+}
+
+int store_media_list_rename(int list_index, const char *name) {
+    cJSON *list = media_list_at(list_index);
+    if (!list || !name || !name[0]) return -1;
+    cJSON_DeleteItemFromObjectCaseSensitive(list, "name");
+    cJSON_AddStringToObject(list, "name", name);
+    save_media_lists();
+    return 0;
+}
+
+int store_media_list_delete(int list_index) {
+    cJSON *lists = media_lists_array();
+    if (!cJSON_IsArray(lists) || list_index < 0 || list_index >= cJSON_GetArraySize(lists)) return -1;
+    cJSON_DeleteItemFromArray(lists, list_index);
+    save_media_lists();
+    return 0;
+}
+
+static cJSON *media_items(int list_index) {
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(media_list_at(list_index), "items");
+    return cJSON_IsArray(items) ? items : NULL;
+}
+
+int store_media_list_item_count(int list_index) { return cJSON_GetArraySize(media_items(list_index)); }
+
+int store_media_list_get(int list_index, int item_index, int *id, int *is_series,
+                         char *title, size_t title_cap, char *logo, size_t logo_cap) {
+    cJSON *item = cJSON_GetArrayItem(media_items(list_index), item_index);
+    if (!item) return 0;
+    cJSON *jid = cJSON_GetObjectItemCaseSensitive(item, "id");
+    cJSON *series = cJSON_GetObjectItemCaseSensitive(item, "series");
+    cJSON *jt = cJSON_GetObjectItemCaseSensitive(item, "title");
+    cJSON *jl = cJSON_GetObjectItemCaseSensitive(item, "logo");
+    if (id) *id = cJSON_IsNumber(jid) ? jid->valueint : 0;
+    if (is_series) *is_series = cJSON_IsTrue(series) || (cJSON_IsNumber(series) && series->valueint != 0);
+    if (title && title_cap) snprintf(title, title_cap, "%s", cJSON_IsString(jt) ? jt->valuestring : "Titulo");
+    if (logo && logo_cap) snprintf(logo, logo_cap, "%s", cJSON_IsString(jl) ? jl->valuestring : "");
+    return 1;
+}
+
+int store_media_list_add(int list_index, int id, int is_series, const char *title, const char *logo) {
+    cJSON *items = media_items(list_index);
+    if (!cJSON_IsArray(items) || id <= 0) return -1;
+    for (int i = 0; i < cJSON_GetArraySize(items); i++) {
+        cJSON *old = cJSON_GetArrayItem(items, i);
+        cJSON *oid = cJSON_GetObjectItemCaseSensitive(old, "id");
+        cJSON *os = cJSON_GetObjectItemCaseSensitive(old, "series");
+        int old_series = cJSON_IsTrue(os) || (cJSON_IsNumber(os) && os->valueint != 0);
+        if (cJSON_IsNumber(oid) && oid->valueint == id && old_series == !!is_series) return 1;
+    }
+    if (cJSON_GetArraySize(items) >= 64) return -2;
+    cJSON *item = cJSON_CreateObject();
+    if (!item) return -1;
+    cJSON_AddNumberToObject(item, "id", id);
+    cJSON_AddBoolToObject(item, "series", !!is_series);
+    cJSON_AddStringToObject(item, "title", title ? title : "Titulo");
+    cJSON_AddStringToObject(item, "logo", logo ? logo : "");
+    cJSON_AddItemToArray(items, item);
+    save_media_lists();
+    return 0;
+}
+
+int store_media_list_remove(int list_index, int item_index) {
+    cJSON *items = media_items(list_index);
+    if (!cJSON_IsArray(items) || item_index < 0 || item_index >= cJSON_GetArraySize(items)) return -1;
+    cJSON_DeleteItemFromArray(items, item_index);
+    save_media_lists();
+    return 0;
 }
 
 int store_get_fit_mode(const char *seriesId, int fallback) {

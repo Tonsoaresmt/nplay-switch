@@ -1,7 +1,7 @@
 // Nplay Switch - app homebrew do Nplay para Nintendo Switch.
 // Abas com RAILS por secao (como o app de PC): Inicio, Filmes, Series, Animes,
 // Doramas (todas com hero + Lancamentos + Minha lista + prateleiras por genero),
-// Baixados (torrent baixa no servidor e toca aqui) e Config. Busca global (Y),
+// Historico, biblioteca de itens preparados/offline e Config. Busca global (Y),
 // favoritar (X -> Minha lista). Capas em THREADS de fundo (navegacao fluida).
 // Player de video via ffmpeg + libcurl (TLS), tocando https direto.
 #include <switch.h>
@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -36,6 +37,7 @@ char g_toast[160] = {0};
 static char g_self_path[600] = {0};
 static char g_user[128] = {0};
 static int g_do_update = 0;
+static Uint32 g_restart_at = 0;
 static int g_running; // definido/inicializado na secao de roteamento de input
 
 #include "ui.h"
@@ -269,7 +271,7 @@ Screen g_screen = SC_LOGIN;
 #define TAB_HOME 0
 #define TAB_DOWNLOADS 5
 #define NTABS 6
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Salvos" };
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Historico" };
 static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
@@ -294,8 +296,15 @@ static int g_download_awake = 0;
 static SDL_Thread *g_dl_thread = NULL;
 static SDL_atomic_t g_dl_done;
 static cJSON *g_dl_pending = NULL;
-// vista da aba: 0 = grade de capas (por obra), 1 = episodios de uma obra
+// Historico de reproducao e carregado separadamente dos itens preparados. Ele
+// muda ao sair do player, nao a cada polling de status da biblioteca.
+static cJSON *g_history = NULL, *g_history_pending = NULL;
+static SDL_Thread *g_history_thread = NULL;
+static SDL_atomic_t g_history_done;
+static int g_history_sel = 0, g_history_zone = 0; // 0=continuar, 1=biblioteca
+// vista do Historico: 0=inicio, 1=episodios preparados, 2=biblioteca, 3=lista pessoal
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
+static int g_list_sel = 0, g_open_list = 0, g_list_item_sel = 0;
 // agrupamento dos jobs por obra (series_id) ou filme (item_id negativo)
 #define MAX_DLG 300
 typedef struct { int key; int job[128]; int nJobs; int isMovie; } DlGroup;
@@ -320,6 +329,8 @@ static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
 static void enter_tab(int tab);
 static void load_landing(int tab);
 static void load_downloads(void);
+static void load_history(void);
+static cJSON *history_items(void);
 static int accel_start(int itemId);
 static int accel_wait_and_play(int itemId, const char *title);
 static void do_search(void);
@@ -431,13 +442,14 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
     int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
     appletSetMediaPlaybackState(false);
     // O player controla a mesma flag de energia e sempre a desliga ao sair.
-    // Forca a aba Salvos a recalcular/reaplicar seu proprio estado no proximo frame.
+    // Forca o Historico a recalcular/reaplicar seu proprio estado no proximo frame.
     g_download_awake = 0;
     if (dur > 0 && pos > 5) {
         char body[160];
         snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", itemId, (int)pos, (int)dur);
         api_send("/api/sync/progress", "POST", body);
     }
+    if (g_tab == TAB_DOWNLOADS) load_history();
     if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", r); toast(m); return 0; }
     return r;   // 1 = terminou
 }
@@ -450,14 +462,14 @@ int resolve_and_play(int itemId, const char *title) {
     ui_panel(260, 210, WIN_W - 520, 250, C_ACC2);
     text_draw(gRen, "PREPARANDO", 300, 244, C_ACC2, 0);
     text_center_at(title && title[0] ? title : "Video", 300, WIN_W - 600, 286, C_TEXT, 1);
-    text_center_at("Localizando uma fonte compativel para reproducao...", 300, WIN_W - 600, 354, C_MUT, 0);
+    text_center_at("Organizando tudo para comecar...", 300, WIN_W - 600, 354, C_MUT, 0);
     for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
     SDL_RenderPresent(gRen);
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
     struct membuf out = { 0 }; const char *err = NULL;
     long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
                                     &out, &err, 8L, 20L);
-    if (code != 200 || !out.data) { membuf_free(&out); toast("Falha ao resolver o stream"); return 0; }
+    if (code != 200 || !out.data) { membuf_free(&out); toast("Nao foi possivel iniciar agora. Tente novamente."); return 0; }
     cJSON *j = cJSON_Parse(out.data);
     const char *container = jstr(j, "container");
     const char *play = jstr(j, "play_url");
@@ -470,10 +482,10 @@ int resolve_and_play(int itemId, const char *title) {
     if (container && !strcmp(container, "torrent")) {
         rc = accel_wait_and_play(itemId, title);
     } else if (container && !strcmp(container, "embed")) {
-        toast("Este conteudo (embed) ainda nao toca no Switch");
+        toast("Este conteudo ainda nao esta disponivel neste dispositivo");
     } else if (purl[0]) {
         rc = play_with_progress(itemId, title, purl);
-    } else toast("Sem fonte para tocar");
+    } else toast("Este titulo esta indisponivel no momento");
     if (j) cJSON_Delete(j);
     membuf_free(&out);
     return rc;
@@ -514,8 +526,8 @@ static int dl_has_active(void) {
     return 0;
 }
 
-// Os jobs rodam no servidor e continuam ate com o app fechado. Mantemos o
-// console acordado somente enquanto o usuario acompanha a aba Salvos.
+// Os jobs remotos continuam ate com o app fechado. Mantemos o console acordado
+// somente enquanto o usuario acompanha a aba Historico.
 static void update_download_awake(void) {
     int want = (g_screen == SC_MAIN && g_tab == TAB_DOWNLOADS && dl_has_active());
     if (want == g_download_awake) return;
@@ -561,8 +573,8 @@ static int accel_poll_thread(void *userdata) {
     return 0;
 }
 
-// Tela de espera deliberadamente animada: informa que o preparo ocorre no
-// servidor, mostra dados reais do job e evita a falsa impressao de download no SD.
+// Tela de espera deliberadamente animada: mostra dados reais do preparo e evita
+// a falsa impressao de download no SD sem expor detalhes de infraestrutura.
 static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 now) {
     int pct = job ? jint(job, "percent") : 0;
     if (pct < 0) pct = 0;
@@ -575,7 +587,6 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
     double downloaded = cJSON_IsNumber(dl) ? dl->valuedouble : 0;
     double speed = cJSON_IsNumber(sp) ? sp->valuedouble : 0;
     int eta = job ? jint(job, "eta_seconds") : 0;
-    int peers = job ? jint(job, "peers") : 0;
 
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     ui_header("NPLAY", "Preparando reproducao", "B Segundo plano");
@@ -591,13 +602,18 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
         fill_rect(WIN_W / 2 - 94 + i * 24, 178 + (54 - h) / 2, 14, h, c);
     }
 
-    const char *headline = offline ? "Reconectando ao servidor..." :
+    const char *headline = offline ? "Reconectando..." :
         (state && !strcmp(state, "fila")) ? "Seu pedido esta na fila" :
-        (state && !strcmp(state, "baixando") && pct == 0) ? "Localizando fontes e preparando o arquivo" :
-        "Preparando o video para reproduzir";
+        (state && !strcmp(state, "baixando") && pct == 0) ? "Encontrando a melhor opcao para voce" :
+        "Preparando sua obra para assistir";
     int hw = 0, hh = 0; text_cached(gRen, headline, C_TEXT, 1, &hw, &hh);
     text_draw(gRen, headline, (WIN_W - hw) / 2, 255, C_TEXT, 1);
-    text_center("O processamento acontece no servidor e nao ocupa espaco no seu Switch.", 305, C_MUT, 0);
+    static const char *cozy[] = {
+        "Pode pegar a pipoca. Avisaremos assim que estiver tudo pronto.",
+        "Relaxe no sofa enquanto preparamos a sua obra.",
+        "Estamos cuidando dos detalhes para a reproducao comecar bem."
+    };
+    text_center(cozy[(now / 7000) % 3], 305, C_MUT, 0);
 
     int bx = 120, by = 365, bw = WIN_W - 240;
     fill_rect(bx, by, bw, 20, C_CARD);
@@ -617,9 +633,8 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
     text_draw(gRen, "PROGRESSO", 140, 478, C_ACC2, 0); text_clip(amount, 140, 512, C_TEXT, 0, 290);
     text_draw(gRen, "VELOCIDADE", 495, 478, C_ACC2, 0); text_clip(rate, 495, 512, C_TEXT, 0, 260);
     text_draw(gRen, "PREVISAO", 820, 478, C_ACC2, 0); text_clip(remaining, 820, 512, C_TEXT, 0, 320);
-    if (peers > 0) { char ps[64]; snprintf(ps, sizeof(ps), "%d fonte%s conectada%s", peers, peers == 1 ? "" : "s", peers == 1 ? "" : "s"); text_draw(gRen, ps, 120, 579, C_GREEN, 0); }
-    text_draw(gRen, "Quando ficar pronto, a reproducao comeca automaticamente.", 120, 618, C_TEXT, 0);
-    text_draw(gRen, "B volta sem cancelar: o servidor continua preparando e o item aparece em Salvos.", 120, 654, C_MUT, 0);
+    text_draw(gRen, "Quando ficar pronto, a reproducao comeca automaticamente.", 120, 596, C_TEXT, 0);
+    text_draw(gRen, "B volta sem cancelar. Continuaremos o preparo e a obra aparecera no Historico.", 120, 642, C_MUT, 0);
     SDL_RenderPresent(gRen);
 }
 
@@ -680,7 +695,7 @@ static int accel_wait_and_play(int itemId, const char *title) {
     if (poll.result) cJSON_Delete(poll.result);
     if (status) cJSON_Delete(status);
     appletSetMediaPlaybackState(false); g_download_awake = 0;
-    if (user_back) toast("Preparacao continua no servidor");
+    if (user_back) toast("Continuaremos preparando em segundo plano");
     return rc;
 }
 static void accel_remove(int itemId) {
@@ -780,7 +795,7 @@ static int local_dl_progress(long long received, long long total, void *userdata
 }
 
 static void download_to_switch(cJSON *job) {
-    if (!job || !cJSON_IsTrue(cJSON_GetObjectItem(job, "ready"))) { toast("O arquivo do servidor ainda nao esta pronto"); return; }
+    if (!job || !cJSON_IsTrue(cJSON_GetObjectItem(job, "ready"))) { toast("Esta obra ainda esta sendo preparada"); return; }
     int item_id = jint(job, "item_id");
     if (local_dl_exists(item_id)) { toast("Este item ja esta na microSD"); return; }
     const char *fu = jstr(job, "file_url");
@@ -815,6 +830,41 @@ static int downloads_fetch_thread(void *unused) {
     membuf_free(&out);
     SDL_AtomicSet(&g_dl_done, 1);
     return 0;
+}
+
+static int history_fetch_thread(void *unused) {
+    (void)unused;
+    char url[1024]; snprintf(url, sizeof(url), "%s/api/sync/progress", BASE);
+    struct membuf out = {0}; const char *err = NULL;
+    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 7L);
+    if (code == 200 && out.data) g_history_pending = cJSON_Parse(out.data);
+    membuf_free(&out);
+    SDL_AtomicSet(&g_history_done, 1);
+    return 0;
+}
+
+static void load_history(void) {
+    if (g_history_thread) return;
+    g_history_pending = NULL; SDL_AtomicSet(&g_history_done, 0);
+    g_history_thread = SDL_CreateThread(history_fetch_thread, "history-fetch", NULL);
+}
+
+static void pump_history(void) {
+    if (!g_history_thread || !SDL_AtomicGet(&g_history_done)) return;
+    SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL;
+    if (!g_history_pending) return;
+    int old_n = arr_len(history_items());
+    if (g_history) cJSON_Delete(g_history);
+    g_history = g_history_pending; g_history_pending = NULL;
+    int n = arr_len(cJSON_GetObjectItemCaseSensitive(g_history, "items"));
+    if (g_history_sel >= n) g_history_sel = n > 0 ? n - 1 : 0;
+    if (n == 0) g_history_zone = 1;
+    else if (old_n == 0) g_history_zone = 0;
+}
+
+static cJSON *history_items(void) {
+    return g_history ? cJSON_GetObjectItemCaseSensitive(g_history, "items") : NULL;
 }
 
 static void apply_downloads(cJSON *fresh) {
@@ -1095,7 +1145,7 @@ static void draw_series(void) {
         fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
     if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    ui_footer("A Assistir    L/R Temporada    Y Salvar na conta    X Minha lista    ZL/ZR Audio");
+    ui_footer("A Assistir    L/R Temporada    Y Preparar episodios    X Minha lista    + Listas    ZL/ZR Audio");
 }
 
 // Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
@@ -1108,7 +1158,7 @@ static void open_dlmenu(void) {
 static void draw_dlmenu(void) {
     cJSON *s = ser_obj(); const char *title = jstr(s, "title");
     ui_header("SALVAR NA CONTA", title ? title : "Escolher episodios", "B Cancelar");
-    text_center("Selecione os episodios que o servidor deve preparar", 78, C_MUT, 0);
+    text_center("Escolha os episodios que deseja deixar prontos para assistir", 78, C_MUT, 0);
     int n = ser_nep(), cnt = 0;
     for (int i = 0; i < g_epChkN; i++) if (g_epChk[i]) cnt++;
     int listTop = 118, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
@@ -1151,16 +1201,114 @@ static void input_dlmenu(int b) {
         k += snprintf(body + k, sizeof(body) - k, "]}");
         if (cnt == 0) { toast("Selecione ao menos um episodio (A)"); return; }
         api_send("/api/accel/download-batch", "POST", body);
-        char m[64]; snprintf(m, sizeof(m), "%d episodio(s) salvos na sua conta", cnt);
+        char m[64]; snprintf(m, sizeof(m), "%d episodio(s) adicionado(s) a biblioteca", cnt);
         toast(m); g_dlmenu = 0; g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
     }
 }
 
 // ------------------------------------------------------------- render: downloads
-// Vista 1: GRADE de capas, uma por obra (serie agrupada / filme avulso).
+int media_list_add_named(const char *name, int id, int is_series, const char *title, const char *logo) {
+    int list = store_media_list_create(name);
+    if (list < 0) { toast("Nao foi possivel criar essa lista"); return -1; }
+    int r = store_media_list_add(list, id, is_series, title, logo);
+    if (r == 1) toast("Este titulo ja esta nessa lista");
+    else if (r == 0) { char msg[96]; snprintf(msg, sizeof(msg), "Adicionado a %s", store_media_list_name(list)); toast(msg); }
+    else toast(r == -2 ? "A lista chegou ao limite de itens" : "Nao foi possivel adicionar");
+    return r;
+}
+
+// O usuario escolhe o nome: se ja existir, adiciona; senao cria uma nova lista.
+int media_list_prompt_add(int id, int is_series, const char *title, const char *logo) {
+    char name[48];
+    if (prompt_text("Nome da lista (nova ou existente)", name, sizeof(name), 0) != 0) return -1;
+    return media_list_add_named(name, id, is_series, title, logo);
+}
+
+#define HIST_CW 120
+#define HIST_CH 172
+#define HIST_GAP 24
+
+static int horizontal_scroll(int selected, int item_w, int gap) {
+    int x = 40 + selected * (item_w + gap), scroll = 0;
+    if (x + item_w > WIN_W - 40) scroll = x + item_w - (WIN_W - 40);
+    return scroll > 0 ? scroll : 0;
+}
+
+static void draw_history_card(int x, int y, cJSON *item, int selected) {
+    const char *title = jstr(item, "title"); if (!title) title = "Titulo";
+    SDL_Texture *cover = cover_get(jstr(item, "logo"));
+    if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; SDL_RenderCopy(gRen, cover, NULL, &r); }
+    else fill_rect(x, y, HIST_CW, HIST_CH, C_CARD);
+    int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
+    int pct = dur > 0 ? pos * 100 / dur : 0;
+    ui_progress(x, y + HIST_CH - 8, HIST_CW, pct, C_ACC);
+    fill_rect(x, y + HIST_CH, HIST_CW, 38, selected ? C_CARD : C_BG);
+    text_clip(title, x, y + HIST_CH + 6, selected ? C_TEXT : C_MUT, 0, HIST_CW);
+    if (selected) ui_focus(x - 3, y - 3, HIST_CW + 6, HIST_CH + 44);
+    if (!strcmp(jstr(item, "kind") ? jstr(item, "kind") : "", "episode")) {
+        char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
+        ui_badge(ep, x + 6, y + 6, C_ACC2);
+    }
+}
+
+static void draw_history_home(void) {
+    cJSON *items = history_items(); int nh = arr_len(items);
+    text_draw(gRen, "Continuar assistindo", 40, 88, g_history_zone == 0 ? C_TEXT : C_MUT, 1);
+    text_right(nh ? "A retoma do ponto salvo" : "Seu progresso aparecera aqui", WIN_W - 40, 96, C_MUT, 0);
+    if (!g_history && g_history_thread) {
+        text_draw(gRen, "Carregando seu historico...", 40, 146, C_MUT, 0);
+    } else if (nh <= 0) {
+        ui_panel(40, 136, WIN_W - 80, 196, C_ACC2);
+        text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 188, C_TEXT, 1);
+        text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 244, C_MUT, 0);
+    } else {
+        int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
+        for (int i = 0; i < nh; i++) {
+            int x = 40 + i * (HIST_CW + HIST_GAP) - scroll;
+            if (x + HIST_CW < 0 || x > WIN_W) continue;
+            draw_history_card(x, 136, cJSON_GetArrayItem(items, i), g_history_zone == 0 && i == g_history_sel);
+        }
+    }
+
+    int list_count = store_media_list_count();
+    text_draw(gRen, "Suas listas", 40, 380, g_history_zone == 1 ? C_TEXT : C_MUT, 1);
+    text_right("Organize do seu jeito", WIN_W - 40, 388, C_MUT, 0);
+    int total = list_count + 2; // Biblioteca + listas locais + Nova lista
+    int tile_w = 220, tile_gap = 20, scroll = horizontal_scroll(g_list_sel, tile_w, tile_gap);
+    for (int i = 0; i < total; i++) {
+        int x = 40 + i * (tile_w + tile_gap) - scroll, y = 430;
+        if (x + tile_w < 0 || x > WIN_W) continue;
+        int selected = g_history_zone == 1 && i == g_list_sel;
+        ui_panel(x, y, tile_w, 142, i == 0 ? C_ACC2 : C_ACC);
+        if (selected) ui_focus(x - 3, y - 3, tile_w + 6, 148);
+        if (i == 0) {
+            text_draw(gRen, "BIBLIOTECA", x + 22, y + 18, C_ACC2, 0);
+            text_draw(gRen, "Preparados e offline", x + 22, y + 54, C_TEXT, 0);
+            char count[64]; snprintf(count, sizeof(count), "%d obra%s", g_dlgN, g_dlgN == 1 ? "" : "s");
+            text_draw(gRen, count, x + 22, y + 94, C_MUT, 0);
+        } else if (i == total - 1) {
+            text_draw(gRen, "+ NOVA LISTA", x + 22, y + 18, C_ACC, 0);
+            text_clip("Marvel, DC, comedia...", x + 22, y + 54, C_TEXT, 0, tile_w - 44);
+            text_draw(gRen, "A para criar", x + 22, y + 94, C_MUT, 0);
+        } else {
+            const char *name = store_media_list_name(i - 1);
+            text_clip(name, x + 22, y + 18, C_TEXT, 1, tile_w - 44);
+            char count[64]; int n = store_media_list_item_count(i - 1);
+            snprintf(count, sizeof(count), "%d titulo%s", n, n == 1 ? "" : "s");
+            text_draw(gRen, count, x + 22, y + 72, C_MUT, 0);
+            text_draw(gRen, "A abrir  Y renomear", x + 22, y + 104, C_ACC2, 0);
+        }
+    }
+    if (g_history_zone == 0) ui_footer("Esquerda/direita Escolher    A Continuar    Baixo Suas listas");
+    else if (g_list_sel == 0) ui_footer("A Abrir Biblioteca    Esquerda/direita Escolher    Cima Continuar assistindo");
+    else if (g_list_sel == total - 1) ui_footer("A Criar nova lista    Esquerda/direita Escolher    Cima Continuar assistindo");
+    else ui_footer("A Abrir    Y Renomear    ZR Excluir    Cima Continuar assistindo");
+}
+
+// Biblioteca: uma capa por obra preparada ou disponivel offline.
 static void draw_dl_grid(void) {
-    text_draw(gRen, "Salvos na sua conta", 40, 88, C_TEXT, 1);
-    text_draw(gRen, "Disponiveis em qualquer aparelho e sem ocupar espaco no Switch", 40, 126, C_MUT, 0);
+    text_draw(gRen, "Biblioteca", 40, 88, C_TEXT, 1);
+    text_draw(gRen, "Obras preparadas para assistir e copias offline deste Switch", 40, 126, C_MUT, 0);
     if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 90, C_GREEN);
     if (!g_dl && g_dl_thread) {
         ui_empty_state("Atualizando seus itens", "Buscando o estado mais recente da sua conta...");
@@ -1168,8 +1316,8 @@ static void draw_dl_grid(void) {
         return;
     }
     if (g_dlgN == 0) {
-        ui_empty_state("Nenhum item salvo", "Abra um filme ou pressione Y em uma serie para preparar episodios.");
-        ui_footer("Y em uma serie Escolher episodios    A em um filme Preparar");
+        ui_empty_state("Sua biblioteca esta vazia", "Abra uma obra e escolha assistir; cuidaremos do preparo para voce.");
+        ui_footer("B Voltar ao Historico");
         return;
     }
     int top = 164;
@@ -1186,7 +1334,7 @@ static void draw_dl_grid(void) {
         for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
         char badge[32];
         if (g_dlg[i].isMovie) { if (local_dl_exists(jint(j0, "item_id"))) snprintf(badge, sizeof(badge), "MICROSD"); else if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
-        else snprintf(badge, sizeof(badge), baixando ? "%d ep - salvando" : "%d ep", nJobs);
+        else snprintf(badge, sizeof(badge), baixando ? "%d ep - preparando" : "%d ep", nJobs);
         fill_rect(x, yy + GCOVERH - 26, GCOVERW, 26, C_BAR);
         text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
         const char *title = jstr(j0, "title"); if (!title) title = "";
@@ -1195,7 +1343,7 @@ static void draw_dl_grid(void) {
         text_clip(sh, x, yy + GCOVERH + 6, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
         if (i == g_dlSel) { ui_focus(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 44); fill_rect(x, yy + GCOVERH + 35, GCOVERW, 3, C_ACC2); }
     }
-    ui_footer("A Abrir    Y Baixar na microSD    ZR Apagar da microSD    X Remover da conta");
+    ui_footer("A Abrir    Y Baixar na microSD    ZR Apagar da microSD    X Remover    B Historico");
 }
 // Vista 2: episodios baixados de UMA obra (com status), estilo menu de serie.
 static void draw_dl_detail(void) {
@@ -1203,7 +1351,7 @@ static void draw_dl_detail(void) {
     if (g >= g_dlgN) { g_dlView = 0; return; }
     cJSON *j0 = dlg_job(g, 0);
     const char *title = jstr(j0, "title"); if (!title) title = "";
-    text_draw(gRen, "EPISODIOS SALVOS", 40, 92, C_ACC2, 0);
+    text_draw(gRen, "EPISODIOS PREPARADOS", 40, 92, C_ACC2, 0);
     text_clip(title, 40, 124, C_TEXT, 1, WIN_W - 300);
     if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 96, C_GREEN);
     int nj = g_dlg[g].nJobs;
@@ -1232,7 +1380,7 @@ static void draw_dl_detail(void) {
         if (local_dl_exists(jint(j, "item_id"))) snprintf(st, sizeof(st), "MICROSD");
         else if (ready) snprintf(st, sizeof(st), "PRONTO");
         else if (erro) snprintf(st, sizeof(st), "ERRO");
-        else snprintf(st, sizeof(st), "salvando %d%%", pct);
+        else snprintf(st, sizeof(st), "preparando %d%%", pct);
         text_draw(gRen, st, WIN_W - 260, yy, ready ? C_GREEN : (erro ? C_ROSE : C_ACC), 0);
         ui_progress(WIN_W - 260, yy + 27, 200, pct, ready ? C_GREEN : (erro ? C_ROSE : C_ACC));
     }
@@ -1242,11 +1390,47 @@ static void draw_dl_detail(void) {
         fill_rect(WIN_W - 22, listTop, 4, trkH, C_CARD);
         fill_rect(WIN_W - 22, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
     }
-    ui_footer("A Assistir    Y Baixar na microSD    ZR Apagar local    X Remover da conta    B Voltar");
+    ui_footer("A Assistir    Y Baixar na microSD    ZR Apagar local    X Remover    B Biblioteca");
 }
+
+static void draw_custom_list(void) {
+    const char *name = store_media_list_name(g_open_list);
+    int n = store_media_list_item_count(g_open_list);
+    text_draw(gRen, "LISTA PESSOAL", 40, 90, C_ACC2, 0);
+    text_clip(name, 40, 122, C_TEXT, 1, 760);
+    char total[64]; snprintf(total, sizeof(total), "%d titulo%s", n, n == 1 ? "" : "s");
+    text_right(total, WIN_W - 40, 130, C_MUT, 0);
+    if (n <= 0) {
+        ui_empty_state("Esta lista esta vazia", "Use X nos relacionados para adicionar uma obra.");
+        ui_footer("Y Renomear lista    ZR Excluir lista    B Voltar");
+        return;
+    }
+    int top = 174, selected_row = g_list_item_sel / GCOLS;
+    int selected_bottom = top + selected_row * (GCH + GGAP) + GCH;
+    int scroll_px = selected_bottom > WIN_H - 52 ? selected_bottom - (WIN_H - 52) + 16 : 0;
+    for (int i = 0; i < n; i++) {
+        int col = i % GCOLS, row = i / GCOLS;
+        int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
+        int y = top + row * (GCH + GGAP) - scroll_px;
+        if (y + GCH < 72 || y > WIN_H - 52) continue;
+        int id = 0, is_series = 0; char title[128], logo[720];
+        if (!store_media_list_get(g_open_list, i, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) continue;
+        SDL_Texture *cover = cover_get(logo);
+        if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; SDL_RenderCopy(gRen, cover, NULL, &r); }
+        else fill_rect(x, y, GCOVERW, GCOVERH, C_CARD);
+        fill_rect(x, y + GCOVERH, GCOVERW, 38, i == g_list_item_sel ? C_CARD : C_BG);
+        text_clip(title, x, y + GCOVERH + 6, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
+        if (i == g_list_item_sel) ui_focus(x - 3, y - 3, GCOVERW + 6, GCOVERH + 44);
+    }
+    ui_footer("A Abrir    X Remover da lista    Y Renomear lista    ZR Excluir lista    B Voltar");
+}
+
 static void draw_downloads(void) {
     draw_topbar();
-    if (g_dlView == 1) draw_dl_detail(); else draw_dl_grid();
+    if (g_dlView == 1) draw_dl_detail();
+    else if (g_dlView == 2) draw_dl_grid();
+    else if (g_dlView == 3) draw_custom_list();
+    else draw_history_home();
 }
 
 // ------------------------------------------------------------- login
@@ -1299,8 +1483,10 @@ static void enter_tab(int tab) {
     g_tab = tab;
     g_status[0] = '\0';
     if (tab == TAB_DOWNLOADS) {
-        g_dlSel = 0; g_dlScroll = 0; g_dlView = 0;
-        local_dl_refresh(); load_downloads(); g_dl_next = SDL_GetTicks() + 2000; return;
+        g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; g_history_sel = 0;
+        g_history_zone = arr_len(history_items()) > 0 ? 0 : 1; g_list_sel = 0;
+        local_dl_refresh(); load_downloads(); load_history();
+        g_dl_next = SDL_GetTicks() + 2000; return;
     }
     load_landing(tab);
 }
@@ -1346,6 +1532,7 @@ static void input_series(int b) {
     int nep = ser_nep();
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; }
     else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
+    else if (b == JOY_PLUS) { cJSON *s = ser_obj(); if (s) media_list_prompt_add(jint(s, "id"), 1, jstr(s, "title"), jstr(s, "logo")); }
     else if (b == JOY_Y) { open_dlmenu(); }       // escolher episodios pra baixar
     else if (b == JOY_ZL || b == JOY_ZR) {        // troca audio (Legendado <-> Dublado)
         cJSON *au = ser_audio();
@@ -1373,16 +1560,86 @@ static void input_series(int b) {
     }
 }
 static void input_downloads(int b) {
-    if (g_dlView == 1) {   // detalhe: episodios baixados de uma obra
+    if (g_dlView == 0) { // Historico + atalhos para listas
+        int nh = arr_len(history_items()), nl = store_media_list_count(), total = nl + 2;
+        if (b == JOY_UP && g_history_zone == 1 && nh > 0) g_history_zone = 0;
+        else if (b == JOY_DOWN && g_history_zone == 0) g_history_zone = 1;
+        else if (b == JOY_DLEFT) {
+            if (g_history_zone == 0 && g_history_sel > 0) g_history_sel--;
+            else if (g_history_zone == 1 && g_list_sel > 0) g_list_sel--;
+        } else if (b == JOY_DRIGHT) {
+            if (g_history_zone == 0 && g_history_sel + 1 < nh) g_history_sel++;
+            else if (g_history_zone == 1 && g_list_sel + 1 < total) g_list_sel++;
+        } else if (b == JOY_A) {
+            if (g_history_zone == 0 && g_history_sel < nh) {
+                cJSON *item = cJSON_GetArrayItem(history_items(), g_history_sel);
+                resolve_and_play(jint(item, "item_id"), jstr(item, "title"));
+                load_history();
+            } else if (g_history_zone == 1) {
+                if (g_list_sel == 0) { g_dlView = 2; g_dlSel = 0; g_dlScroll = 0; }
+                else if (g_list_sel == total - 1) {
+                    char name[48];
+                    if (prompt_text("Nome da nova lista", name, sizeof(name), 0) == 0) {
+                        int created = store_media_list_create(name);
+                        if (created >= 0) { g_open_list = created; g_list_item_sel = 0; g_dlView = 3; }
+                        else toast("Nao foi possivel criar a lista");
+                    }
+                } else { g_open_list = g_list_sel - 1; g_list_item_sel = 0; g_dlView = 3; }
+            }
+        } else if (g_history_zone == 1 && g_list_sel > 0 && g_list_sel < total - 1 && b == JOY_Y) {
+            char name[48];
+            if (prompt_text("Novo nome da lista", name, sizeof(name), 0) == 0)
+                store_media_list_rename(g_list_sel - 1, name);
+        } else if (g_history_zone == 1 && g_list_sel > 0 && g_list_sel < total - 1 && b == JOY_ZR) {
+            char confirm[24];
+            if (prompt_text("Digite EXCLUIR para apagar a lista", confirm, sizeof(confirm), 0) == 0 && !strcasecmp(confirm, "EXCLUIR")) {
+                store_media_list_delete(g_list_sel - 1);
+                if (g_list_sel >= store_media_list_count() + 2) g_list_sel--;
+                toast("Lista excluida");
+            }
+        }
+        return;
+    }
+    if (g_dlView == 3) { // conteudo de uma lista pessoal
+        int n = store_media_list_item_count(g_open_list);
+        if (b == JOY_B || b == JOY_MINUS) { g_dlView = 0; g_history_zone = 1; g_list_sel = g_open_list + 1; }
+        else if (b == JOY_UP && g_list_item_sel - GCOLS >= 0) g_list_item_sel -= GCOLS;
+        else if (b == JOY_DOWN && g_list_item_sel + GCOLS < n) g_list_item_sel += GCOLS;
+        else if (b == JOY_DLEFT && g_list_item_sel > 0) g_list_item_sel--;
+        else if (b == JOY_DRIGHT && g_list_item_sel + 1 < n) g_list_item_sel++;
+        else if (b == JOY_A && g_list_item_sel < n) {
+            int id = 0, is_series = 0; char title[128], logo[720];
+            if (store_media_list_get(g_open_list, g_list_item_sel, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) {
+                if (is_series) open_series(id);
+                else if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
+                else toast("Nao foi possivel abrir este titulo");
+            }
+        } else if (b == JOY_X && g_list_item_sel < n) {
+            store_media_list_remove(g_open_list, g_list_item_sel);
+            n = store_media_list_item_count(g_open_list);
+            if (g_list_item_sel >= n) g_list_item_sel = n > 0 ? n - 1 : 0;
+            toast("Removido da lista");
+        } else if (b == JOY_Y) {
+            char name[48];
+            if (prompt_text("Novo nome da lista", name, sizeof(name), 0) == 0) store_media_list_rename(g_open_list, name);
+        } else if (b == JOY_ZR) {
+            char confirm[24];
+            if (prompt_text("Digite EXCLUIR para apagar a lista", confirm, sizeof(confirm), 0) == 0 && !strcasecmp(confirm, "EXCLUIR")) {
+                store_media_list_delete(g_open_list); g_dlView = 0; g_history_zone = 1; g_list_sel = 0; toast("Lista excluida");
+            }
+        }
+        return;
+    }
+    if (g_dlView == 1) {   // detalhe: episodios preparados de uma obra
         int g = g_dlGroup, nj = (g < g_dlgN) ? g_dlg[g].nJobs : 0;
-        if (b == JOY_B || b == JOY_MINUS) { g_dlView = 0; }
+        if (b == JOY_B || b == JOY_MINUS) { g_dlView = 2; }
         else if (b == JOY_UP) { if (g_dlDetSel > 0) g_dlDetSel--; }
         else if (b == JOY_DOWN) { if (g_dlDetSel < nj - 1) g_dlDetSel++; }
         else if (b == JOY_A) {   // assistir + auto-play do proximo baixado
             int idx = g_dlDetSel;
             while (idx < g_dlg[g].nJobs) {
                 cJSON *j = dlg_job(g, idx);
-                if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda salvando..."); break; }
+                if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda estamos preparando..."); break; }
                 g_dlDetSel = idx;
                 if (dl_play(j) != 1) break;
                 idx++;
@@ -1393,15 +1650,16 @@ static void input_downloads(int b) {
         else if (b == JOY_X) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) { accel_remove(jint(j, "item_id")); load_downloads(); toast("Removido"); } }
         return;
     }
-    // grade de obras
+    // Biblioteca (g_dlView == 2)
     int n = g_dlgN;
+    if (b == JOY_B || b == JOY_MINUS) { g_dlView = 0; g_history_zone = 1; g_list_sel = 0; return; }
     if (b == JOY_UP) { if (g_dlSel - GCOLS >= 0) g_dlSel -= GCOLS; }
     else if (b == JOY_DOWN) { if (g_dlSel + GCOLS < n) g_dlSel += GCOLS; }
     else if (b == JOY_DLEFT) { if (g_dlSel > 0) g_dlSel--; }
     else if (b == JOY_DRIGHT) { if (g_dlSel + 1 < n) g_dlSel++; }
     else if (b == JOY_A) {
         if (g_dlSel < n) {
-            if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda salvando..."); }
+            if (g_dlg[g_dlSel].isMovie) { cJSON *j = dlg_job(g_dlSel, 0); if (cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) dl_play(j); else toast("Ainda estamos preparando..."); }
             else { g_dlGroup = g_dlSel; g_dlDetSel = 0; g_dlDetScroll = 0; g_dlView = 1; load_dl_done(jint(dlg_job(g_dlSel, 0), "series_id")); }
         }
     }
@@ -1422,9 +1680,31 @@ static void input_downloads(int b) {
 }
 
 // ------------------------------------------------------------- config
-static const char *SET_ITEMS[] = { "Buscar atualizacao", "Sair da conta" };
-#define NSET 2
+static const char *SET_ITEMS[] = { "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
+#define NSET 4
 static int g_setSel = 0;
+
+static int schedule_restart(const char *path) {
+    const char *target = (path && path[0]) ? path : g_self_path;
+    FILE *installed = fopen(target, "rb");
+    if (!installed) {
+        snprintf(g_status, sizeof(g_status), "Nao localizei a instalacao do Nplay para reiniciar.");
+        return -1;
+    }
+    fclose(installed);
+    if (!envHasNextLoad()) {
+        snprintf(g_status, sizeof(g_status), "Reinicio automatico indisponivel neste carregador.");
+        return -1;
+    }
+    Result rc = envSetNextLoad(target, target);
+    if (R_FAILED(rc)) {
+        snprintf(g_status, sizeof(g_status), "Nao foi possivel reiniciar automaticamente (0x%08x).", (unsigned)rc);
+        return -1;
+    }
+    snprintf(g_status, sizeof(g_status), "Tudo pronto. Reiniciando o Nplay...");
+    g_restart_at = SDL_GetTicks() + 1400;
+    return 0;
+}
 static void load_accel_status(void) {
     if (g_accel_status) { cJSON_Delete(g_accel_status); g_accel_status = NULL; }
     g_accel_status = api_get("/api/accel/status");
@@ -1435,10 +1715,10 @@ static void draw_settings(void) {
     char u[180]; snprintf(u, sizeof(u), "Conta  %s", g_user[0] ? g_user : "-");
     text_draw(gRen, u, 40, 92, C_TEXT, 0);
     text_right(v, WIN_W - 40, 92, C_MUT, 0);
-    text_draw(gRen, "ARMAZENAMENTO", 40, 138, C_ACC2, 0);
+    text_draw(gRen, "BIBLIOTECA E OFFLINE", 40, 138, C_ACC2, 0);
 
     ui_panel(40, 174, 580, 170, C_ACC);
-    text_draw(gRen, "SALVOS NA CONTA", 68, 194, C_ACC, 0);
+    text_draw(gRen, "SUA BIBLIOTECA", 68, 194, C_ACC, 0);
     text_draw(gRen, "Prontos para assistir em qualquer aparelho.", 68, 232, C_TEXT, 0);
     text_draw(gRen, "Nao usam o armazenamento do console.", 68, 264, C_MUT, 0);
     if (g_accel_status) {
@@ -1450,19 +1730,19 @@ static void draw_settings(void) {
     ui_panel(644, 174, 596, 170, C_ACC2);
     text_draw(gRen, "OFFLINE NA MICROSD", 672, 194, C_ACC2, 0);
     text_draw(gRen, "Copias para assistir sem internet.", 672, 232, C_TEXT, 0);
-    text_draw(gRen, "Use Y em um item pronto na aba Salvos.", 672, 264, C_MUT, 0);
+    text_draw(gRen, "Use Y em um item pronto na Biblioteca do Historico.", 672, 264, C_MUT, 0);
     char local[96]; snprintf(local, sizeof(local), "%d arquivo%s offline", local_dl_count(), local_dl_count() == 1 ? "" : "s");
     text_draw(gRen, local, 672, 302, C_GREEN, 0);
 
-    text_draw(gRen, "ACOES", 40, 382, C_ACC2, 0);
+    text_draw(gRen, "ACOES", 40, 368, C_ACC2, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 422 + i * 60;
-        fill_rect(260, y, 760, 48, C_CARD);
-        if (i == g_setSel) { ui_focus(256, y - 4, 768, 56); fill_rect(260, y, 4, 48, C_ACC2); }
-        text_draw(gRen, SET_ITEMS[i], 286, y + 9, (i == g_setSel) ? C_TEXT : C_MUT, 0);
-        text_right(i == 0 ? "A Verificar" : "A Confirmar", 994, y + 9, C_MUT, 0);
+        int y = 400 + i * 52;
+        fill_rect(260, y, 760, 44, C_CARD);
+        if (i == g_setSel) { ui_focus(256, y - 4, 768, 52); fill_rect(260, y, 4, 44, C_ACC2); }
+        text_draw(gRen, SET_ITEMS[i], 286, y + 7, (i == g_setSel) ? C_TEXT : C_MUT, 0);
+        text_right(i == 0 ? "A Verificar" : "A Confirmar", 994, y + 7, C_MUT, 0);
     }
-    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 558, C_ACC, 0);
+    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 620, C_ACC, 0);
     ui_footer("Cima/baixo Navegar    A Confirmar    B Voltar");
 }
 static void input_settings(int b) {
@@ -1471,6 +1751,8 @@ static void input_settings(int b) {
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
         if (g_setSel == 0) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
+        else if (g_setSel == 1) schedule_restart(NULL);
+        else if (g_setSel == 2) g_running = 0;
         else { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
     }
 }
@@ -1484,9 +1766,10 @@ static void run_update(void) {
         int updated = update_apply(&info, target, installed, sizeof(installed), err, sizeof(err));
         if (updated > 0 && err[0])
             snprintf(g_status, sizeof(g_status), "Atualizacao parcial: %.*s", 138, err);
-        else if (updated > 0)
-            snprintf(g_status, sizeof(g_status), "v%s instalada em %d copia(s). Feche com + e abra novamente.",
-                     info.latest_version, updated);
+        else if (updated > 0) {
+            snprintf(g_status, sizeof(g_status), "v%s instalada. Preparando o reinicio...", info.latest_version);
+            schedule_restart(installed[0] ? installed : target);
+        }
         else
             snprintf(g_status, sizeof(g_status), "Falha na atualizacao: %s", err[0] ? err : "download");
     } else if (r == UPDATE_CHECK_UP_TO_DATE) {
@@ -1603,6 +1886,7 @@ int main(int argc, char **argv) {
             load_downloads(); g_dl_next = SDL_GetTicks() + 2000;
         }
         pump_downloads();
+        pump_history();
         update_download_awake();
         // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.
         // Assim nenhuma textura usada neste frame e destruida antes do Present.
@@ -1626,6 +1910,7 @@ int main(int argc, char **argv) {
         }
         SDL_RenderPresent(gRen);
         if (g_do_update) { g_do_update = 0; run_update(); }
+        if (g_restart_at && SDL_GetTicks() >= g_restart_at) g_running = 0;
     }
 
     g_run = 0;
@@ -1633,11 +1918,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
     if (g_dl_thread) { SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL; }
     if (g_dl_pending) { cJSON_Delete(g_dl_pending); g_dl_pending = NULL; }
+    if (g_history_thread) { SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL; }
+    if (g_history_pending) { cJSON_Delete(g_history_pending); g_history_pending = NULL; }
 
     if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
     if (g_land) cJSON_Delete(g_land);
     if (g_search) cJSON_Delete(g_search);
     if (g_dl) cJSON_Delete(g_dl);
+    if (g_history) cJSON_Delete(g_history);
     if (g_ser) cJSON_Delete(g_ser);
     for (int i = 0; i < g_covN; i++) {
         if (g_cov[i].tex) SDL_DestroyTexture(g_cov[i].tex);

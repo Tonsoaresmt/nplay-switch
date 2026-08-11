@@ -8,7 +8,8 @@
 static cJSON *g_movie = NULL;
 static int g_movie_sel = 0; // 0=Assistir, 1=Minha lista
 static int g_plot_scroll = 0;
-static int g_info_tab = 0;  // 0=Elenco, 1=Relacionados
+static int g_movie_zone = 0; // 0=acoes, 1=relacionados
+static int g_related_sel = 0;
 
 #define PLOT_LINES 5
 #define PLOT_MAX_LINES 32
@@ -49,24 +50,21 @@ static int wrap_text(const char *text, char lines[][PLOT_LINE_CAP], int max_line
     return count;
 }
 
-static const char *cast_photo(cJSON *person) {
-    const char *photo = jstr(person, "photo");
-    return photo ? photo : jstr(person, "profile_path");
-}
-
 int open_movie_details(int movie_id) {
-    close_movie_details();
     char path[128];
     snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", movie_id);
     cJSON *resp = api_get(path);
     if (!resp) return -1;
-    g_movie = cJSON_GetObjectItemCaseSensitive(resp, "item");
-    if (!g_movie) { cJSON_Delete(resp); return -1; }
-    cJSON_DetachItemViaPointer(resp, g_movie);
+    cJSON *next_movie = cJSON_GetObjectItemCaseSensitive(resp, "item");
+    if (!next_movie) { cJSON_Delete(resp); return -1; }
+    cJSON_DetachItemViaPointer(resp, next_movie);
     cJSON_Delete(resp);
+    close_movie_details();
+    g_movie = next_movie;
     g_movie_sel = 0;
     g_plot_scroll = 0;
-    g_info_tab = 0;
+    g_movie_zone = 0;
+    g_related_sel = 0;
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
     const char *plot = jstr(g_movie, "plot");
     g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
@@ -77,7 +75,8 @@ int open_movie_details(int movie_id) {
 void close_movie_details(void) {
     if (g_movie) { cJSON_Delete(g_movie); g_movie = NULL; }
     g_plot_scroll = 0;
-    g_info_tab = 0;
+    g_movie_zone = 0;
+    g_related_sel = 0;
     g_plot_line_count = 0;
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
 }
@@ -129,56 +128,78 @@ void draw_movie(void) {
     }
 
     int is_fav = is_fav_item(jint(g_movie, "id"));
-    draw_button(dx, 408, 172, "A  Assistir", g_movie_sel == 0);
-    draw_button(dx + 188, 408, 230, is_fav ? "Na Minha Lista" : "+ Minha Lista", g_movie_sel == 1);
+    draw_button(dx, 408, 172, "A  Assistir", g_movie_zone == 0 && g_movie_sel == 0);
+    draw_button(dx + 188, 408, 230, is_fav ? "Na Minha Lista" : "+ Minha Lista", g_movie_zone == 0 && g_movie_sel == 1);
 
-    cJSON *cast = cJSON_GetObjectItemCaseSensitive(g_movie, "cast_list");
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
-    int cast_n = arr_len(cast);
     int related_n = arr_len(related);
     fill_rect(40, 474, WIN_W - 80, 2, C_CARD);
-    text_draw(gRen, g_info_tab ? "RELACIONADOS" : "ELENCO", 40, 488, C_ACC2, 0);
-    if (related_n > 0) text_right(g_info_tab ? "L  Ver elenco" : "R  Ver relacionados", WIN_W - 40, 488, C_MUT, 0);
-    if (!g_info_tab && cast_n <= 0) {
-        text_draw(gRen, "Elenco ainda nao disponivel para este titulo.", 40, 530, C_MUT, 0);
-    } else if (!g_info_tab) {
-        int shown = cast_n > 8 ? 8 : cast_n;
-        for (int i = 0; i < shown; i++) {
-            cJSON *person = cJSON_GetArrayItem(cast, i);
-            int x = 40 + i * 152;
-            SDL_Texture *photo = cover_get(cast_photo(person));
-            if (photo) { SDL_Rect pr = {x, 524, 64, 82}; SDL_RenderCopy(gRen, photo, NULL, &pr); }
-            else { fill_rect(x, 524, 64, 82, C_CARD); text_draw(gRen, "?", x + 24, 549, C_MUT, 1); }
-            text_clip(jstr(person, "name") ? jstr(person, "name") : "-", x, 612, C_TEXT, 0, 140);
-            const char *character = jstr(person, "character");
-            if (character && character[0]) text_clip(character, x, 640, C_MUT, 0, 140);
-        }
+    text_draw(gRen, "TITULOS RELACIONADOS", 40, 488, g_movie_zone == 1 ? C_TEXT : C_ACC2, 0);
+    text_right(related_n > 0 ? "Baixo para explorar" : "Novas sugestoes aparecerao aqui", WIN_W - 40, 488, C_MUT, 0);
+    if (related_n <= 0) {
+        text_draw(gRen, "Ainda nao encontramos obras relacionadas a este titulo.", 40, 540, C_MUT, 0);
     } else {
-        int shown = related_n > 10 ? 10 : related_n;
-        for (int i = 0; i < shown; i++) {
+        int stride = 122, scroll = 0;
+        int selected_x = 40 + g_related_sel * stride;
+        if (selected_x + 112 > WIN_W - 40) scroll = selected_x + 112 - (WIN_W - 40);
+        for (int i = 0; i < related_n; i++) {
             cJSON *item = cJSON_GetArrayItem(related, i);
-            int x = 40 + i * 122;
+            int x = 40 + i * stride - scroll;
+            if (x + 112 < 0 || x > WIN_W) continue;
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
             if (cover) { SDL_Rect rr = {x, 524, 88, 106}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
             else fill_rect(x, 524, 88, 106, C_CARD);
             text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, 638, C_TEXT, 0, 112);
+            if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 3, 521, 118, 144);
         }
     }
-    ui_footer("Esquerda/direita Selecionar    A Confirmar    Cima/baixo Ler sinopse    B Voltar");
+    ui_footer(g_movie_zone == 1 ?
+              "Esquerda/direita Escolher    A Abrir    Y Assistir mais tarde    X Outra lista    Cima Voltar" :
+              "A Confirmar    Y Assistir mais tarde    X Outra lista    Baixo Relacionados    B Voltar");
 }
 
 void input_movie(int b) {
     if (!g_movie) return;
     if (b == JOY_B || b == JOY_MINUS) { close_movie_details(); g_screen = SC_MAIN; return; }
-    if (b == JOY_DLEFT && g_movie_sel > 0) g_movie_sel--;
-    else if (b == JOY_DRIGHT && g_movie_sel < 1) g_movie_sel++;
-    else if (b == JOY_UP && g_plot_scroll > 0) g_plot_scroll--;
-    else if (b == JOY_DOWN) g_plot_scroll++;
-    else if (b == JOY_R && arr_len(cJSON_GetObjectItemCaseSensitive(g_movie, "related")) > 0) g_info_tab = 1;
-    else if (b == JOY_L) g_info_tab = 0;
+    cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
+    int related_n = arr_len(related);
+    int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
+    if (b == JOY_DLEFT) {
+        if (g_movie_zone == 1 && g_related_sel > 0) g_related_sel--;
+        else if (g_movie_zone == 0 && g_movie_sel > 0) g_movie_sel--;
+    }
+    else if (b == JOY_DRIGHT) {
+        if (g_movie_zone == 1 && g_related_sel + 1 < related_n) g_related_sel++;
+        else if (g_movie_zone == 0 && g_movie_sel < 1) g_movie_sel++;
+    }
+    else if (b == JOY_UP) {
+        if (g_movie_zone == 1) g_movie_zone = 0;
+        else if (g_plot_scroll > 0) g_plot_scroll--;
+    }
+    else if (b == JOY_DOWN) {
+        if (g_movie_zone == 0 && g_plot_scroll < max_scroll) g_plot_scroll++;
+        else if (related_n > 0) g_movie_zone = 1;
+    }
+    else if (b == JOY_X && g_movie_zone == 1 && g_related_sel < related_n) {
+        cJSON *item = cJSON_GetArrayItem(related, g_related_sel);
+        media_list_prompt_add(jint(item, "id"), 0, jstr(item, "title"), jstr(item, "logo"));
+    }
+    else if (b == JOY_X && g_movie_zone == 0) {
+        media_list_prompt_add(jint(g_movie, "id"), 0, jstr(g_movie, "title"), jstr(g_movie, "logo"));
+    }
+    else if (b == JOY_Y) {
+        cJSON *item = g_movie_zone == 1 && g_related_sel < related_n ? cJSON_GetArrayItem(related, g_related_sel) : g_movie;
+        media_list_add_named("Assistir mais tarde", jint(item, "id"), 0, jstr(item, "title"), jstr(item, "logo"));
+    }
     else if (b == JOY_A) {
-        int id = jint(g_movie, "id");
-        if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));
-        else toggle_fav_item(id);
+        if (g_movie_zone == 1 && g_related_sel < related_n) {
+            cJSON *item = cJSON_GetArrayItem(related, g_related_sel);
+            int id = jint(item, "id");
+            if (id > 0 && open_movie_details(id) != 0) toast("Nao foi possivel abrir este titulo");
+        } else {
+            int id = jint(g_movie, "id");
+            if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));
+            else toggle_fav_item(id);
+        }
     }
 }

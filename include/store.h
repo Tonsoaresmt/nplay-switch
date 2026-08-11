@@ -20,6 +20,20 @@ void store_save_player_stats(int width, int height, int decoded_frames,
                              int dropped_frames, int buffering_events,
                              unsigned max_audio_bytes, int playback_error);
 
+// Listas pessoais locais do catalogo. Ficam no Switch e podem ser sincronizadas
+// com a conta no futuro sem mudar a UI que as consome.
+int  store_media_list_count(void);
+const char *store_media_list_name(int list_index);
+int  store_media_list_create(const char *name);
+int  store_media_list_rename(int list_index, const char *name);
+int  store_media_list_delete(int list_index);
+int  store_media_list_item_count(int list_index);
+int  store_media_list_get(int list_index, int item_index, int *id, int *is_series,
+                          char *title, size_t title_cap, char *logo, size_t logo_cap);
+int  store_media_list_add(int list_index, int id, int is_series,
+                          const char *title, const char *logo);
+int  store_media_list_remove(int list_index, int item_index);
+
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);
 
