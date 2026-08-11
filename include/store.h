@@ -19,6 +19,12 @@ void store_save_player_volume(int volume);
 void store_save_player_stats(int width, int height, int decoded_frames,
                              int dropped_frames, int buffering_events,
                              unsigned max_audio_bytes, int playback_error);
+struct player_stats {
+    int width, height, decoded_frames, dropped_frames, buffering_events;
+    unsigned max_audio_bytes;
+    int playback_error;
+};
+int store_load_player_stats(struct player_stats *out);
 
 // Listas pessoais locais do catalogo. Ficam no Switch e podem ser sincronizadas
 // com a conta no futuro sem mudar a UI que as consome.

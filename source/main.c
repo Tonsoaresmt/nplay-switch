@@ -298,10 +298,12 @@ static SDL_atomic_t g_dl_done;
 static cJSON *g_dl_pending = NULL;
 // Historico de reproducao e carregado separadamente dos itens preparados. Ele
 // muda ao sair do player, nao a cada polling de status da biblioteca.
-static cJSON *g_history = NULL, *g_history_pending = NULL;
-static SDL_Thread *g_history_thread = NULL;
-static SDL_atomic_t g_history_done;
+static cJSON *g_history = NULL, *g_history_pending = NULL, *g_watchlater_pending = NULL;
+static SDL_Thread *g_history_thread = NULL, *g_watchlater_thread = NULL;
+static SDL_atomic_t g_history_done, g_watchlater_done;
+static int g_history_refresh_requested = 0;
 static int g_history_sel = 0, g_history_zone = 0; // 0=continuar, 1=biblioteca
+static int g_history_menu = 0, g_history_menu_sel = 0;
 // vista do Historico: 0=inicio, 1=episodios preparados, 2=biblioteca, 3=lista pessoal
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 static int g_list_sel = 0, g_open_list = 0, g_list_item_sel = 0;
@@ -844,23 +846,61 @@ static int history_fetch_thread(void *unused) {
     return 0;
 }
 
+static int watchlater_fetch_thread(void *unused) {
+    (void)unused;
+    char url[1024];
+    struct membuf out = {0}; const char *err = NULL;
+    snprintf(url, sizeof(url), "%s/api/sync/watchlater", BASE);
+    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 7L);
+    if (code == 200 && out.data) g_watchlater_pending = cJSON_Parse(out.data);
+    membuf_free(&out);
+    SDL_AtomicSet(&g_watchlater_done, 1);
+    return 0;
+}
+
 static void load_history(void) {
-    if (g_history_thread) return;
-    g_history_pending = NULL; SDL_AtomicSet(&g_history_done, 0);
+    if (g_history_thread || g_watchlater_thread) { g_history_refresh_requested = 1; return; }
+    g_history_pending = NULL;
+    if (g_watchlater_pending) { cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL; }
+    SDL_AtomicSet(&g_history_done, 0);
+    SDL_AtomicSet(&g_watchlater_done, 0);
     g_history_thread = SDL_CreateThread(history_fetch_thread, "history-fetch", NULL);
+    g_watchlater_thread = SDL_CreateThread(watchlater_fetch_thread, "watchlater-fetch", NULL);
 }
 
 static void pump_history(void) {
-    if (!g_history_thread || !SDL_AtomicGet(&g_history_done)) return;
-    SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL;
-    if (!g_history_pending) return;
-    int old_n = arr_len(history_items());
-    if (g_history) cJSON_Delete(g_history);
-    g_history = g_history_pending; g_history_pending = NULL;
-    int n = arr_len(cJSON_GetObjectItemCaseSensitive(g_history, "items"));
-    if (g_history_sel >= n) g_history_sel = n > 0 ? n - 1 : 0;
-    if (n == 0) g_history_zone = 1;
-    else if (old_n == 0) g_history_zone = 0;
+    if (g_history_thread && SDL_AtomicGet(&g_history_done)) {
+        SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL;
+    }
+    if (!g_history_thread && g_history_pending) {
+        int old_n = arr_len(history_items());
+        if (g_history) cJSON_Delete(g_history);
+        g_history = g_history_pending; g_history_pending = NULL;
+        int n = arr_len(cJSON_GetObjectItemCaseSensitive(g_history, "items"));
+        if (g_history_sel >= n) g_history_sel = n > 0 ? n - 1 : 0;
+        if (n == 0) g_history_zone = 1;
+        else if (old_n == 0) g_history_zone = 0;
+    }
+    if (g_watchlater_thread && SDL_AtomicGet(&g_watchlater_done)) {
+        SDL_WaitThread(g_watchlater_thread, NULL); g_watchlater_thread = NULL;
+    }
+    if (!g_watchlater_thread && g_watchlater_pending) {
+        int list = store_media_list_create("Assistir mais tarde");
+        cJSON *items = cJSON_GetObjectItemCaseSensitive(g_watchlater_pending, "items");
+        cJSON *item;
+        cJSON_ArrayForEach(item, items) {
+            int series_id = jint(item, "series_id"), item_id = jint(item, "item_id");
+            int is_series = series_id > 0;
+            store_media_list_add(list, is_series ? series_id : item_id, is_series,
+                                 jstr(item, "title"), jstr(item, "logo"));
+        }
+        cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL;
+    }
+    if (!g_history_thread && !g_watchlater_thread && g_history_refresh_requested) {
+        g_history_refresh_requested = 0;
+        load_history();
+    }
 }
 
 static cJSON *history_items(void) {
@@ -1207,6 +1247,16 @@ static void input_dlmenu(int b) {
 }
 
 // ------------------------------------------------------------- render: downloads
+static int is_account_watchlater(const char *name) {
+    return name && !strcasecmp(name, "Assistir mais tarde");
+}
+
+static long sync_watchlater_item(const char *method, int id, int is_series) {
+    char body[96];
+    snprintf(body, sizeof(body), is_series ? "{\"series_id\":%d}" : "{\"item_id\":%d}", id);
+    return api_send("/api/sync/watchlater", method, body);
+}
+
 int media_list_add_named(const char *name, int id, int is_series, const char *title, const char *logo) {
     int list = store_media_list_create(name);
     if (list < 0) { toast("Nao foi possivel criar essa lista"); return -1; }
@@ -1214,6 +1264,9 @@ int media_list_add_named(const char *name, int id, int is_series, const char *ti
     if (r == 1) toast("Este titulo ja esta nessa lista");
     else if (r == 0) { char msg[96]; snprintf(msg, sizeof(msg), "Adicionado a %s", store_media_list_name(list)); toast(msg); }
     else toast(r == -2 ? "A lista chegou ao limite de itens" : "Nao foi possivel adicionar");
+    if (r >= 0 && is_account_watchlater(store_media_list_name(list)) &&
+        sync_watchlater_item("POST", id, is_series) != 200)
+        toast("Salvo apenas neste Switch; tente novamente quando houver internet");
     return r;
 }
 
@@ -1249,6 +1302,38 @@ static void draw_history_card(int x, int y, cJSON *item, int selected) {
         char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
         ui_badge(ep, x + 6, y + 6, C_ACC2);
     }
+}
+
+static void draw_history_actions(void) {
+    cJSON *items = history_items();
+    int n = arr_len(items);
+    if (!g_history_menu || g_history_sel < 0 || g_history_sel >= n) return;
+    cJSON *item = cJSON_GetArrayItem(items, g_history_sel);
+    const char *options[] = { "Continuar assistindo", "Recomecar do inicio", "Marcar como concluido", "Remover do Historico" };
+    ui_panel(286, 112, 708, 490, C_ACC);
+    text_draw(gRen, "OPCOES DO HISTORICO", 324, 142, C_ACC, 0);
+    text_clip(jstr(item, "title") ? jstr(item, "title") : "Titulo", 324, 180, C_TEXT, 1, 632);
+    int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
+    char progress[96]; snprintf(progress, sizeof(progress), "%d min assistidos  |  %d%% concluido",
+                                pos / 60, dur > 0 ? pos * 100 / dur : 0);
+    text_draw(gRen, progress, 324, 226, C_MUT, 0);
+    for (int i = 0; i < 4; i++) {
+        int y = 278 + i * 64;
+        fill_rect(324, y, 632, 50, C_CARD);
+        if (i == g_history_menu_sel) { ui_focus(320, y - 4, 640, 58); fill_rect(324, y, 5, 50, C_ACC2); }
+        text_draw(gRen, options[i], 350, y + 10, i == g_history_menu_sel ? C_TEXT : C_MUT, 0);
+    }
+    text_center_at("A Confirmar    B Cancelar", 324, 632, 552, C_MUT, 0);
+}
+
+static int history_set_position(cJSON *item, int position) {
+    int id = jint(item, "item_id"), duration = jint(item, "duration_seconds");
+    if (id <= 0) return -1;
+    if (position < 0) position = 0;
+    char body[192];
+    snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}",
+             id, position, duration);
+    return api_send("/api/sync/progress", "POST", body) == 200 ? 0 : -1;
 }
 
 static void draw_history_home(void) {
@@ -1299,10 +1384,13 @@ static void draw_history_home(void) {
             text_draw(gRen, count, x + 22, y + 112, C_MUT, 0);
         }
     }
-    if (g_history_zone == 0) ui_footer("Esquerda/direita Escolher    A Continuar    Baixo Suas listas");
+    if (g_history_zone == 0) ui_footer(nh > 0 ?
+        "Esquerda/direita Escolher    A Continuar    X Opcoes    Baixo Suas listas" :
+        "Baixo Suas listas");
     else if (g_list_sel == 0) ui_footer("A Abrir Biblioteca    Esquerda/direita Escolher    Cima Continuar assistindo");
     else if (g_list_sel == total - 1) ui_footer("A Criar nova lista    Esquerda/direita Escolher    Cima Continuar assistindo");
     else ui_footer("A Abrir    Y Renomear    ZR Excluir    Cima Continuar assistindo");
+    draw_history_actions();
 }
 
 // Biblioteca: uma capa por obra preparada ou disponivel offline.
@@ -1485,6 +1573,7 @@ static void enter_tab(int tab) {
     if (tab == TAB_DOWNLOADS) {
         g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; g_history_sel = 0;
         g_history_zone = arr_len(history_items()) > 0 ? 0 : 1; g_list_sel = 0;
+        g_history_menu = 0; g_history_menu_sel = 0;
         local_dl_refresh(); load_downloads(); load_history();
         g_dl_next = SDL_GetTicks() + 2000; return;
     }
@@ -1562,6 +1651,40 @@ static void input_series(int b) {
 static void input_downloads(int b) {
     if (g_dlView == 0) { // Historico + atalhos para listas
         int nh = arr_len(history_items()), nl = store_media_list_count(), total = nl + 2;
+        if (g_history_menu) {
+            if (b == JOY_B || b == JOY_MINUS || b == JOY_X) g_history_menu = 0;
+            else if (b == JOY_UP && g_history_menu_sel > 0) g_history_menu_sel--;
+            else if (b == JOY_DOWN && g_history_menu_sel < 3) g_history_menu_sel++;
+            else if (b == JOY_A && g_history_sel < nh) {
+                cJSON *item = cJSON_GetArrayItem(history_items(), g_history_sel);
+                int id = jint(item, "item_id"), duration = jint(item, "duration_seconds");
+                int action = g_history_menu_sel;
+                g_history_menu = 0;
+                if (action == 0) {
+                    resolve_and_play(id, jstr(item, "title"));
+                } else if (action == 1) {
+                    if (history_set_position(item, 0) == 0) resolve_and_play(id, jstr(item, "title"));
+                    else toast("Nao foi possivel reiniciar o progresso");
+                } else if (action == 2) {
+                    if (duration <= 0) toast("A duracao desta obra ainda e desconhecida");
+                    else if (history_set_position(item, duration) == 0) {
+                        cJSON_DeleteItemFromArray(history_items(), g_history_sel);
+                        int left = arr_len(history_items()); if (g_history_sel >= left) g_history_sel = left > 0 ? left - 1 : 0;
+                        toast("Marcado como concluido");
+                    }
+                    else toast("Nao foi possivel atualizar o Historico");
+                } else {
+                    if (history_set_position(item, 0) == 0) {
+                        cJSON_DeleteItemFromArray(history_items(), g_history_sel);
+                        int left = arr_len(history_items()); if (g_history_sel >= left) g_history_sel = left > 0 ? left - 1 : 0;
+                        toast("Removido do Historico");
+                    }
+                    else toast("Nao foi possivel atualizar o Historico");
+                }
+                load_history();
+            }
+            return;
+        }
         if (b == JOY_UP && g_history_zone == 1 && nh > 0) g_history_zone = 0;
         else if (b == JOY_DOWN && g_history_zone == 0) g_history_zone = 1;
         else if (b == JOY_DLEFT) {
@@ -1586,11 +1709,19 @@ static void input_downloads(int b) {
                     }
                 } else { g_open_list = g_list_sel - 1; g_list_item_sel = 0; g_dlView = 3; }
             }
+        } else if (g_history_zone == 0 && nh > 0 && b == JOY_X) {
+            g_history_menu = 1; g_history_menu_sel = 0;
         } else if (g_history_zone == 1 && g_list_sel > 0 && g_list_sel < total - 1 && b == JOY_Y) {
+            if (is_account_watchlater(store_media_list_name(g_list_sel - 1))) {
+                toast("Assistir mais tarde acompanha sua conta e mantem este nome"); return;
+            }
             char name[48];
             if (prompt_text("Novo nome da lista", name, sizeof(name), 0) == 0)
                 store_media_list_rename(g_list_sel - 1, name);
         } else if (g_history_zone == 1 && g_list_sel > 0 && g_list_sel < total - 1 && b == JOY_ZR) {
+            if (is_account_watchlater(store_media_list_name(g_list_sel - 1))) {
+                toast("Remova os titulos individualmente desta lista"); return;
+            }
             char confirm[24];
             if (prompt_text("Digite EXCLUIR para apagar a lista", confirm, sizeof(confirm), 0) == 0 && !strcasecmp(confirm, "EXCLUIR")) {
                 store_media_list_delete(g_list_sel - 1);
@@ -1615,14 +1746,27 @@ static void input_downloads(int b) {
                 else toast("Nao foi possivel abrir este titulo");
             }
         } else if (b == JOY_X && g_list_item_sel < n) {
+            int id = 0, is_series = 0; char title[128], logo[720];
+            if (is_account_watchlater(store_media_list_name(g_open_list)) &&
+                store_media_list_get(g_open_list, g_list_item_sel, &id, &is_series,
+                                      title, sizeof(title), logo, sizeof(logo)) &&
+                sync_watchlater_item("DELETE", id, is_series) != 200) {
+                toast("Sem conexao: mantive o titulo para nao perder a sincronizacao"); return;
+            }
             store_media_list_remove(g_open_list, g_list_item_sel);
             n = store_media_list_item_count(g_open_list);
             if (g_list_item_sel >= n) g_list_item_sel = n > 0 ? n - 1 : 0;
             toast("Removido da lista");
         } else if (b == JOY_Y) {
+            if (is_account_watchlater(store_media_list_name(g_open_list))) {
+                toast("Assistir mais tarde acompanha sua conta e mantem este nome"); return;
+            }
             char name[48];
             if (prompt_text("Novo nome da lista", name, sizeof(name), 0) == 0) store_media_list_rename(g_open_list, name);
         } else if (b == JOY_ZR) {
+            if (is_account_watchlater(store_media_list_name(g_open_list))) {
+                toast("Remova os titulos individualmente desta lista"); return;
+            }
             char confirm[24];
             if (prompt_text("Digite EXCLUIR para apagar a lista", confirm, sizeof(confirm), 0) == 0 && !strcasecmp(confirm, "EXCLUIR")) {
                 store_media_list_delete(g_open_list); g_dlView = 0; g_history_zone = 1; g_list_sel = 0; toast("Lista excluida");
@@ -1683,6 +1827,7 @@ static void input_downloads(int b) {
 static const char *SET_ITEMS[] = { "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
 #define NSET 4
 static int g_setSel = 0;
+static int g_diag_open = 0;
 
 static int schedule_restart(const char *path) {
     const char *target = (path && path[0]) ? path : g_self_path;
@@ -1708,6 +1853,39 @@ static int schedule_restart(const char *path) {
 static void load_accel_status(void) {
     if (g_accel_status) { cJSON_Delete(g_accel_status); g_accel_status = NULL; }
     g_accel_status = api_get("/api/accel/status");
+}
+static void draw_player_diagnostics(void) {
+    if (!g_diag_open) return;
+    struct player_stats stats;
+    ui_panel(252, 96, 776, 526, C_ACC2);
+    text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 292, 128, C_ACC2, 0);
+    if (!store_load_player_stats(&stats)) {
+        text_center_at("Nenhuma reproducao registrada ainda", 292, 696, 282, C_TEXT, 1);
+        text_center_at("Assista a um video e volte aqui para consultar.", 292, 696, 340, C_MUT, 0);
+    } else {
+        int drop_pct = stats.decoded_frames > 0 ? stats.dropped_frames * 100 / stats.decoded_frames : 0;
+        const char *state = stats.playback_error < 0 ? "REPRODUCAO INTERROMPIDA" :
+                            (stats.buffering_events >= 5 || drop_pct >= 8 ? "ATENCAO RECOMENDADA" : "REPRODUCAO ESTAVEL");
+        SDL_Color state_color = stats.playback_error < 0 ? C_ROSE :
+                                (stats.buffering_events >= 5 || drop_pct >= 8 ? C_ACC : C_GREEN);
+        text_draw(gRen, state, 292, 174, state_color, 1);
+        char line[160];
+        snprintf(line, sizeof(line), "Video  %dx%d", stats.width, stats.height);
+        text_draw(gRen, line, 292, 232, C_TEXT, 0);
+        snprintf(line, sizeof(line), "Quadros decodificados  %d", stats.decoded_frames);
+        text_draw(gRen, line, 292, 274, C_TEXT, 0);
+        snprintf(line, sizeof(line), "Quadros descartados para sincronizar  %d  (%d%%)", stats.dropped_frames, drop_pct);
+        text_draw(gRen, line, 292, 316, drop_pct >= 8 ? C_ACC : C_MUT, 0);
+        snprintf(line, sizeof(line), "Interrupcoes para carregar  %d", stats.buffering_events);
+        text_draw(gRen, line, 292, 358, stats.buffering_events >= 5 ? C_ACC : C_MUT, 0);
+        snprintf(line, sizeof(line), "Maior fila de audio  %u KB", stats.max_audio_bytes / 1024);
+        text_draw(gRen, line, 292, 400, C_MUT, 0);
+        snprintf(line, sizeof(line), "Resultado  %s", stats.playback_error < 0 ? "conexao ou fonte interrompida" : "saida normal do player");
+        text_draw(gRen, line, 292, 442, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0);
+        text_clip("Ao relatar travamentos, fotografe esta tela junto com o titulo e o momento.",
+                  292, 502, C_MUT, 0, 696);
+    }
+    text_center_at("A ou B Fechar", 292, 696, 572, C_TEXT, 0);
 }
 static void draw_settings(void) {
     ui_header("NPLAY", "Configuracoes", "B Voltar");
@@ -1743,10 +1921,16 @@ static void draw_settings(void) {
         text_right(i == 0 ? "A Verificar" : "A Confirmar", 994, y + 7, C_MUT, 0);
     }
     if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 620, C_ACC, 0);
-    ui_footer("Cima/baixo Navegar    A Confirmar    B Voltar");
+    ui_footer("Cima/baixo Navegar    A Confirmar    X Diagnostico do player    B Voltar");
+    draw_player_diagnostics();
 }
 static void input_settings(int b) {
+    if (g_diag_open) {
+        if (b == JOY_A || b == JOY_B || b == JOY_MINUS || b == JOY_X) g_diag_open = 0;
+        return;
+    }
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
+    if (b == JOY_X) { g_diag_open = 1; return; }
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
@@ -1919,7 +2103,9 @@ int main(int argc, char **argv) {
     if (g_dl_thread) { SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL; }
     if (g_dl_pending) { cJSON_Delete(g_dl_pending); g_dl_pending = NULL; }
     if (g_history_thread) { SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL; }
+    if (g_watchlater_thread) { SDL_WaitThread(g_watchlater_thread, NULL); g_watchlater_thread = NULL; }
     if (g_history_pending) { cJSON_Delete(g_history_pending); g_history_pending = NULL; }
+    if (g_watchlater_pending) { cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL; }
 
     if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
     if (g_land) cJSON_Delete(g_land);

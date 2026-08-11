@@ -66,6 +66,9 @@ static int fetch_block(CurlIO *c, int64_t start) {
     // Em uma queda depois de receber parte do range, preserve esses bytes e
     // retome exatamente do offset seguinte. Antes todo o trecho parcial era
     // descartado, causando o ciclo "carrega/toca/trava" em fontes lentas.
+    // 4xx permanentes nao melhoram com repeticao. Timeout/rate limit continuam
+    // transitorios; 5xx e falhas do curl tambem podem se recuperar.
+    if (code >= 400 && code < 500 && code != 408 && code != 429) return -2;
     if (code != 200 && code != 206) return -1;
     if (start > 0 && code != 206) return -1; // servidor ignorou Range: seek inseguro
     if (r != CURLE_OK && c->tmp_len == 0) return -1;
@@ -94,7 +97,7 @@ static void ring_put(CurlIO *c, const unsigned char *src, size_t n) {
 static int producer(void *arg) {
     CurlIO *c = (CurlIO *)arg;
     int64_t prod;
-    int fails = 0;
+    Uint32 fail_since = 0;
     SDL_LockMutex(c->mtx); prod = c->base; SDL_UnlockMutex(c->mtx);
     while (1) {
         SDL_LockMutex(c->mtx);
@@ -111,12 +114,20 @@ static int producer(void *arg) {
         if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
         if (c->seek_req >= 0) { SDL_UnlockMutex(c->mtx); continue; }   // seek durante o fetch -> descarta
         if (got < 0) {                                                 // falha de rede: tenta de novo (bufferiza)
-            if (++fails >= 6) { c->err = 1; SDL_CondSignal(c->c_data); }
+            Uint32 now = SDL_GetTicks();
+            if (!fail_since) fail_since = now;
+            // HTTP definitivo encerra logo; falha transitoria recebe ate dois
+            // minutos para reconectar enquanto a UI continua responsiva ao B.
+            if (got == -2 || now - fail_since >= 120000) {
+                c->err = 1;
+                SDL_CondSignal(c->c_data);
+            }
             SDL_UnlockMutex(c->mtx);
             SDL_Delay(300);
             continue;
         }
-        fails = 0;
+        fail_since = 0;
+        c->err = 0;
         ring_put(c, c->tmp, (size_t)got);
         prod += got;
         if (c->fetch_complete && got < BLOCK && c->size < 0) c->size = prod;

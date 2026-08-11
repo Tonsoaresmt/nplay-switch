@@ -360,6 +360,20 @@ void store_save_player_stats(int width, int height, int decoded_frames,
     fclose(f);
 }
 
+int store_load_player_stats(struct player_stats *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    FILE *f = fopen(PLAYER_STATS_F, "rb");
+    if (!f) return 0;
+    int fields = fscanf(f, "resolution=%dx%d\ndecoded_frames=%d\ndropped_frames=%d\n"
+                           "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d",
+                        &out->width, &out->height, &out->decoded_frames,
+                        &out->dropped_frames, &out->buffering_events,
+                        &out->max_audio_bytes, &out->playback_error);
+    fclose(f);
+    return fields == 7;
+}
+
 
 
 int store_load_server(char *out, size_t cap) {
