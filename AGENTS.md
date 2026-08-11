@@ -273,3 +273,19 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   cliente ate esse contrato existir.
 - Pendente no hardware: todas as pendencias de 0.6.7 mais queda de rede por 10/40/120 s,
   diagnostico apos saida/erro, arquivo com capitulos e Assistir mais tarde em dois aparelhos.
+
+## Protecao do analogico em 10/08/2026 (0.6.9)
+
+- Relato de hardware: o analogico esquerdo abria a timeline com um toque pequeno,
+  pausando a experiencia e movendo a pre-visualizacao de forma brusca.
+- A timeline agora exige eixo horizontal acima de 24.500 (cerca de 75% do curso)
+  mantido por 550 ms. Entre 280 e 550 ms o HUD apenas informa para continuar
+  segurando; nenhum pause, preview ou seek acontece antes da ativacao intencional.
+- A zona morta dentro da timeline subiu de 8.000 para 14.000 e so e rearmada depois
+  que o eixo volta abaixo de 9.000. Confirmar/cancelar com o stick ainda inclinado
+  nao pode reabrir o painel imediatamente.
+- A velocidade proporcional caiu de 1,2-8,0% para 0,6-4,5% da duracao por segundo.
+  `A` continua sendo a unica forma de executar `av_seek_frame`; `B` cancela e volta
+  exatamente ao ponto anterior. O modal explicita que nada muda sem confirmar.
+- Pendente no hardware: validar Joy-Con com drift leve, Pro Controller, toque curto,
+  segurada intencional, confirmacao/cancelamento ainda inclinado e videos de 20/120 min.

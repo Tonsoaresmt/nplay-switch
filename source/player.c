@@ -38,6 +38,10 @@
 #define PWIN_H 720
 #define TRACK_MENU_AUDIO 1
 #define TRACK_MENU_SUB   2
+#define SEEK_ENTER_AXIS  24500
+#define SEEK_MOVE_AXIS   14000
+#define SEEK_RELEASE_AXIS 9000
+#define SEEK_HOLD_MS       550
 
 static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
 static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
@@ -350,8 +354,10 @@ static void draw_timeline_seek(SDL_Renderer *ren, AVFormatContext *fmt,
         snprintf(chapter_line, sizeof(chapter_line), "CAPITULO %d/%u  %s", chapter_index + 1, fmt->nb_chapters, chapter);
         draw_clipped_text(ren, chapter_line, x + 34, y + 104, w - 68, PC_ACC2, 0);
     } else text_draw(ren, "Mova o analogico para ajustar", x + 34, y + 104, PC_MUT, 0);
-    text_draw(ren, chapter_index >= 0 ? "Cima/baixo Capitulos" : "Analogico Ajustar",
-              x + 34, y + 140, PC_MUT, 0);
+    draw_clipped_text(ren, chapter_index >= 0 ?
+                      "Cima/baixo Capitulos  |  Analogico Ajustar" :
+                      "Analogico Ajustar  |  Nada muda sem confirmar",
+                      x + 34, y + 140, w - 68, PC_MUT, 0);
     text_draw(ren, "A Ir para este ponto", x + 34, y + 176, PC_TEXT, 0);
     text_draw(ren, "B Cancelar", x + 382, y + 176, PC_MUT, 0);
 }
@@ -652,8 +658,9 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     int hud_pinned = 0, have_video_frame = 0;
     int track_menu = 0, track_sel = 0;
     int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
+    int seek_arm_dir = 0;
     double timeline_seek_from = 0, timeline_seek_target = 0;
-    Uint32 timeline_seek_tick = SDL_GetTicks();
+    Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
     SDL_Event e;
 
     // Retoma de onde parou (só se fizer sentido: > 3s e não no finzinho).
@@ -810,23 +817,43 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
         int stick_x = joy ? SDL_JoystickGetAxis(joy, 0) : 0;
         int stick_abs = stick_x < 0 ? -stick_x : stick_x;
         Uint32 seek_now = SDL_GetTicks();
-        if (stick_abs < 8000) seek_axis_lock = 0;
-        if (!track_menu && dur > 1 && !timeline_seek && !seek_axis_lock && stick_abs >= 18000) {
-            timeline_seek = 1;
-            timeline_seek_was_paused = paused;
-            timeline_seek_from = cur_pos;
-            timeline_seek_target = cur_pos;
-            timeline_seek_tick = seek_now;
-            if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+        if (stick_abs < SEEK_RELEASE_AXIS) {
+            seek_axis_lock = 0;
+            seek_arm_dir = 0;
+            seek_arm_since = 0;
+        }
+        if (!track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
+            if (stick_abs >= SEEK_ENTER_AXIS) {
+                int direction = stick_x > 0 ? 1 : -1;
+                if (seek_arm_dir != direction) {
+                    seek_arm_dir = direction;
+                    seek_arm_since = seek_now;
+                } else if (seek_now - seek_arm_since >= SEEK_HOLD_MS) {
+                    timeline_seek = 1;
+                    timeline_seek_was_paused = paused;
+                    timeline_seek_from = cur_pos;
+                    timeline_seek_target = cur_pos;
+                    timeline_seek_tick = seek_now;
+                    seek_arm_dir = 0; seek_arm_since = 0;
+                    if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+                } else if (seek_now - seek_arm_since >= 280) {
+                    snprintf(notice, sizeof(notice), "Continue segurando para abrir a timeline");
+                    notice_until = seek_now + 300;
+                    hud_until = seek_now + 1200;
+                }
+            } else {
+                seek_arm_dir = 0;
+                seek_arm_since = 0;
+            }
         }
         if (timeline_seek) {
             double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
             if (elapsed > 0.08) elapsed = 0.08;
             timeline_seek_tick = seek_now;
-            if (stick_abs >= 8000) {
-                double amount = (stick_abs - 8000) / 24767.0;
+            if (stick_abs >= SEEK_MOVE_AXIS) {
+                double amount = (stick_abs - SEEK_MOVE_AXIS) / (32767.0 - SEEK_MOVE_AXIS);
                 if (amount > 1.0) amount = 1.0;
-                double speed = dur * (0.012 + amount * amount * 0.068);
+                double speed = dur * (0.006 + amount * amount * 0.039);
                 timeline_seek_target += (stick_x > 0 ? 1.0 : -1.0) * speed * elapsed;
                 if (timeline_seek_target < 0) timeline_seek_target = 0;
                 if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
