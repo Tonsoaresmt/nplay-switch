@@ -289,3 +289,21 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   exatamente ao ponto anterior. O modal explicita que nada muda sem confirmar.
 - Pendente no hardware: validar Joy-Con com drift leve, Pro Controller, toque curto,
   segurada intencional, confirmacao/cancelamento ainda inclinado e videos de 20/120 min.
+
+## Retorno contextual em 10/08/2026 (0.6.10)
+
+- Causa da perda de contexto: `input_movie` e `input_series` atribuiam sempre
+  `SC_MAIN` ao pressionar `B`, mesmo quando o detalhe havia sido aberto pela busca.
+- `detail_capture_origin` registra `SC_SEARCH` ou `SC_MAIN` antes de abrir um detalhe;
+  `detail_return_to_origin` restaura essa tela sem destruir consulta, selecao, scroll,
+  aba, rail, lista pessoal ou subvista da Biblioteca.
+- `open_item` cobre Home/rails/busca e a abertura direta por lista tambem captura a
+  origem. Series mantem a origem durante troca de audio, temporada ou versao agrupada.
+- Filmes relacionados usam uma pilha local de ate seis detalhes. Cada nivel preserva
+  o JSON ja carregado, acao selecionada, scroll da sinopse, relacionado selecionado
+  e altura do painel. `B` volta primeiro ao filme anterior sem nova requisicao; ao
+  esvaziar a pilha, retorna a pesquisa/lista/aba original.
+- O limite de seis evita crescimento de memoria em navegacao indefinida. Ao exceder,
+  o nivel mais antigo e liberado; os seis retornos mais recentes continuam disponiveis.
+- Pendente no hardware: busca -> filme/serie -> B, lista -> detalhe -> B, cadeia com
+  2/7 relacionados, playback no meio da cadeia e troca de audio de serie antes de voltar.

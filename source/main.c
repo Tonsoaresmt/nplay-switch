@@ -265,6 +265,7 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
 
 // ============================================================= estado / telas
 Screen g_screen = SC_LOGIN;
+static Screen g_detail_return = SC_MAIN;
 
 // Config saiu da barra de abas -> abre pelo botao (-). Assim L a partir do
 // Inicio ja cai em Baixados (ultima aba).
@@ -339,6 +340,17 @@ static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
 static int play_with_progress(int itemId, const char *title, const char *url);
+
+// Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
+// permanecem em memoria; voltar apenas restaura a tela anterior e sua selecao.
+void detail_capture_origin(void) {
+    if (g_screen == SC_SEARCH || g_screen == SC_MAIN) g_detail_return = g_screen;
+    else g_detail_return = SC_MAIN;
+}
+void detail_return_to_origin(void) {
+    g_screen = g_detail_return;
+    g_detail_return = SC_MAIN;
+}
 
 // ------------------------------------------------------------- favoritos
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
@@ -502,6 +514,7 @@ static void open_series(int id) {
 }
 static void open_item(cJSON *item, int is_series) {
     if (!item) return;
+    detail_capture_origin();
     int id = jint(item, "id");
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
@@ -1619,7 +1632,7 @@ static void input_search(int b) {
 static void input_series(int b) {
     if (g_dlmenu) { input_dlmenu(b); return; }   // menu "baixar episodios" aberto
     int nep = ser_nep();
-    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; }
+    if (b == JOY_B || b == JOY_MINUS) { detail_return_to_origin(); }
     else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
     else if (b == JOY_PLUS) { cJSON *s = ser_obj(); if (s) media_list_prompt_add(jint(s, "id"), 1, jstr(s, "title"), jstr(s, "logo")); }
     else if (b == JOY_Y) { open_dlmenu(); }       // escolher episodios pra baixar
@@ -1741,6 +1754,7 @@ static void input_downloads(int b) {
         else if (b == JOY_A && g_list_item_sel < n) {
             int id = 0, is_series = 0; char title[128], logo[720];
             if (store_media_list_get(g_open_list, g_list_item_sel, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) {
+                detail_capture_origin();
                 if (is_series) open_series(id);
                 else if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
                 else toast("Nao foi possivel abrir este titulo");
