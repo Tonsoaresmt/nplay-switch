@@ -225,3 +225,22 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente no hardware: validar retorno automatico pelo hbmenu usado no console,
   Historico com filmes e episodios, listas com muitas capas, teclado de nome/confirmacao
   e navegacao por mais de dez relacionados.
+
+## Relacionados, Historico e timeline em 10/08/2026 (0.6.7)
+
+- `source/screen_movie.c`: relacionados compactos usam capas maiores e, ao receber
+  foco com baixo, sobem em um painel animado que ocupa mais da metade inferior da
+  tela. A selecao usa capas de 152x216, titulo completo em destaque, contador e
+  acoes contextuais; cima recolhe o painel sem perder a obra selecionada.
+- `source/main.c`: Continuar assistindo usa posters de 168x224. Biblioteca, listas
+  locais e criacao de lista compartilham dimensoes, espacamento e hierarquia visual,
+  eliminando os cards irregulares da primeira versao do Historico.
+- `source/player.c`: mover horizontalmente o analogico esquerdo abre uma busca pela
+  timeline. A inclinacao controla a velocidade, `A` confirma e `B` cancela. O modo
+  apenas calcula uma pre-visualizacao local e executa um unico `av_seek_frame` ao
+  confirmar, evitando bombardear fontes lentas com seeks durante o movimento.
+- O mesmo helper transacional de seek agora atende timeline e saltos L/R/ZL/ZR:
+  codecs, legendas e fila de audio so sao limpos depois que FFmpeg aceita a busca.
+- Pendente no hardware: validar zona morta e sentido do analogico nos Joy-Con,
+  velocidade da busca em videos curtos/longos, painel relacionado com 1 e 10+ itens,
+  legibilidade dos cards do Historico e carregamento tardio das capas expandidas.

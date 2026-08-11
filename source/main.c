@@ -1224,9 +1224,9 @@ int media_list_prompt_add(int id, int is_series, const char *title, const char *
     return media_list_add_named(name, id, is_series, title, logo);
 }
 
-#define HIST_CW 120
-#define HIST_CH 172
-#define HIST_GAP 24
+#define HIST_CW 168
+#define HIST_CH 224
+#define HIST_GAP 20
 
 static int horizontal_scroll(int selected, int item_w, int gap) {
     int x = 40 + selected * (item_w + gap), scroll = 0;
@@ -1242,9 +1242,9 @@ static void draw_history_card(int x, int y, cJSON *item, int selected) {
     int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
     int pct = dur > 0 ? pos * 100 / dur : 0;
     ui_progress(x, y + HIST_CH - 8, HIST_CW, pct, C_ACC);
-    fill_rect(x, y + HIST_CH, HIST_CW, 38, selected ? C_CARD : C_BG);
+    fill_rect(x, y + HIST_CH, HIST_CW, 42, selected ? C_CARD : C_BG);
     text_clip(title, x, y + HIST_CH + 6, selected ? C_TEXT : C_MUT, 0, HIST_CW);
-    if (selected) ui_focus(x - 3, y - 3, HIST_CW + 6, HIST_CH + 44);
+    if (selected) ui_focus(x - 3, y - 3, HIST_CW + 6, HIST_CH + 48);
     if (!strcmp(jstr(item, "kind") ? jstr(item, "kind") : "", "episode")) {
         char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
         ui_badge(ep, x + 6, y + 6, C_ACC2);
@@ -1258,45 +1258,45 @@ static void draw_history_home(void) {
     if (!g_history && g_history_thread) {
         text_draw(gRen, "Carregando seu historico...", 40, 146, C_MUT, 0);
     } else if (nh <= 0) {
-        ui_panel(40, 136, WIN_W - 80, 196, C_ACC2);
-        text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 188, C_TEXT, 1);
-        text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 244, C_MUT, 0);
+        ui_panel(40, 134, WIN_W - 80, 250, C_ACC2);
+        text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 202, C_TEXT, 1);
+        text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 264, C_MUT, 0);
     } else {
         int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
         for (int i = 0; i < nh; i++) {
             int x = 40 + i * (HIST_CW + HIST_GAP) - scroll;
             if (x + HIST_CW < 0 || x > WIN_W) continue;
-            draw_history_card(x, 136, cJSON_GetArrayItem(items, i), g_history_zone == 0 && i == g_history_sel);
+            draw_history_card(x, 134, cJSON_GetArrayItem(items, i), g_history_zone == 0 && i == g_history_sel);
         }
     }
 
     int list_count = store_media_list_count();
-    text_draw(gRen, "Suas listas", 40, 380, g_history_zone == 1 ? C_TEXT : C_MUT, 1);
-    text_right("Organize do seu jeito", WIN_W - 40, 388, C_MUT, 0);
+    text_draw(gRen, "Suas listas", 40, 418, g_history_zone == 1 ? C_TEXT : C_MUT, 1);
+    text_right("Biblioteca, favoritos e colecoes pessoais", WIN_W - 40, 426, C_MUT, 0);
     int total = list_count + 2; // Biblioteca + listas locais + Nova lista
-    int tile_w = 220, tile_gap = 20, scroll = horizontal_scroll(g_list_sel, tile_w, tile_gap);
+    int tile_w = 270, tile_gap = 18, scroll = horizontal_scroll(g_list_sel, tile_w, tile_gap);
     for (int i = 0; i < total; i++) {
-        int x = 40 + i * (tile_w + tile_gap) - scroll, y = 430;
+        int x = 40 + i * (tile_w + tile_gap) - scroll, y = 466;
         if (x + tile_w < 0 || x > WIN_W) continue;
         int selected = g_history_zone == 1 && i == g_list_sel;
-        ui_panel(x, y, tile_w, 142, i == 0 ? C_ACC2 : C_ACC);
-        if (selected) ui_focus(x - 3, y - 3, tile_w + 6, 148);
+        ui_panel(x, y, tile_w, 158, C_ACC);
+        if (selected) ui_focus(x - 3, y - 3, tile_w + 6, 164);
         if (i == 0) {
             text_draw(gRen, "BIBLIOTECA", x + 22, y + 18, C_ACC2, 0);
-            text_draw(gRen, "Preparados e offline", x + 22, y + 54, C_TEXT, 0);
+            text_draw(gRen, "Preparados e offline", x + 22, y + 58, C_TEXT, 0);
             char count[64]; snprintf(count, sizeof(count), "%d obra%s", g_dlgN, g_dlgN == 1 ? "" : "s");
-            text_draw(gRen, count, x + 22, y + 94, C_MUT, 0);
+            text_draw(gRen, count, x + 22, y + 112, C_MUT, 0);
         } else if (i == total - 1) {
-            text_draw(gRen, "+ NOVA LISTA", x + 22, y + 18, C_ACC, 0);
-            text_clip("Marvel, DC, comedia...", x + 22, y + 54, C_TEXT, 0, tile_w - 44);
-            text_draw(gRen, "A para criar", x + 22, y + 94, C_MUT, 0);
+            text_draw(gRen, "CRIAR LISTA", x + 22, y + 18, C_ACC2, 0);
+            text_clip("+ Nova colecao", x + 22, y + 58, C_TEXT, 1, tile_w - 44);
+            text_draw(gRen, "Marvel, DC, comedia...", x + 22, y + 112, C_MUT, 0);
         } else {
             const char *name = store_media_list_name(i - 1);
-            text_clip(name, x + 22, y + 18, C_TEXT, 1, tile_w - 44);
+            text_draw(gRen, "LISTA", x + 22, y + 18, C_ACC2, 0);
+            text_clip(name, x + 22, y + 58, C_TEXT, 1, tile_w - 44);
             char count[64]; int n = store_media_list_item_count(i - 1);
             snprintf(count, sizeof(count), "%d titulo%s", n, n == 1 ? "" : "s");
-            text_draw(gRen, count, x + 22, y + 72, C_MUT, 0);
-            text_draw(gRen, "A abrir  Y renomear", x + 22, y + 104, C_ACC2, 0);
+            text_draw(gRen, count, x + 22, y + 112, C_MUT, 0);
         }
     }
     if (g_history_zone == 0) ui_footer("Esquerda/direita Escolher    A Continuar    Baixo Suas listas");
