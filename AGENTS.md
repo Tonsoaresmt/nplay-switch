@@ -307,3 +307,28 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   o nivel mais antigo e liberado; os seis retornos mais recentes continuam disponiveis.
 - Pendente no hardware: busca -> filme/serie -> B, lista -> detalhe -> B, cadeia com
   2/7 relacionados, playback no meio da cadeia e troca de audio de serie antes de voltar.
+
+## Conta, descoberta e Biblioteca em 11/08/2026 (0.6.11)
+
+- A interface offline foi recolhida ate a funcionalidade estar pronta para o
+  publico. Biblioteca mostra somente obras preparadas; botoes, badges e contadores
+  de microSD deixaram de ser anunciados. O codigo de copia local foi preservado e
+  marcado como reservado para a rodada futura, sem ficar acessivel pela UI.
+- Configuracoes agora consulta `/api/auth/me` e apresenta o nome real do plano,
+  estado da assinatura, limite de telas simultaneas, dispositivos e validade. Se o
+  backend nao enviar `current_period_end`, a UI informa que a data nao foi definida
+  em vez de inventar vencimento.
+- Plano e biblioteca ocupam cards simetricos na secao `CONTA E BIBLIOTECA`. As
+  consultas rodam em thread; a tela continua respondendo enquanto os dados chegam
+  e a conta aparece antes da consulta mais lenta de preparados terminar.
+- O final de Inicio, Filmes, Series, Animes e Doramas ganhou um card de descoberta
+  focavel. Baixo a partir da ultima prateleira leva a `MAIS NO NPLAY`; A ou Y abre
+  a busca, com texto contextual por categoria. Isso torna explicito que as rails
+  sao uma selecao e nao o limite do catalogo.
+- A decisao visual segue padroes de interfaces de TV pesquisados em documentacao
+  oficial: foco claramente destacado, acao confirmada separada da navegacao,
+  legibilidade a distancia e busca visivel no contexto em que o catalogo termina.
+- Versao preparada: 0.6.11. Pendente no hardware: capturar Configuracoes com plano
+  ativo, teste, sem validade e indisponivel; navegar ate a busca final em todas as
+  categorias; confirmar que nenhum comando offline aparece e que o card final nao
+  sofre corte ou overscan em 1280x720.
