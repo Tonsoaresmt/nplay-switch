@@ -10,6 +10,7 @@ static int g_movie_sel = 0; // 0=Assistir, 1=Minha lista
 static int g_plot_scroll = 0;
 static int g_movie_zone = 0; // 0=acoes, 1=relacionados
 static int g_related_sel = 0;
+static int g_related_panel_y = 458;
 
 #define PLOT_LINES 5
 #define PLOT_MAX_LINES 32
@@ -65,6 +66,7 @@ int open_movie_details(int movie_id) {
     g_plot_scroll = 0;
     g_movie_zone = 0;
     g_related_sel = 0;
+    g_related_panel_y = 458;
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
     const char *plot = jstr(g_movie, "plot");
     g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
@@ -77,6 +79,7 @@ void close_movie_details(void) {
     g_plot_scroll = 0;
     g_movie_zone = 0;
     g_related_sel = 0;
+    g_related_panel_y = 458;
     g_plot_line_count = 0;
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
 }
@@ -133,24 +136,54 @@ void draw_movie(void) {
 
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int related_n = arr_len(related);
-    fill_rect(40, 474, WIN_W - 80, 2, C_CARD);
-    text_draw(gRen, "TITULOS RELACIONADOS", 40, 488, g_movie_zone == 1 ? C_TEXT : C_ACC2, 0);
-    text_right(related_n > 0 ? "Baixo para explorar" : "Novas sugestoes aparecerao aqui", WIN_W - 40, 488, C_MUT, 0);
+    int panel_target = g_movie_zone == 1 ? 246 : 458;
+    if (g_related_panel_y > panel_target) {
+        g_related_panel_y -= 30;
+        if (g_related_panel_y < panel_target) g_related_panel_y = panel_target;
+    } else if (g_related_panel_y < panel_target) {
+        g_related_panel_y += 30;
+        if (g_related_panel_y > panel_target) g_related_panel_y = panel_target;
+    }
+    int expanded = g_related_panel_y < 430;
+    if (expanded) ui_panel(22, g_related_panel_y, WIN_W - 44, 414, C_ACC);
+    else fill_rect(40, g_related_panel_y, WIN_W - 80, 2, C_CARD);
+    int heading_y = expanded ? g_related_panel_y + 20 : g_related_panel_y + 14;
+    int cards_y = expanded ? g_related_panel_y + 100 : g_related_panel_y + 42;
+    text_draw(gRen, "TITULOS RELACIONADOS", expanded ? 44 : 40, heading_y,
+              g_movie_zone == 1 ? C_TEXT : C_ACC2, expanded ? 1 : 0);
+    if (expanded && related_n > 0) {
+        cJSON *selected = cJSON_GetArrayItem(related, g_related_sel);
+        char position[48]; snprintf(position, sizeof(position), "%d de %d", g_related_sel + 1, related_n);
+        text_right(position, WIN_W - 48, heading_y + 7, C_ACC2, 0);
+        text_clip(jstr(selected, "title") ? jstr(selected, "title") : "Titulo",
+                  44, heading_y + 43, C_TEXT, 0, WIN_W - 88);
+    } else {
+        text_right(related_n > 0 ? "Baixo para ampliar" : "Novas sugestoes aparecerao aqui",
+                   WIN_W - 40, heading_y, C_MUT, 0);
+    }
     if (related_n <= 0) {
         text_draw(gRen, "Ainda nao encontramos obras relacionadas a este titulo.", 40, 540, C_MUT, 0);
     } else {
-        int stride = 122, scroll = 0;
-        int selected_x = 40 + g_related_sel * stride;
-        if (selected_x + 112 > WIN_W - 40) scroll = selected_x + 112 - (WIN_W - 40);
+        int card_w = expanded ? 176 : 142;
+        int cover_w = expanded ? 152 : 104;
+        int cover_h = expanded ? 216 : 136;
+        int stride = expanded ? 196 : 158, scroll = 0;
+        int left = expanded ? 44 : 40;
+        int selected_x = left + g_related_sel * stride;
+        if (selected_x + card_w > WIN_W - 40) scroll = selected_x + card_w - (WIN_W - 40);
         for (int i = 0; i < related_n; i++) {
             cJSON *item = cJSON_GetArrayItem(related, i);
-            int x = 40 + i * stride - scroll;
-            if (x + 112 < 0 || x > WIN_W) continue;
+            int x = left + i * stride - scroll;
+            if (x + card_w < 0 || x > WIN_W) continue;
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
-            if (cover) { SDL_Rect rr = {x, 524, 88, 106}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
-            else fill_rect(x, 524, 88, 106, C_CARD);
-            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, 638, C_TEXT, 0, 112);
-            if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 3, 521, 118, 144);
+            int cover_x = x + (card_w - cover_w) / 2;
+            if (cover) { SDL_Rect rr = {cover_x, cards_y, cover_w, cover_h}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
+            else { fill_rect(cover_x, cards_y, cover_w, cover_h, C_CARD); text_center_at("Sem capa", cover_x, cover_w, cards_y + cover_h / 2 - 12, C_MUT, 0); }
+            int title_y = cards_y + cover_h + (expanded ? 9 : 0);
+            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, title_y,
+                      g_movie_zone == 1 && i == g_related_sel ? C_TEXT : C_MUT, 0, card_w);
+            if (g_movie_zone == 1 && i == g_related_sel)
+                ui_focus(x - 3, cards_y - 3, card_w + 6, cover_h + 47);
         }
     }
     ui_footer(g_movie_zone == 1 ?

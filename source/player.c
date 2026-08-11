@@ -30,7 +30,9 @@
 #define JOY_ZR 9
 #define JOY_PLUS 10
 #define JOY_MINUS 11
+#define JOY_DLEFT 12
 #define JOY_UP 13
+#define JOY_DRIGHT 14
 #define JOY_DOWN 15
 #define PWIN_W 1280
 #define PWIN_H 720
@@ -244,10 +246,11 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
 
     if (expanded) {
         int y = panel_y + 86;
-        draw_control(ren, 48,  y, 250, "A", paused ? "Continuar" : "Pausar", paused);
-        draw_control(ren, 330, y, 250, "L/R", "- / + 10s", 0);
-        draw_control(ren, 612, y, 300, "ZL/ZR", "- / + 60s", 0);
-        draw_control(ren, 944, y, 288, "B", "Voltar", 0);
+        draw_control(ren, 48,   y, 190, "A", paused ? "Continuar" : "Pausar", paused);
+        draw_control(ren, 254,  y, 210, "L/R", "- / + 10s", 0);
+        draw_control(ren, 480,  y, 232, "ZL/ZR", "- / + 60s", 0);
+        draw_control(ren, 728,  y, 270, "LS", "Buscar na timeline", 0);
+        draw_control(ren, 1014, y, 218, "B", "Voltar", 0);
 
         char volume_value[24], audio_value[48], subtitle_value[48];
         char audio_label[48], subtitle_label[48];
@@ -271,7 +274,7 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
         draw_control(ren, 48,   y, 190, "A", "Pausar", 0);
         draw_control(ren, 258,  y, 190, "L/R", "10s", 0);
         draw_control(ren, 468,  y, 220, "ZL/ZR", "60s", 0);
-        draw_control(ren, 708,  y, 280, "+", "Opcoes", 0);
+        draw_control(ren, 708,  y, 280, "LS/+", "Buscar / Opcoes", 0);
         draw_control(ren, 1008, y, 224, "B", "Voltar", 0);
     }
 }
@@ -286,6 +289,49 @@ static void draw_center_state(SDL_Renderer *ren, const char *state, const char *
     int dw = 0, dh = 0;
     SDL_Texture *dt = text_cached(ren, detail, PC_MUT, 0, &dw, &dh);
     if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 65, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
+}
+
+static void draw_timeline_seek(SDL_Renderer *ren, double from, double target, double dur) {
+    const int x = 330, y = 142, w = 620, h = 176;
+    char target_time[20], total_time[20], delta[72];
+    fmt_time(target, target_time, sizeof(target_time));
+    fmt_time(dur, total_time, sizeof(total_time));
+    double difference = target - from;
+    snprintf(delta, sizeof(delta), "%s%.0f segundos  |  %s / %s",
+             difference >= 0 ? "+" : "", difference, target_time, total_time);
+    pfill(ren, x, y, w, h, PC_DARK, 245);
+    pfill(ren, x, y, 6, h, PC_ACC, 255);
+    text_draw(ren, "ESCOLHER PONTO DO VIDEO", x + 34, y + 22, PC_ACC, 0);
+    text_draw(ren, target_time, x + 34, y + 56, PC_TEXT, 1);
+    draw_clipped_text(ren, delta, x + 190, y + 64, w - 224, PC_MUT, 0);
+    text_draw(ren, "Mova o analogico para ajustar", x + 34, y + 108, PC_MUT, 0);
+    text_draw(ren, "A Ir para este ponto", x + 34, y + 142, PC_TEXT, 0);
+    text_draw(ren, "B Cancelar", x + 382, y + 142, PC_MUT, 0);
+}
+
+static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
+                             AVCodecContext *actx, AVCodecContext *sctx,
+                             SDL_AudioDeviceID adev, double target,
+                             double timeline_origin, double *wall_start,
+                             double *audio_clock, double *cur_pos,
+                             double *last_ac, double *last_ac_wall,
+                             char *sub_text, double *sub_end) {
+    int flags = target < *cur_pos ? AVSEEK_FLAG_BACKWARD : 0;
+    if (av_seek_frame(fmt, -1, (int64_t)((target + timeline_origin) * AV_TIME_BASE), flags) < 0)
+        return -1;
+    avcodec_flush_buffers(vctx);
+    if (actx) avcodec_flush_buffers(actx);
+    if (sctx) avcodec_flush_buffers(sctx);
+    if (adev) SDL_ClearQueuedAudio(adev);
+    sub_text[0] = 0;
+    *sub_end = 0;
+    double now = av_gettime() / 1000000.0;
+    *wall_start = now - target;
+    *audio_clock = target;
+    *cur_pos = target;
+    *last_ac = -1;
+    *last_ac_wall = now;
+    return 0;
 }
 // (re)abre SÓ o decoder de audio p/ o stream aidx (fecha o anterior). O resample
 // (swr) é montado no loop a partir dos parametros REAIS do frame — importante pra
@@ -558,6 +604,9 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     char notice[96] = "";
     int hud_pinned = 0, have_video_frame = 0;
     int track_menu = 0, track_sel = 0;
+    int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
+    double timeline_seek_from = 0, timeline_seek_target = 0;
+    Uint32 timeline_seek_tick = SDL_GetTicks();
     SDL_Event e;
 
     // Retoma de onde parou (só se fizer sentido: > 3s e não no finzinho).
@@ -573,6 +622,38 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
             else if (e.type == SDL_JOYBUTTONDOWN) {
                 int b = e.jbutton.button;
                 hud_until = SDL_GetTicks() + 4000;
+                if (timeline_seek) {
+                    if (b == JOY_A) {
+                        if (apply_player_seek(fmt, vctx, actx, sctx, adev,
+                                              timeline_seek_target, timeline_origin,
+                                              &wall_start, &audio_clock, &cur_pos,
+                                              &last_ac, &last_ac_wall, sub_text, &sub_end) == 0) {
+                            snprintf(notice, sizeof(notice), "Reproducao em %.0f%%",
+                                     dur > 0 ? timeline_seek_target * 100.0 / dur : 0.0);
+                        } else snprintf(notice, sizeof(notice), "Nao foi possivel buscar neste video");
+                        notice_until = SDL_GetTicks() + 2000;
+                        timeline_seek = 0; seek_axis_lock = 1;
+                        paused = timeline_seek_was_paused;
+                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                    } else if (b == JOY_B || b == JOY_MINUS) {
+                        timeline_seek = 0; seek_axis_lock = 1;
+                        paused = timeline_seek_was_paused;
+                        double resume_now = av_gettime() / 1000000.0;
+                        wall_start = resume_now - cur_pos;
+                        last_ac = -1; last_ac_wall = resume_now;
+                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        snprintf(notice, sizeof(notice), "Busca cancelada");
+                        notice_until = SDL_GetTicks() + 1500;
+                    } else if (b == JOY_DLEFT || b == JOY_DRIGHT ||
+                               b == JOY_L || b == JOY_R || b == JOY_ZL || b == JOY_ZR) {
+                        double step = (b == JOY_ZL || b == JOY_ZR) ? 60.0 : 10.0;
+                        int forward = b == JOY_DRIGHT || b == JOY_R || b == JOY_ZR;
+                        timeline_seek_target += forward ? step : -step;
+                        if (timeline_seek_target < 0) timeline_seek_target = 0;
+                        if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
+                    }
+                    continue;
+                }
                 if (track_menu) {
                     int total = (track_menu == TRACK_MENU_AUDIO) ? naud : nsub + 1;
                     if (b == JOY_UP && track_sel > 0) track_sel--;
@@ -647,13 +728,10 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
                     double t = cur_pos + (forward ? step : -step);
                     if (t < 0) t = 0;
                     if (dur > 0 && t > dur - 1) t = dur - 1;
-                    int back = (b == JOY_L || b == JOY_ZL);
-                    if (av_seek_frame(fmt, -1, (int64_t)((t + timeline_origin) * AV_TIME_BASE), back ? AVSEEK_FLAG_BACKWARD : 0) >= 0) {
-                        avcodec_flush_buffers(vctx); if (actx) avcodec_flush_buffers(actx);
-                        if (sctx) avcodec_flush_buffers(sctx);
-                        if (adev) SDL_ClearQueuedAudio(adev);
-                        sub_text[0] = 0; sub_end = 0;
-                        wall_start = av_gettime() / 1000000.0 - t; audio_clock = t; cur_pos = t;
+                    if (apply_player_seek(fmt, vctx, actx, sctx, adev, t,
+                                          timeline_origin, &wall_start, &audio_clock,
+                                          &cur_pos, &last_ac, &last_ac_wall,
+                                          sub_text, &sub_end) == 0) {
                         snprintf(notice, sizeof(notice), "%s %.0f segundos", forward ? "Avancou" : "Voltou", step);
                     } else {
                         snprintf(notice, sizeof(notice), "Nao foi possivel buscar neste video");
@@ -677,6 +755,39 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
             }
         }
         if (!running) break;
+        int stick_x = joy ? SDL_JoystickGetAxis(joy, 0) : 0;
+        int stick_abs = stick_x < 0 ? -stick_x : stick_x;
+        Uint32 seek_now = SDL_GetTicks();
+        if (stick_abs < 8000) seek_axis_lock = 0;
+        if (!track_menu && dur > 1 && !timeline_seek && !seek_axis_lock && stick_abs >= 18000) {
+            timeline_seek = 1;
+            timeline_seek_was_paused = paused;
+            timeline_seek_from = cur_pos;
+            timeline_seek_target = cur_pos;
+            timeline_seek_tick = seek_now;
+            if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+        }
+        if (timeline_seek) {
+            double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
+            if (elapsed > 0.08) elapsed = 0.08;
+            timeline_seek_tick = seek_now;
+            if (stick_abs >= 8000) {
+                double amount = (stick_abs - 8000) / 24767.0;
+                if (amount > 1.0) amount = 1.0;
+                double speed = dur * (0.012 + amount * amount * 0.068);
+                timeline_seek_target += (stick_x > 0 ? 1.0 : -1.0) * speed * elapsed;
+                if (timeline_seek_target < 0) timeline_seek_target = 0;
+                if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
+            }
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
+            if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
+            draw_hud(ren, title, timeline_seek_target, dur, 1, vol, fmt, aidx,
+                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, 1);
+            draw_timeline_seek(ren, timeline_seek_from, timeline_seek_target, dur);
+            SDL_RenderPresent(ren);
+            SDL_Delay(16);
+            continue;
+        }
         if (track_menu) {
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
