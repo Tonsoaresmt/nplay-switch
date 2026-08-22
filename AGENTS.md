@@ -436,3 +436,28 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Build 0.7.3 concluido sem erros nem avisos. Pendente no hardware: capturar Home,
   busca, Historico, Biblioteca, lista e relacionados; conferir contraste dos
   badges pequenos a distancia, overscan e sete cards de 164 px na primeira rail.
+
+## Causa raiz do HLS confirmada em 21/08/2026 (0.7.4)
+
+- Apos 0.7.2/0.7.3 ainda nao reproduzirem filmes e series, a cadeia autenticada
+  foi testada fora do Switch com o mesmo `/api/stream`, `/api/play`, URL final e
+  FFmpeg. Anime MP4 abriu normalmente (H.264/AAC 1280x720), isolando a falha ao HLS.
+- Os manifests e segmentos existem: filme e serie responderam master/child HLS
+  validos e o primeiro `.m4s` respondeu HTTP 206 como `video/iso.segment`. Porem o
+  CDN entrega manifestos comprimidos com `Content-Range` baseado no tamanho
+  comprimido. FFmpeg envia `Range: bytes=0-` por padrao e lia somente parte do
+  texto (filme 447 de 646 bytes; serie 1809 de 3430), resultando em `Empty playlist`
+  ou `Invalid data found when processing input`. O site nao envia esse Range.
+- Um segundo bloqueio aparecia depois da leitura completa: o filtro conservador
+  de extensoes recusava algumas URLs assinadas de submanifestos/segmentos. O teste
+  passou com H.264/AAC 1920x1080 para filme e serie, incluindo dois audios e varias
+  legendas na serie, ao combinar `seekable=0`, `http_seekable=0` e
+  `allowed_extensions=ALL`.
+- O codigo oficial do FFmpeg n7.1 foi conferido: `hls.c` documenta explicitamente
+  `http_seekable=0` para servidores que nao aceitam Range e oferece
+  `allowed_extensions=ALL`. A build do Switch (`Lavf 61.7.100`) contem as tres
+  opcoes por inspecao de simbolos/strings.
+- O player 0.7.4 aplica `seekable=0` ao manifesto inicial, `http_seekable=0` aos
+  filhos e libera as URLs assinadas somente no caminho HLS. MP4/MKV, acelerador e
+  offline continuam no AVIO libcurl anterior. Pendente no hardware: filme e serie
+  por 30+ s, troca de audio/legenda e seek; registrar a nova mensagem exata se falhar.
