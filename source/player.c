@@ -526,6 +526,15 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
         av_dict_set(&open_opts, "user_agent", "Nplay-Switch/1.0", 0);
         av_dict_set(&open_opts, "tls_verify", "0", 0);
         av_dict_set(&open_opts, "rw_timeout", "30000000", 0);
+        // O CDN comprime manifestos e responde Range com Content-Range baseado
+        // no tamanho comprimido. Isso truncava a playlist (ex.: 646 -> 447 B).
+        // FFmpeg recomenda estes dois flags para servidores HLS sem Range seguro:
+        // seekable cobre o manifesto inicial; http_seekable cobre os filhos.
+        av_dict_set(&open_opts, "seekable", "0", 0);
+        av_dict_set(&open_opts, "http_seekable", "0", 0);
+        // URLs assinadas carregam query string e podem nao terminar na extensao
+        // esperada pelo filtro conservador do demuxer HLS.
+        av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
         av_dict_set(&open_opts, "reconnect", "1", 0);
         av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
         av_dict_set(&open_opts, "reconnect_delay_max", "5", 0);
