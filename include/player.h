@@ -11,5 +11,8 @@
 //   out_dur   : (opcional) recebe a duracao total, em segundos
 // Retorna 1 se terminou naturalmente (p/ auto-play do proximo), 0 se o usuario
 // saiu, negativo em erro de abertura/decode.
-int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
+int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hls,
                 const char *title, double start_sec, double *out_pos, double *out_dur);
+
+// Explica o ultimo retorno negativo sem expor URL ou token de reproducao.
+const char *player_last_error(void);

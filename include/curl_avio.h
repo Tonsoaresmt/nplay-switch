@@ -1,8 +1,7 @@
 // curl_avio.h - AVIOContext do ffmpeg alimentado pelo libcurl.
-// O switch-ffmpeg foi compilado SEM backend TLS, entao ele nao abre https://
-// sozinho. O libcurl (com mbedtls) abre. Aqui a gente pluga o curl como camada
-// de I/O do ffmpeg: leitura sequencial + seek por HTTP Range. Assim o player
-// toca qualquer https (link direto do R2 dos animes e o arquivo do acelerador).
+// Para arquivos remotos unicos, o libcurl fornece prefetch, leitura sequencial e
+// seek por HTTP Range. HLS nao usa este adaptador: a playlist precisa abrir
+// submanifestos e segmentos e segue pelo HTTP+TLS nativo do FFmpeg.
 #ifndef NPLAY_CURL_AVIO_H
 #define NPLAY_CURL_AVIO_H
 

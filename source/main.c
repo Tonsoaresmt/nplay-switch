@@ -367,7 +367,7 @@ static int accel_wait_and_play(int itemId, const char *title);
 static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
-static int play_with_progress(int itemId, const char *title, const char *url);
+static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 
 // Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
 // permanecem em memoria; voltar apenas restaura a tela anterior e sua selecao.
@@ -505,7 +505,7 @@ static int playback_heartbeat_thread(void *userdata) {
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
 // assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
 // Retorna 1 se o video terminou naturalmente (p/ auto-play do proximo).
-static int play_with_progress(int itemId, const char *title, const char *url) {
+static int play_with_progress(int itemId, const char *title, const char *url, int is_hls) {
     double start = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
     cJSON *pr = api_get(p);
@@ -524,7 +524,7 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
     }
     // Cobre tambem a abertura da rede/FFmpeg e todos os retornos de erro.
     appletSetMediaPlaybackState(true);
-    int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
+    int r = player_play(gRen, g_joy, url, is_hls, title, start, &pos, &dur);
     appletSetMediaPlaybackState(false);
     if (heartbeat) { SDL_AtomicSet(&hb.running, 0); SDL_WaitThread(heartbeat, NULL); }
     // O player controla a mesma flag de energia e sempre a desliga ao sair.
@@ -536,7 +536,12 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
         api_send("/api/sync/progress", "POST", body);
     }
     if (g_tab == TAB_DOWNLOADS) load_history();
-    if (r < 0) { char m[80]; snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", r); toast(m); return 0; }
+    if (r < 0) {
+        char m[160]; const char *detail = player_last_error();
+        if (detail && detail[0]) snprintf(m, sizeof(m), "%s", detail);
+        else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", r);
+        toast(m); return 0;
+    }
     return r;   // 1 = terminou
 }
 
@@ -582,7 +587,7 @@ int resolve_and_play(int itemId, const char *title) {
     } else if (container && !strcmp(container, "embed")) {
         toast("Este conteudo ainda nao esta disponivel neste dispositivo");
     } else if (purl[0]) {
-        rc = play_with_progress(itemId, title, purl);
+        rc = play_with_progress(itemId, title, purl, container && !strcmp(container, "m3u8"));
     } else toast("Este titulo esta indisponivel no momento");
     if (g_play_session_id > 0) {
         char stop[96]; snprintf(stop, sizeof(stop), "/api/stream/%d/stop", itemId);
@@ -787,7 +792,7 @@ static int accel_wait_and_play(int itemId, const char *title) {
                 if (!strncmp(fu, "http", 4)) snprintf(url, sizeof(url), "%s", fu);
                 else snprintf(url, sizeof(url), "%s%s", BASE, fu);
                 appletSetMediaPlaybackState(false); g_download_awake = 0;
-                rc = play_with_progress(itemId, title, url);
+                rc = play_with_progress(itemId, title, url, 0);
                 waiting = 0;
                 break;
             }
@@ -1039,13 +1044,13 @@ static void pump_downloads(void) {
 static int dl_play(cJSON *job) {
     char local[180]; local_dl_path(jint(job, "item_id"), local, sizeof(local));
     if (local_dl_exists(jint(job, "item_id")))
-        return play_with_progress(jint(job, "item_id"), jstr(job, "title"), local);
+        return play_with_progress(jint(job, "item_id"), jstr(job, "title"), local, 0);
     const char *fu = jstr(job, "file_url");
     if (!fu) { toast("Sem arquivo"); return 0; }
     char url[1400];
     if (strncmp(fu, "http", 4) == 0) snprintf(url, sizeof(url), "%s", fu);
     else snprintf(url, sizeof(url), "%s%s", BASE, fu);
-    return play_with_progress(jint(job, "item_id"), jstr(job, "title"), url);
+    return play_with_progress(jint(job, "item_id"), jstr(job, "title"), url, 0);
 }
 
 // ------------------------------------------------------------- busca
