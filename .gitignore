@@ -1,4 +1,5 @@
 build/
+.build-thirdparty/
 *.elf
 *.nacp
 *.map

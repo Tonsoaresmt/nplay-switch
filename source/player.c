@@ -17,6 +17,7 @@
 #include <libavutil/time.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
+#include <libavutil/hwcontext.h>
 #include "player.h"
 #include "curl_avio.h"
 #include "text.h"
@@ -620,12 +621,13 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     SDL_AudioDeviceID adev = 0;
     SDL_Texture *tex = NULL;
     struct SwsContext *sws = NULL;
-    AVFrame *yuv = NULL, *frame = NULL;
+    AVFrame *yuv = NULL, *frame = NULL, *transfer = NULL;
     AVPacket *pkt = NULL;
 #define PLAYER_SETUP_FAIL(code) do { \
     if (adev) SDL_CloseAudioDevice(adev); \
     if (sws) sws_freeContext(sws); \
     if (yuv) av_frame_free(&yuv); \
+    if (transfer) av_frame_free(&transfer); \
     if (swr) swr_free(&swr); \
     if (actx) avcodec_free_context(&actx); \
     if (sctx) avcodec_free_context(&sctx); \
@@ -644,7 +646,25 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     vctx = avcodec_alloc_context3(vdec);
     if (!vctx || avcodec_parameters_to_context(vctx, vpar) < 0) PLAYER_SETUP_FAIL(-4);
     vctx->thread_count = 4;
-    if (avcodec_open2(vctx, vdec, NULL) < 0) PLAYER_SETUP_FAIL(-4);
+    int tried_hw = 0;
+    if (vpar->codec_id == AV_CODEC_ID_H264 || vpar->codec_id == AV_CODEC_ID_HEVC) {
+        AVBufferRef *device = NULL;
+        if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, NULL, NULL, 0) >= 0) {
+            vctx->hw_device_ctx = av_buffer_ref(device);
+            av_buffer_unref(&device);
+            tried_hw = vctx->hw_device_ctx != NULL;
+        }
+    }
+    if (avcodec_open2(vctx, vdec, NULL) < 0) {
+        // Um perfil nao suportado pelo NVDEC nao pode impedir a reproducao.
+        // Reabre o mesmo decoder sem dispositivo e preserva o caminho por CPU.
+        if (!tried_hw) PLAYER_SETUP_FAIL(-4);
+        avcodec_free_context(&vctx);
+        vctx = avcodec_alloc_context3(vdec);
+        if (!vctx || avcodec_parameters_to_context(vctx, vpar) < 0) PLAYER_SETUP_FAIL(-4);
+        vctx->thread_count = 4;
+        if (avcodec_open2(vctx, vdec, NULL) < 0) PLAYER_SETUP_FAIL(-4);
+    }
 
     // ---- decoder de audio + resample + saida SDL ----
     const int OCH = 2, ORATE = 48000;
@@ -660,13 +680,8 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     if (vw <= 0 || vh <= 0) PLAYER_SETUP_FAIL(-4);
     tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, vw, vh);
     if (!tex) PLAYER_SETUP_FAIL(-4);
-    if (vctx->pix_fmt != AV_PIX_FMT_YUV420P) {
-        sws = sws_getContext(vw, vh, vctx->pix_fmt, vw, vh, AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
-        yuv = av_frame_alloc();
-        if (!sws || !yuv) PLAYER_SETUP_FAIL(-4);
-        yuv->format = AV_PIX_FMT_YUV420P; yuv->width = vw; yuv->height = vh;
-        if (av_frame_get_buffer(yuv, 32) < 0) PLAYER_SETUP_FAIL(-4);
-    }
+    transfer = av_frame_alloc();
+    if (!transfer) PLAYER_SETUP_FAIL(-4);
 
     // retangulo com letterbox (1280x720)
     int dw = PWIN_W, dh = PWIN_H;
@@ -686,7 +701,7 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     double last_ac = -1, last_ac_wall = av_gettime() / 1000000.0;  // detecta audio travado
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0;
-    int decoded_video = 0, dropped_video = 0, buffering_events = 0;
+    int decoded_video = 0, dropped_video = 0, buffering_events = 0, hardware_decode = 0;
     unsigned max_audio_queue = 0;
     store_load_player_volume(&vol);
     int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
@@ -1026,7 +1041,31 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
                     if (delay < -0.12) { dropped_video++; continue; }
                     if (delay > 0.001) { if (delay > 0.35) delay = 0.35; SDL_Delay((Uint32)(delay * 1000)); }
                     AVFrame *u = frame;
-                    if (sws) { sws_scale(sws, (const uint8_t * const *)frame->data, frame->linesize, 0, vh, yuv->data, yuv->linesize); u = yuv; }
+                    if (frame->format == AV_PIX_FMT_NVTEGRA) {
+                        av_frame_unref(transfer);
+                        if (av_hwframe_transfer_data(transfer, frame, 0) < 0) {
+                            dropped_video++;
+                            continue;
+                        }
+                        hardware_decode = 1;
+                        u = transfer;
+                    }
+                    if (u->format != AV_PIX_FMT_YUV420P) {
+                        sws = sws_getCachedContext(sws, u->width, u->height, u->format,
+                                                   vw, vh, AV_PIX_FMT_YUV420P,
+                                                   SWS_BILINEAR, NULL, NULL, NULL);
+                        if (!sws) { playback_error = -4; running = 0; break; }
+                        if (!yuv) {
+                            yuv = av_frame_alloc();
+                            if (!yuv) { playback_error = -4; running = 0; break; }
+                            yuv->format = AV_PIX_FMT_YUV420P; yuv->width = vw; yuv->height = vh;
+                            if (av_frame_get_buffer(yuv, 32) < 0) { playback_error = -4; running = 0; break; }
+                        }
+                        if (av_frame_make_writable(yuv) < 0) { playback_error = -4; running = 0; break; }
+                        sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
+                                  0, u->height, yuv->data, yuv->linesize);
+                        u = yuv;
+                    }
                     SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     have_video_frame = 1;
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
@@ -1063,11 +1102,13 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     if (out_dur) *out_dur = dur;
     store_save_player_volume(vol);
     store_save_player_stats(vw, vh, decoded_video, dropped_video,
-                            buffering_events, max_audio_queue, playback_error);
+                            buffering_events, max_audio_queue, playback_error,
+                            hardware_decode);
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);
     if (yuv) av_frame_free(&yuv);
+    if (transfer) av_frame_free(&transfer);
     if (swr) swr_free(&swr);
     av_freep(&audio_buf);
     if (actx) avcodec_free_context(&actx);
