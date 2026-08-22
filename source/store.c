@@ -14,6 +14,7 @@
 #define TOKEN_F  DIR_APP "/token.txt"
 #define SERVER_F DIR_APP "/server.txt"
 #define USER_F   DIR_APP "/user.txt"
+#define DEVICE_F DIR_APP "/device_id.txt"
 #define SEEN_F   DIR_APP "/update_seen.txt"
 #define LOCAL_F  DIR_APP "/local_root.txt"
 #define AREA_F   DIR_APP "/last_area.txt"
@@ -279,6 +280,20 @@ void store_save_token(const char *token) {
     fclose(f);
 }
 void store_clear_token(void) { remove(TOKEN_F); }
+
+int store_load_device_id(char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    FILE *f = fopen(DEVICE_F, "rb");
+    if (!f) return 0;
+    size_t n = fread(out, 1, cap - 1, f); fclose(f); out[n] = '\0';
+    while (n > 0 && (out[n-1] == '\n' || out[n-1] == '\r' || out[n-1] == ' ' || out[n-1] == '\t')) out[--n] = '\0';
+    return out[0] != '\0';
+}
+void store_save_device_id(const char *id) {
+    if (!id || !id[0]) return;
+    FILE *f = fopen(DEVICE_F, "wb");
+    if (f) { fwrite(id, 1, strlen(id), f); fclose(f); }
+}
 
 static void trim_line(char *s) {
     size_t len;

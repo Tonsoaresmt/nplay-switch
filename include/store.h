@@ -47,6 +47,9 @@ int  store_load_user(char *out, size_t cap);
 void store_save_user(const char *user);
 void store_clear_user(void);
 
+int  store_load_device_id(char *out, size_t cap);
+void store_save_device_id(const char *id);
+
 int  store_load_update_seen(char *out, size_t cap);
 void store_save_update_seen(const char *tag);
 
