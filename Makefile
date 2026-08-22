@@ -11,7 +11,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #--------------------------------------------------------------------------------- metadados
 APP_TITLE	:=	Nplay
 APP_AUTHOR	:=	Nplay
-APP_VERSION	:=	0.7.4
+APP_VERSION	:=	0.7.5
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	nplay-switch
 
@@ -43,7 +43,11 @@ LIBS	:= `$(PKGCONF) --libs --static $(PKGS)` \
 		-Wl,--start-group -lfreetype -lpng16 -ljpeg -lwebp -lbz2 -lz -Wl,--end-group \
 		-lstdc++ -lm -lnx
 
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+# O pacote switch-ffmpeg 7.1-5 nao registra o protocolo HTTPS. Mantemos somente
+# libavformat recompilada com HTTPS dentro do projeto; as demais libs continuam
+# vindo do port oficial da mesma versao.
+VENDOR_FFMPEG := $(TOPDIR)/vendor/ffmpeg-https
+LIBDIRS	:= $(VENDOR_FFMPEG) $(PORTLIBS) $(LIBNX)
 
 #--------------------------------------------------------------------------------- (boilerplate devkitPro)
 ifneq ($(BUILD),$(notdir $(CURDIR)))

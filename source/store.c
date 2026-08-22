@@ -365,12 +365,13 @@ void store_save_player_volume(int volume) {
 
 void store_save_player_stats(int width, int height, int decoded_frames,
                              int dropped_frames, int buffering_events,
-                             unsigned max_audio_bytes, int playback_error) {
+                             unsigned max_audio_bytes, int playback_error,
+                             int hardware_decode) {
     FILE *f = fopen(PLAYER_STATS_F, "wb");
     if (!f) return;
-    fprintf(f, "resolution=%dx%d\ndecoded_frames=%d\ndropped_frames=%d\n"
+    fprintf(f, "resolution=%dx%d\nhardware_decode=%d\ndecoded_frames=%d\ndropped_frames=%d\n"
                "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n",
-            width, height, decoded_frames, dropped_frames,
+            width, height, hardware_decode, decoded_frames, dropped_frames,
             buffering_events, max_audio_bytes, playback_error);
     fclose(f);
 }
@@ -380,13 +381,19 @@ int store_load_player_stats(struct player_stats *out) {
     memset(out, 0, sizeof(*out));
     FILE *f = fopen(PLAYER_STATS_F, "rb");
     if (!f) return 0;
-    int fields = fscanf(f, "resolution=%dx%d\ndecoded_frames=%d\ndropped_frames=%d\n"
-                           "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d",
-                        &out->width, &out->height, &out->decoded_frames,
-                        &out->dropped_frames, &out->buffering_events,
-                        &out->max_audio_bytes, &out->playback_error);
+    char line[96];
+    int found_resolution = 0, found_result = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "resolution=%dx%d", &out->width, &out->height) == 2) found_resolution = 1;
+        else if (sscanf(line, "hardware_decode=%d", &out->hardware_decode) == 1) { }
+        else if (sscanf(line, "decoded_frames=%d", &out->decoded_frames) == 1) { }
+        else if (sscanf(line, "dropped_frames=%d", &out->dropped_frames) == 1) { }
+        else if (sscanf(line, "buffering_events=%d", &out->buffering_events) == 1) { }
+        else if (sscanf(line, "max_audio_queue_bytes=%u", &out->max_audio_bytes) == 1) { }
+        else if (sscanf(line, "error=%d", &out->playback_error) == 1) found_result = 1;
+    }
     fclose(f);
-    return fields == 7;
+    return found_resolution && found_result;
 }
 
 

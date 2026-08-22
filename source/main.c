@@ -2128,7 +2128,8 @@ static void draw_player_diagnostics(void) {
                                 (stats.buffering_events >= 5 || drop_pct >= 8 ? C_ACC : C_GREEN);
         text_draw(gRen, state, 292, 174, state_color, 1);
         char line[160];
-        snprintf(line, sizeof(line), "Video  %dx%d", stats.width, stats.height);
+        snprintf(line, sizeof(line), "Video  %dx%d  |  %s", stats.width, stats.height,
+                 stats.hardware_decode ? "NVTEGRA ativo" : "decodificacao por CPU");
         text_draw(gRen, line, 292, 232, C_TEXT, 0);
         snprintf(line, sizeof(line), "Quadros decodificados  %d", stats.decoded_frames);
         text_draw(gRen, line, 292, 274, C_TEXT, 0);

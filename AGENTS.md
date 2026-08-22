@@ -461,3 +461,34 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   filhos e libera as URLs assinadas somente no caminho HLS. MP4/MKV, acelerador e
   offline continuam no AVIO libcurl anterior. Pendente no hardware: filme e serie
   por 30+ s, troca de audio/legenda e seek; registrar a nova mensagem exata se falhar.
+
+## HTTPS nativo e NVTEGRA em 22/08/2026 (0.7.5)
+
+- A foto do hardware revelou a mensagem exata `abrir playlist HLS: Protocol not
+  found`. A causa foi confirmada no pacote oficial `switch-ffmpeg 7.1-5`: a receita
+  usa `--disable-protocols` e habilita `file,http,ftp,tcp,udp,rtmp,tls,httpproxy`,
+  mas omite `https`. Ter `ff_http_protocol` e `ff_tls_protocol` no NRO nao registra
+  automaticamente `ff_https_protocol`.
+- `vendor/ffmpeg-https/lib/libavformat.a` foi recompilada do FFmpeg 7.1 com os dois
+  patches oficiais do devkitPro e somente `https` acrescentado a lista de protocolos.
+  O Makefile prioriza essa biblioteca local e continua usando codec/util/sws/swr do
+  port oficial da mesma versao. O ELF final contem `ff_https_protocol`,
+  `ff_hls_demuxer` e `ff_h264_nvtegra_hwaccel`.
+- `tools/build_ffmpeg_https.sh` reproduz o artefato, valida os tres SHA-256 da receita
+  oficial e aceita tanto `switchvars.sh` quanto a instalacao atual sem esse arquivo.
+  O build exige um compilador C host; neste ambiente foi instalado o pacote `gcc` do
+  MSYS2 do devkitPro. Nao substituir a biblioteca global em `portlibs`.
+- O player continha os aceleradores NVTEGRA, mas nunca criava
+  `AV_HWDEVICE_TYPE_NVTEGRA`; por isso H.264/HEVC eram decodificados apenas pela CPU.
+  Agora cria o dispositivo para esses codecs, mantem fallback de abertura por CPU e
+  transfere quadros NVTEGRA antes da conversao YUV/SDL. A conversao swscale passou a
+  ser criada pelo formato real do primeiro quadro, nao pelo `pix_fmt` prematuro do
+  contexto.
+- `player_stats.txt` registra `hardware_decode=1` quando um quadro NVTEGRA foi
+  realmente recebido. Configuracoes > Diagnostico mostra `NVTEGRA ativo` ou
+  `decodificacao por CPU`; o leitor continua aceitando arquivos antigos sem o campo.
+- Build limpo 0.7.5 concluido sem erros nem avisos do aplicativo e regenerou
+  `Nplay.nro`. Pendente obrigatorio no Switch: filme e serie HLS por pelo menos 10
+  minutos, anime MP4, troca de faixas, seek e retorno; depois abrir Diagnostico e
+  confirmar NVTEGRA, descartes, bufferings e fila de audio. Se houver engasgo, enviar
+  foto dessa tela, titulo e timestamp antes de alterar buffers ou filas.
