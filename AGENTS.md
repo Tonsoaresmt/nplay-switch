@@ -387,3 +387,24 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Build 0.7.1 concluido sem erros nem avisos e `Nplay.nro` regenerado. A causa e
   fortemente isolada a concorrencia introduzida no cliente 0.7.0, mas a confirmacao
   final exige instalar 0.7.1 no hardware e abrir um filme, uma serie e um anime.
+
+## Correcao da abertura HLS em 21/08/2026 (0.7.2)
+
+- Teste no Switch com 0.7.1 confirmou `Reproducao interrompida (erro -1)` em
+  filmes e series. A API retornava corretamente `container=m3u8`; o erro ocorria
+  dentro de `avformat_open_input` no cliente.
+- Causa: `curl_avio` representa uma unica resposta HTTP e era usado para todo link
+  remoto. HLS precisa que o demuxer abra a playlist, siga redirecionamentos e abra
+  cada submanifesto/segmento; alem disso o player passava URL nula ao FFmpeg, sem
+  base para resolver referencias. Esse caminho funciona para MP4/MKV, nao HLS.
+- A biblioteca instalada foi inspecionada e contem `ff_hls_demuxer`,
+  `ff_http_protocol` e `ff_tls_protocol` (backend TLS do libnx). Agora somente HLS
+  usa a pilha HTTP+TLS nativa do FFmpeg, com timeout, reconexao e verificacao TLS
+  desativada como no caminho libcurl. MP4/MKV, acelerador e arquivos locais mantem
+  o fluxo anterior com `curl_avio`.
+- O player recebe explicitamente o tipo `m3u8`; nao tenta inferir pela extensao,
+  pois `/api/play/:id` nao termina em `.m3u8`. Falhas de abertura agora preservam
+  a etapa e o texto de `av_strerror`, em vez de colapsar tudo para `erro -1`.
+- Build 0.7.2 concluido sem erros nem avisos e confirmou por simbolos que HLS,
+  HTTP e TLS estao no binario. Pendente no hardware: abrir filme e episodio de
+  serie, aguardar pelo menos 30 s, testar seek e confirmar reconexao de segmento.

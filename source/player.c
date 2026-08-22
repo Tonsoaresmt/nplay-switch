@@ -1,6 +1,7 @@
 // player.c - player de video: ffmpeg decodifica, SDL desenha (textura YUV) e toca
 // o audio (SDL Audio + swresample). Sincroniza o video pelo relogio do audio.
-// I/O via libcurl (curl_avio) porque o switch-ffmpeg nao tem TLS.
+// MP4/MKV remoto usa I/O com prefetch via libcurl (curl_avio). HLS usa os
+// protocolos HTTP+TLS do FFmpeg porque precisa abrir playlist e segmentos.
 // Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur) e mostra
 // um HUD (titulo + barra de progresso + tempo) ao pausar/buscar.
 #include <switch.h>
@@ -12,6 +13,7 @@
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/opt.h>
+#include <libavutil/error.h>
 #include <libavutil/time.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
@@ -42,6 +44,20 @@
 #define SEEK_MOVE_AXIS   14000
 #define SEEK_RELEASE_AXIS 9000
 #define SEEK_HOLD_MS       550
+
+static char g_player_last_error[160] = "";
+
+const char *player_last_error(void) { return g_player_last_error; }
+
+static void player_error_text(const char *stage, int code) {
+    char detail[AV_ERROR_MAX_STRING_SIZE] = "erro desconhecido";
+    av_strerror(code, detail, sizeof(detail));
+    snprintf(g_player_last_error, sizeof(g_player_last_error), "%s: %s", stage, detail);
+}
+
+static void player_error_message(const char *message) {
+    snprintf(g_player_last_error, sizeof(g_player_last_error), "%s", message);
+}
 
 static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
 static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
@@ -481,9 +497,10 @@ static void draw_sub(SDL_Renderer *ren, const char *txt) {
         SDL_RenderCopy(ren, t2, w2 > maxw ? &src : NULL, &d);
     }
 }
-int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
+int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hls,
                 const char *title, double start_sec, double *out_pos, double *out_dur) {
     (void)joy;
+    g_player_last_error[0] = '\0';
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
     // Tela de preparacao enquanto abre a conexao e le os metadados.
@@ -494,18 +511,33 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url,
     // HTTPS usa o AVIO do libcurl; arquivos sdmc:/ usam o protocolo local do
     // FFmpeg e podem ser assistidos offline sem reservar o ring de rede.
     int remote = !strncmp(url, "http://", 7) || !strncmp(url, "https://", 8);
-    AVIOContext *avio = remote ? nplay_curl_avio_open(url) : NULL;
-    if (remote && !avio) return -1;
+    // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos. O
+    // AVIO libcurl representa um unico arquivo, portanto HLS usa os protocolos
+    // http+tls nativos desta build do FFmpeg. MP4/MKV remoto permanece no AVIO.
+    int native_hls = remote && is_hls;
+    AVIOContext *avio = (remote && !native_hls) ? nplay_curl_avio_open(url) : NULL;
+    if (remote && !native_hls && !avio) { player_error_message("memoria insuficiente para abrir a rede"); return -1; }
     AVFormatContext *fmt = avformat_alloc_context();
-    if (!fmt) { nplay_curl_avio_close(avio); return -1; }
+    if (!fmt) { nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1; }
     if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
 
-    int rc = avformat_open_input(&fmt, remote ? NULL : url, NULL, NULL);
-    if (rc != 0) { nplay_curl_avio_close(avio); return -1; }
-    if (avformat_find_stream_info(fmt, NULL) < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2; }
+    AVDictionary *open_opts = NULL;
+    if (native_hls) {
+        av_dict_set(&open_opts, "user_agent", "Nplay-Switch/1.0", 0);
+        av_dict_set(&open_opts, "tls_verify", "0", 0);
+        av_dict_set(&open_opts, "rw_timeout", "30000000", 0);
+        av_dict_set(&open_opts, "reconnect", "1", 0);
+        av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
+        av_dict_set(&open_opts, "reconnect_delay_max", "5", 0);
+    }
+    int rc = avformat_open_input(&fmt, native_hls ? url : (remote ? NULL : url), NULL, &open_opts);
+    av_dict_free(&open_opts);
+    if (rc != 0) { player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc); nplay_curl_avio_close(avio); return -10; }
+    rc = avformat_find_stream_info(fmt, NULL);
+    if (rc < 0) { player_error_text("ler faixas do video", rc); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2; }
 
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (vidx < 0) { avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
+    if (vidx < 0) { player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
 
     // enumera faixas de AUDIO e de LEGENDA (so legendas de texto: SRT/ASS/mov_text)
     int aidxs[16], naud = 0, sidxs[16], nsub = 0;
