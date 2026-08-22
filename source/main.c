@@ -492,9 +492,12 @@ typedef struct { int session_id; SDL_atomic_t running; } PlaybackHeartbeat;
 static int playback_heartbeat_thread(void *userdata) {
     PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
     while (SDL_AtomicGet(&hb->running)) {
+        // A abertura do FFmpeg e o trecho mais sensivel da reproducao. Esperar o
+        // primeiro intervalo evita disputar DNS/TLS/banda com o proprio video.
+        for (int i = 0; i < 40 && SDL_AtomicGet(&hb->running); i++) SDL_Delay(500);
+        if (!SDL_AtomicGet(&hb->running)) break;
         char path[112]; snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", hb->session_id);
         api_send(path, "POST", "{}");
-        for (int i = 0; i < 40 && SDL_AtomicGet(&hb->running); i++) SDL_Delay(500);
     }
     return 0;
 }
@@ -552,8 +555,19 @@ int resolve_and_play(int itemId, const char *title) {
     struct membuf out = { 0 }; const char *err = NULL;
     long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
                                     &out, &err, 8L, 20L);
-    if (code != 200 || !out.data) { membuf_free(&out); toast("Nao foi possivel iniciar agora. Tente novamente."); return 0; }
-    cJSON *j = cJSON_Parse(out.data);
+    cJSON *j = out.data ? cJSON_Parse(out.data) : NULL;
+    if (code != 200 || !j) {
+        const char *detail = jstr(j, "error");
+        if (!detail) detail = jstr(j, "message");
+        char msg[160];
+        if (code > 0) snprintf(msg, sizeof(msg), "Falha ao abrir (HTTP %ld)%s%s", code,
+                               detail ? ": " : "", detail ? detail : "");
+        else snprintf(msg, sizeof(msg), "Falha de rede ao abrir%s%s", err ? ": " : "", err ? err : "");
+        toast(msg);
+        if (j) cJSON_Delete(j);
+        membuf_free(&out);
+        return 0;
+    }
     g_play_session_id = jint(j, "session_id");
     const char *container = jstr(j, "container");
     const char *play = jstr(j, "play_url");
@@ -2328,7 +2342,7 @@ static int stick_dir(SDL_Joystick *j) {
 }
 static void handle_button(int b) {
     if (g_screen == SC_LOGIN) {
-        if (b == JOY_A) { if (do_login() == 0) { load_favs(); load_settings_status(); g_screen = SC_MAIN; enter_tab(0); } }
+        if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
         else if (b == JOY_PLUS) g_running = 0;
     } else if (g_screen == SC_MAIN) {
         if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
@@ -2371,7 +2385,10 @@ int main(int argc, char **argv) {
 
     store_load_token(g_token, sizeof(g_token));
     store_load_user(g_user, sizeof(g_user));
-    if (g_token[0]) { load_favs(); load_settings_status(); g_screen = SC_MAIN; enter_tab(0); }
+    // Catalogo primeiro: a consulta de conta/configuracoes so e iniciada quando
+    // o usuario abre Config. Isso evita duas requisicoes HTTPS concorrentes no
+    // boot, um ponto especialmente caro no limite de memoria/rede do Switch.
+    if (g_token[0]) { load_favs(); g_screen = SC_MAIN; enter_tab(0); }
 
     while (appletMainLoop() && g_running) {
         SDL_Event e;

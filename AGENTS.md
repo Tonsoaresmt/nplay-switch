@@ -367,3 +367,23 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   lenta, todas as rails novas, busca contendo filme/serie/canal, quatro preferencias,
   autoplay ligado/desligado, sessao ativa durante video de 30+ min e login novo em
   duas contas/Switches. Confirmar tambem compatibilidade com servidor ainda em 0.6.x.
+
+## Correcao emergencial de catalogo e reproducao em 21/08/2026 (0.7.1)
+
+- Relato apos a 0.7.0: filmes, series e animes deixaram de funcionar corretamente
+  no Switch. A API publicada foi verificada de ponta a ponta: Inicio, Filmes,
+  Series e Animes responderam HTTP 200 com colecoes preenchidas; a resolucao de
+  um filme retornou `m3u8`, um episodio de serie retornou `m3u8` e um anime
+  retornou `mp4`, todos HTTP 200. As sessoes de teste foram encerradas.
+- A 0.7.0 iniciava `/api/account/me` em uma thread ao mesmo tempo em que a thread
+  principal abria o catalogo. Essa disputa HTTPS foi removida do boot e do login;
+  conta/configuracoes continuam sendo consultadas quando Config e aberta.
+- O heartbeat novo da reproducao nao e mais enviado imediatamente ao entrar no
+  player. O primeiro envio espera 20 segundos, preservando DNS, TLS e banda para
+  a abertura do FFmpeg; depois continua a cada 20 segundos, dentro do TTL de 90 s.
+- Falhas de `/api/stream/:id` deixaram de mostrar apenas uma mensagem generica. A
+  interface agora inclui o codigo HTTP e a mensagem segura da API, ou o erro de
+  rede, permitindo distinguir limite de telas, fonte indisponivel e conectividade.
+- Build 0.7.1 concluido sem erros nem avisos e `Nplay.nro` regenerado. A causa e
+  fortemente isolada a concorrencia introduzida no cliente 0.7.0, mas a confirmacao
+  final exige instalar 0.7.1 no hardware e abrir um filme, uma serie e um anime.
