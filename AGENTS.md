@@ -408,3 +408,31 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Build 0.7.2 concluido sem erros nem avisos e confirmou por simbolos que HLS,
   HTTP e TLS estao no binario. Pendente no hardware: abrir filme e episodio de
   serie, aguardar pelo menos 30 s, testar seek e confirmar reconexao de segmento.
+
+## Refinamento visual dos catalogos em 21/08/2026 (0.7.3)
+
+- A escala dos cards foi comparada com `C:/iptv/public/css/app.css` e
+  `home-netflix.css`. No Switch, `ui_badge` usava a fonte normal de 23 px e uma
+  faixa de 30 px sobre posters de 150 px; por isso ano e `PRONTO` dominavam a
+  capa e davam aspecto de prototipo.
+- `text.c` ganhou um terceiro tamanho de 17 px exclusivo para metadados. Cards
+  usam badges compactos de 22 px, fundo escuro e apenas uma barra colorida fina:
+  ano/CAM/AO VIVO no canto superior e `Pronto` no inferior direito. `Na lista`
+  aparece por extenso somente no card focado; nos demais vira um marcador fino.
+- Posters das prateleiras passaram de 150x214 para 164x232, com gap de 14 px,
+  aproximando a presenca visual dos cards de 168 px do site sem comprometer o
+  scroll em 1280x720. Os calculos de scroll/descoberta foram atualizados juntos.
+- O foco deixou de envolver capa e uma grande caixa de titulo. Agora usa sombra,
+  contorno roxo discreto apenas no poster, titulo solto sobre o fundo e uma linha
+  azul curta abaixo. As faixas solidas sob cards foram removidas.
+- O mesmo tratamento foi aplicado a Home, busca, Continuar assistindo,
+  Biblioteca, listas pessoais e relacionados. Status da Biblioteca deixou de ser
+  uma barra sobre toda a largura da capa e virou badge de canto.
+- Capas e backdrops agora compartilham `ui_cover`, equivalente a `object-fit:
+  cover` do site. Historico, Biblioteca, listas, series e relacionados preservam
+  a proporcao da imagem e recortam o excesso em vez de esticar a arte ou rostos.
+- Titulos nao sao mais truncados por quantidade de bytes antes do desenho; o
+  renderer usa toda a largura e evita cortar no meio caracteres UTF-8 acentuados.
+- Build 0.7.3 concluido sem erros nem avisos. Pendente no hardware: capturar Home,
+  busca, Historico, Biblioteca, lista e relacionados; conferir contraste dos
+  badges pequenos a distancia, overscan e sete cards de 164 px na primeira rail.

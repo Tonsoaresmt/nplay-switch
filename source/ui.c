@@ -27,6 +27,18 @@ void border_rect(int x, int y, int w, int h, int th, SDL_Color c) {
     fill_rect(x + w - th, y, th, h, c);
 }
 
+// Equivalente a object-fit: cover do site: preserva proporcao e recorta o
+// excesso, em vez de esticar rostos/capas para dimensoes diferentes.
+void ui_cover(SDL_Texture *texture, const SDL_Rect *dst) {
+    int tw = 0, th = 0;
+    if (!texture || !dst || SDL_QueryTexture(texture, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) return;
+    SDL_Rect src = { 0, 0, tw, th };
+    long long lhs = (long long)tw * dst->h, rhs = (long long)th * dst->w;
+    if (lhs > rhs) { src.w = th * dst->w / dst->h; src.x = (tw - src.w) / 2; }
+    else if (lhs < rhs) { src.h = tw * dst->h / dst->w; src.y = (th - src.h) / 2; }
+    SDL_RenderCopy(gRen, texture, &src, dst);
+}
+
 void toast(const char *msg) {
     strncpy(g_toast, msg, sizeof(g_toast) - 1);
     g_toast[sizeof(g_toast) - 1] = '\0';
@@ -116,6 +128,23 @@ void ui_badge(const char *label, int x, int y, SDL_Color color) {
     int bw = w + 20;
     fill_rect(x, y, bw, 30, color);
     if (t) { SDL_Rect d = { x + 10, y + 3, w, h }; SDL_RenderCopy(gRen, t, NULL, &d); }
+}
+
+// Badge de catalogo: proximo da escala usada no site e sem cobrir a arte.
+// Retorna a largura para permitir alinhamento pelo canto direito do poster.
+int ui_card_badge(const char *label, int x, int y, SDL_Color color) {
+    int w = 0, h = 0;
+    SDL_Texture *t = text_cached(gRen, label, C_TEXT, 2, &w, &h);
+    int bw = w + 14;
+    if (bw < 28) bw = 28;
+    SDL_Color dark = { 8, 10, 15, 224 };
+    fill_rect(x, y, bw, 22, dark);
+    fill_rect(x, y, 3, 22, color);
+    if (t) {
+        SDL_Rect d = { x + 8, y + (22 - h) / 2, w, h };
+        SDL_RenderCopy(gRen, t, NULL, &d);
+    }
+    return bw;
 }
 
 void ui_empty_state(const char *title, const char *detail) {
