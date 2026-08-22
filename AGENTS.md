@@ -332,3 +332,38 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   ativo, teste, sem validade e indisponivel; navegar ate a busca final em todas as
   categorias; confirmar que nenhum comando offline aparece e que o card final nao
   sofre corte ou overscan em 1280x720.
+
+## Alinhamento com o site em 21/08/2026 (0.7.0)
+
+- O contrato atual de `C:/iptv` foi comparado com o cliente Switch. Foram trazidos
+  apenas recursos adequados a uma interface de TV e controle, mantendo
+  SDL2/FFmpeg/libcurl e sem copiar dependencias ou codigo de navegador.
+- Inicio agora consome `jogos`, `trendingMovies`, `trendingSeries` e `liveShelves`.
+  Filmes, Series e Doramas priorizam a nova rail `prontos`; `emAlta` e aceito quando
+  o backend o enviar. Payloads antigos continuam funcionando porque rails ausentes
+  sao simplesmente ignoradas.
+- Cards interpretam `r2_ready`, `is_cam`, `year` e `kind`, exibindo badges PRONTO,
+  CAM e AO VIVO. A classificacao deixou de depender somente da rail: episodio,
+  filme, serie e canal seguem o fluxo correto mesmo quando aparecem misturados.
+- Destaques usam `backdrop` landscape com recorte proporcional (cover), camada de
+  contraste, sinopse curta, ano e disponibilidade. Sem backdrop, o poster e layout
+  anterior permanecem como fallback. A rotacao usa no maximo oito obras, como o
+  site, e `reduceMotion` desliga a troca automatica.
+- Busca ganhou filtros locais Tudo/Filmes/Series/Ao vivo via ZL/ZR. Canais nao sao
+  mais abertos como detalhe de filme; tocam pelo resolvedor. `Y Nova busca`, que era
+  anunciado mas nao tratado dentro dos resultados, passou a funcionar.
+- Configuracoes usa `/api/account/me` (com fallback `/api/auth/me`) e sincroniza
+  `hideAdult`, `autoplayNext`, `reduceMotion` e `audioPref` por
+  `PUT /api/account/prefs`. Autoplay do cliente agora respeita a conta. Plano mostra
+  tambem perfis usados/permitidos e prioriza `access_expires_at` para validade.
+- Login monta JSON com cJSON, evitando quebra por aspas ou barras na senha. Cada
+  instalacao nova gera e persiste um fingerprint aleatorio, em vez de todos os
+  Switches usarem `nplay-switch`; tokens ja existentes so recebem o novo device ID
+  depois do proximo login.
+- Durante o player, uma thread leve envia heartbeat a cada 20 s para a sessao criada
+  pelo backend. Ao sair, `/api/stream/:itemId/stop` encerra a sessao. Isso alinha a
+  contagem de telas/dispositivos dos novos planos sem fazer rede no frame do player.
+- Versao preparada: 0.7.0. Pendente no hardware: validar backdrop e badges com rede
+  lenta, todas as rails novas, busca contendo filme/serie/canal, quatro preferencias,
+  autoplay ligado/desligado, sessao ativa durante video de 30+ min e login novo em
+  duas contas/Switches. Confirmar tambem compatibilidade com servidor ainda em 0.6.x.

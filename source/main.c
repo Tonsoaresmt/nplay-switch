@@ -39,6 +39,7 @@ static char g_user[128] = {0};
 static int g_do_update = 0;
 static Uint32 g_restart_at = 0;
 static int g_running; // definido/inicializado na secao de roteamento de input
+static int g_play_session_id = 0;
 
 #include "ui.h"
 #include "screen_movie.h"
@@ -245,16 +246,35 @@ static void cover_pump(void) {   // main: converte surfaces prontas em texturas
 }
 
 // ------------------------------------------------------------- card
+static void render_texture_cover(SDL_Texture *texture, const SDL_Rect *dst) {
+    int tw = 0, th = 0;
+    if (!texture || !dst || SDL_QueryTexture(texture, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) return;
+    SDL_Rect src = { 0, 0, tw, th };
+    long long lhs = (long long)tw * dst->h, rhs = (long long)th * dst->w;
+    if (lhs > rhs) { src.w = th * dst->w / dst->h; src.x = (tw - src.w) / 2; }
+    else if (lhs < rhs) { src.h = tw * dst->h / dst->w; src.y = (th - src.h) / 2; }
+    SDL_RenderCopy(gRen, texture, &src, dst);
+}
 static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selected, int fav) {
     const char *title = jstr(item, "title"); if (!title) title = "";
     const char *logo = jstr(item, "logo");
     SDL_Texture *tex = cover_get(logo);
     SDL_Rect cr = { x, y, cw, coverH };
-    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr);
+    if (tex) render_texture_cover(tex, &cr);
     else {
         fill_rect(x, y, cw, coverH, C_CARD);
         char ini[2] = { title[0] ? title[0] : '?', 0 };
         text_center_at(ini, x, cw, y + coverH / 2 - 18, C_MUT, 1);
+    }
+    const char *kind = jstr(item, "kind");
+    int ready = cJSON_IsTrue(cJSON_GetObjectItem(item, "r2_ready")) || jint(item, "r2_ready") != 0;
+    int cam = cJSON_IsTrue(cJSON_GetObjectItem(item, "is_cam")) || jint(item, "is_cam") != 0;
+    if (kind && !strcmp(kind, "live")) ui_badge("AO VIVO", x + 6, y + 6, C_ROSE);
+    else if (ready) ui_badge("PRONTO", x + 6, y + 6, C_GREEN);
+    else if (cam) ui_badge("CAM", x + 6, y + 6, C_ACC);
+    else {
+        const char *year = jstr(item, "year");
+        if (year && year[0]) ui_badge(year, x + 6, y + 6, C_BAR);
     }
     if (fav) { fill_rect(x + cw - 26, y + 6, 20, 20, C_ROSE); text_draw(gRen, "*", x + cw - 21, y + 4, C_TEXT, 0); }
     fill_rect(x, y + coverH, cw, 38, selected ? C_CARD : C_BG);
@@ -283,11 +303,12 @@ typedef struct { char label[48]; cJSON *arr; int is_series; } Rail;
 static Rail g_rails[48]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
 static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
+static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n; }
 
 // --- busca ---
 static cJSON *g_search = NULL;
 static char g_srchQuery[128] = {0};
-static int g_srchSel = 0, g_srchScroll = 0;
+static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
 
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
@@ -320,6 +341,9 @@ static cJSON *g_account_status = NULL;
 static cJSON *g_settings_accel_pending = NULL, *g_account_pending = NULL;
 static SDL_Thread *g_settings_thread = NULL;
 static SDL_atomic_t g_account_ready, g_settings_done;
+static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
+static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
+static int g_prefs_open = 0, g_prefs_sel = 0;
 // menu "baixar episodios" (Y no detalhe da serie)
 static int g_dlmenu = 0;
 static char g_epChk[512]; static int g_epChkN = 0;
@@ -358,6 +382,16 @@ void detail_return_to_origin(void) {
 
 // ------------------------------------------------------------- favoritos
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
+static int catalog_item_is_series(cJSON *item, int fallback) {
+    const char *kind = item ? jstr(item, "kind") : NULL;
+    if (kind && (!strcmp(kind, "movie") || !strcmp(kind, "live"))) return 0;
+    if (kind && (!strcmp(kind, "series") || !strcmp(kind, "episode"))) return 1;
+    return fallback;
+}
+static int catalog_favorite_id(cJSON *item, int is_series) {
+    int sid = is_series ? jint(item, "series_id") : 0;
+    return sid > 0 ? sid : jint(item, "id");
+}
 
 static int is_fav_series(int id) { return idx_of(g_favSeries, g_favSeriesN, id) >= 0; }
 static void load_favs(void) {
@@ -415,11 +449,16 @@ static void load_landing(int tab) {
 
     if (tab == 0) {
         g_heroesArr = cJSON_GetObjectItem(g_land, "heroes");
+        add_rail("Jogos do dia",         cJSON_GetObjectItem(g_land, "jogos"), 0);
         add_rail("Continuar assistindo", cJSON_GetObjectItem(g_land, "continue"), 1);
+        add_rail("Filmes em alta",       cJSON_GetObjectItem(g_land, "trendingMovies"), 0);
+        add_rail("Series em alta",       cJSON_GetObjectItem(g_land, "trendingSeries"), 1);
         add_rail("Filmes recentes",     cJSON_GetObjectItem(g_land, "recentMovies"), 0);
         add_rail("Series atualizadas",  cJSON_GetObjectItem(g_land, "recentSeries"), 1);
         add_rail("Animes recentes",     cJSON_GetObjectItem(g_land, "recentAnimes"), 1);
         cJSON *sh = cJSON_GetObjectItem(g_land, "movieShelves"), *e;
+        cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
+        sh = cJSON_GetObjectItem(g_land, "liveShelves");
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
     } else if (tab == 3) {   // anime-home
         g_heroesArr = cJSON_GetObjectItem(g_land, "updated");
@@ -432,13 +471,32 @@ static void load_landing(int tab) {
         cJSON_ArrayForEach(e, gs) add_rail(jstr(e, "genre"), cJSON_GetObjectItem(e, "items"), 1);
     } else {                 // tab-home (movie/series/dorama)
         int is_series = (tab != 1);
-        g_heroesArr = cJSON_GetObjectItem(g_land, "recent");
+        cJSON *hero = cJSON_GetObjectItem(g_land, "hero");
+        g_heroesArr = cJSON_CreateArray();
+        if (hero) cJSON_AddItemReferenceToArray(g_heroesArr, hero);
+        if (arr_len(g_heroesArr) == 0) {
+            cJSON_Delete(g_heroesArr);
+            g_heroesArr = cJSON_GetObjectItem(g_land, "recent");
+        } else cJSON_AddItemToObject(g_land, "_switchHeroes", g_heroesArr);
+        add_rail("Pronto pra tocar", cJSON_GetObjectItem(g_land, "prontos"), is_series);
         add_rail("Minha lista", cJSON_GetObjectItem(g_land, "favoritos"), is_series);
         add_rail("Lancamentos", cJSON_GetObjectItem(g_land, "recent"), is_series);
+        add_rail("Em alta", cJSON_GetObjectItem(g_land, "emAlta"), is_series);
         cJSON *sh = cJSON_GetObjectItem(g_land, "shelves"), *e;
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), is_series);
     }
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
+}
+
+typedef struct { int session_id; SDL_atomic_t running; } PlaybackHeartbeat;
+static int playback_heartbeat_thread(void *userdata) {
+    PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
+    while (SDL_AtomicGet(&hb->running)) {
+        char path[112]; snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", hb->session_id);
+        api_send(path, "POST", "{}");
+        for (int i = 0; i < 40 && SDL_AtomicGet(&hb->running); i++) SDL_Delay(500);
+    }
+    return 0;
 }
 
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
@@ -455,10 +513,17 @@ static int play_with_progress(int itemId, const char *title, const char *url) {
         cJSON_Delete(pr);
     }
     double pos = 0, dur = 0;
+    PlaybackHeartbeat hb = { .session_id = g_play_session_id };
+    SDL_Thread *heartbeat = NULL;
+    if (hb.session_id > 0) {
+        SDL_AtomicSet(&hb.running, 1);
+        heartbeat = SDL_CreateThread(playback_heartbeat_thread, "play-heartbeat", &hb);
+    }
     // Cobre tambem a abertura da rede/FFmpeg e todos os retornos de erro.
     appletSetMediaPlaybackState(true);
     int r = player_play(gRen, g_joy, url, title, start, &pos, &dur);
     appletSetMediaPlaybackState(false);
+    if (heartbeat) { SDL_AtomicSet(&hb.running, 0); SDL_WaitThread(heartbeat, NULL); }
     // O player controla a mesma flag de energia e sempre a desliga ao sair.
     // Forca o Historico a recalcular/reaplicar seu proprio estado no proximo frame.
     g_download_awake = 0;
@@ -489,6 +554,7 @@ int resolve_and_play(int itemId, const char *title) {
                                     &out, &err, 8L, 20L);
     if (code != 200 || !out.data) { membuf_free(&out); toast("Nao foi possivel iniciar agora. Tente novamente."); return 0; }
     cJSON *j = cJSON_Parse(out.data);
+    g_play_session_id = jint(j, "session_id");
     const char *container = jstr(j, "container");
     const char *play = jstr(j, "play_url");
     char purl[1200] = { 0 };
@@ -504,6 +570,11 @@ int resolve_and_play(int itemId, const char *title) {
     } else if (purl[0]) {
         rc = play_with_progress(itemId, title, purl);
     } else toast("Este titulo esta indisponivel no momento");
+    if (g_play_session_id > 0) {
+        char stop[96]; snprintf(stop, sizeof(stop), "/api/stream/%d/stop", itemId);
+        api_send(stop, "POST", "{}");
+        g_play_session_id = 0;
+    }
     if (j) cJSON_Delete(j);
     membuf_free(&out);
     return rc;
@@ -520,9 +591,14 @@ static void open_item(cJSON *item, int is_series) {
     if (!item) return;
     detail_capture_origin();
     int id = jint(item, "id");
+    const char *kind = jstr(item, "kind");
+    if (kind && (!strcmp(kind, "live") || !strcmp(kind, "episode"))) {
+        resolve_and_play(id, jstr(item, "title"));
+        return;
+    }
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
-    if (is_series) open_series(id);
+    if ((kind && !strcmp(kind, "series")) || is_series) open_series(id);
     else {
         if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
         else toast("Falha ao carregar info do filme");
@@ -959,12 +1035,34 @@ static int dl_play(cJSON *job) {
 }
 
 // ------------------------------------------------------------- busca
-static int srch_movies(void) { return g_search ? arr_len(cJSON_GetObjectItem(g_search, "items")) : 0; }
-static int srch_series(void) { return g_search ? arr_len(cJSON_GetObjectItem(g_search, "series")) : 0; }
-static cJSON *srch_at(int i, int *is_series) {
-    int nm = srch_movies();
-    if (i < nm) { *is_series = 0; return cJSON_GetArrayItem(cJSON_GetObjectItem(g_search, "items"), i); }
-    *is_series = 1; return cJSON_GetArrayItem(cJSON_GetObjectItem(g_search, "series"), i - nm);
+// A API mistura filmes e canais em `items` e envia series separadamente. O
+// cliente antigo tratava qualquer `item` como filme, abrindo detalhe incorreto
+// para canais ao vivo. A camada abaixo tipa e filtra sem copiar o JSON recebido.
+static int srch_matches(cJSON *item, int is_series, int filter) {
+    if (filter == 0) return 1;
+    if (filter == 2) return is_series;
+    if (is_series) return 0;
+    const char *kind = jstr(item, "kind");
+    return filter == 3 ? (kind && !strcmp(kind, "live")) : (!kind || strcmp(kind, "live"));
+}
+static int srch_count_for(int filter) {
+    if (!g_search) return 0;
+    int n = 0; cJSON *it;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "series")) if (srch_matches(it, 1, filter)) n++;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "items")) if (srch_matches(it, 0, filter)) n++;
+    return n;
+}
+static cJSON *srch_at(int wanted, int *is_series) {
+    cJSON *it;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "series")) {
+        if (!srch_matches(it, 1, g_srchFilter)) continue;
+        if (wanted-- == 0) { *is_series = 1; return it; }
+    }
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "items")) {
+        if (!srch_matches(it, 0, g_srchFilter)) continue;
+        if (wanted-- == 0) { *is_series = 0; return it; }
+    }
+    *is_series = 0; return NULL;
 }
 static void do_search(void) {
     char q[128];
@@ -975,7 +1073,7 @@ static void do_search(void) {
     enc[k] = 0;
     char path[360]; snprintf(path, sizeof(path), "/api/catalog/search?q=%s", enc);
     g_search = api_get(path);
-    g_srchSel = 0; g_srchScroll = 0;
+    g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
     snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", q);
     g_screen = SC_SEARCH;
 }
@@ -1012,23 +1110,39 @@ static void draw_landing(void) {
     if (g_tab == 0) text_draw(gRen, hi, 40, 76 - g_homeScroll, C_MUT, 0);
     else text_draw(gRen, TAB_NAME[g_tab], 40, 76 - g_homeScroll, C_MUT, 0);
 
-    int nh = arr_len(g_heroesArr);
+    int nh = hero_count();
     int hy = 108 - g_homeScroll;
     if (nh > 0) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
-        ui_panel(40, hy, WIN_W - 80, HERO_H, C_ACC);
+        const char *backdrop = jstr(h, "backdrop");
+        SDL_Texture *bg = cover_get(backdrop);
+        if (bg) {
+            SDL_Rect br = { 40, hy, WIN_W - 80, HERO_H };
+            render_texture_cover(bg, &br);
+            fill_rect(40, hy, 720, HERO_H, (SDL_Color){ 8, 10, 15, 218 });
+            fill_rect(760, hy, 480, HERO_H, (SDL_Color){ 8, 10, 15, 92 });
+            fill_rect(40, hy, 5, HERO_H, C_ACC);
+        } else ui_panel(40, hy, WIN_W - 80, HERO_H, C_ACC);
         if (g_railSel == -1) ui_focus(36, hy - 4, WIN_W - 72, HERO_H + 8);
-        SDL_Texture *tex = cover_get(jstr(h, "logo"));
-        SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
-        if (tex) SDL_RenderCopy(gRen, tex, NULL, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
-        text_draw(gRen, "DESTAQUE", 228, hy + 28, C_ACC, 0);
+        int content_x = bg ? 72 : 228;
+        if (!bg) {
+            SDL_Texture *tex = cover_get(jstr(h, "logo"));
+            SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
+            if (tex) SDL_RenderCopy(gRen, tex, NULL, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
+        }
+        text_draw(gRen, "EM DESTAQUE AGORA", content_x, hy + 24, C_ACC, 0);
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
-        text_clip(ht, 228, hy + 54, C_TEXT, 1, WIN_W - 228 - 180);
+        text_clip(ht, content_x, hy + 52, C_TEXT, 1, bg ? 620 : WIN_W - 228 - 180);
         const char *hk = jstr(h, "kind");
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
-        text_draw(gRen, kl, 228, hy + 100, C_MUT, 0);
-        text_draw(gRen, "A Abrir     Esquerda/direita Trocar destaque", 228, hy + HERO_H - 40, C_MUT, 0);
+        char meta[96]; const char *year = jstr(h, "year");
+        snprintf(meta, sizeof(meta), "%s%s%s%s", kl, year && year[0] ? "  |  " : "", year && year[0] ? year : "",
+                 (cJSON_IsTrue(cJSON_GetObjectItem(h, "r2_ready")) || jint(h, "r2_ready")) ? "  |  Pronto pra tocar" : "");
+        text_draw(gRen, meta, content_x, hy + 96, C_MUT, 0);
+        const char *plot = jstr(h, "plot");
+        if (plot && plot[0]) text_clip(plot, content_x, hy + 128, C_TEXT, 0, bg ? 650 : 700);
+        text_draw(gRen, "A Abrir     Esquerda/direita Trocar destaque", content_x, hy + HERO_H - 36, C_MUT, 0);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
         text_draw(gRen, cnt, WIN_W - 128, hy + HERO_H - 40, C_MUT, 0);
     }
@@ -1048,7 +1162,9 @@ static void draw_landing(void) {
             int x = 40 + i * (RCW + RGAP) - rowScroll;
             if (x + RCW < 0 || x > WIN_W) continue;
             cJSON *it = cJSON_GetArrayItem(g_rails[r].arr, i);
-            int fav = g_rails[r].is_series ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
+            int series_item = catalog_item_is_series(it, g_rails[r].is_series);
+            int fav_id = catalog_favorite_id(it, series_item);
+            int fav = series_item ? is_fav_series(fav_id) : is_fav_item(fav_id);
             draw_card(x, ry, RCW, RCH, it, (r == g_railSel && i == g_railItem), fav);
         }
         y += 30 + RCH + 40;
@@ -1084,17 +1200,28 @@ static void draw_landing(void) {
 #define GCH 268
 static void draw_search(void) {
     draw_topbar();
-    int nm = srch_movies(), ns = srch_series(), n = nm + ns;
+    int n = srch_count_for(g_srchFilter);
     char hd[200]; snprintf(hd, sizeof(hd), "Resultados para \"%s\"", g_srchQuery);
     text_clip(hd, 40, 88, C_TEXT, 1, 850);
     char count[64]; snprintf(count, sizeof(count), "%d resultado%s", n, n == 1 ? "" : "s");
     text_right(count, WIN_W - 40, 94, C_MUT, 0);
+    static const char *filters[] = { "Tudo", "Filmes", "Series", "Ao vivo" };
+    int chip_x = 40;
+    for (int i = 0; i < 4; i++) {
+        int count = srch_count_for(i); char label[48];
+        snprintf(label, sizeof(label), "%s  %d", filters[i], count);
+        int tw = 0, th = 0; text_cached(gRen, label, C_TEXT, 0, &tw, &th);
+        int cw = tw + 28;
+        fill_rect(chip_x, 126, cw, 36, i == g_srchFilter ? C_ACC : C_CARD);
+        text_center_at(label, chip_x, cw, 132, i == g_srchFilter ? C_TEXT : C_MUT, 0);
+        chip_x += cw + 12;
+    }
     if (n == 0) {
-        ui_empty_state("Nenhum resultado", "Pressione Y para buscar usando outro nome.");
-        ui_footer("Y Nova busca    B Voltar");
+        ui_empty_state("Nada neste filtro", "Use ZL/ZR para trocar o tipo ou Y para fazer outra busca.");
+        ui_footer("ZL/ZR Filtrar    Y Nova busca    B Voltar");
         return;
     }
-    int top = 138;
+    int top = 184;
     for (int i = 0; i < n; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -1104,7 +1231,7 @@ static void draw_search(void) {
         int fav = is ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
         draw_card(x, yy, GCOVERW, GCOVERH, it, i == g_srchSel, fav);
     }
-    ui_footer("A Abrir    X Minha lista    Y Nova busca    B Voltar");
+    ui_footer("A Abrir    X Minha lista    ZL/ZR Filtrar    Y Nova busca    B Voltar");
 }
 
 // ------------------------------------------------------------- render: serie
@@ -1558,13 +1685,31 @@ static int do_login(void) {
     char user[128] = { 0 }, pass[128] = { 0 };
     if (prompt_text("Usuario Nplay", user, sizeof(user), 0) != 0) return -1;
     if (prompt_text("Senha", pass, sizeof(pass), 1) != 0) return -1;
-    char body[640];
-    snprintf(body, sizeof(body),
-        "{\"username\":\"%s\",\"password\":\"%s\",\"device\":{\"fingerprint\":\"nplay-switch\",\"type\":\"tv\",\"name\":\"Nintendo Switch\"}}",
-        user, pass);
+    char fingerprint[80] = {0};
+    if (!store_load_device_id(fingerprint, sizeof(fingerprint))) {
+        unsigned char random_id[16]; randomGet(random_id, sizeof(random_id));
+        strcpy(fingerprint, "nplay-switch-");
+        int off = (int)strlen(fingerprint);
+        for (int i = 0; i < 16; i++) snprintf(fingerprint + off + i * 2, sizeof(fingerprint) - (size_t)(off + i * 2), "%02x", random_id[i]);
+        store_save_device_id(fingerprint);
+    }
+    cJSON *request = cJSON_CreateObject();
+    if (!request) { memset(pass, 0, sizeof(pass)); snprintf(g_status, sizeof(g_status), "Memoria insuficiente para entrar"); return -1; }
+    cJSON_AddStringToObject(request, "username", user);
+    cJSON_AddStringToObject(request, "password", pass);
+    cJSON *device = cJSON_AddObjectToObject(request, "device");
+    if (!device) { cJSON_Delete(request); memset(pass, 0, sizeof(pass)); snprintf(g_status, sizeof(g_status), "Memoria insuficiente para entrar"); return -1; }
+    cJSON_AddStringToObject(device, "fingerprint", fingerprint);
+    cJSON_AddStringToObject(device, "type", "tv");
+    cJSON_AddStringToObject(device, "name", "Nintendo Switch");
+    char *body = cJSON_PrintUnformatted(request);
+    cJSON_Delete(request);
+    memset(pass, 0, sizeof(pass));
+    if (!body) { snprintf(g_status, sizeof(g_status), "Nao foi possivel preparar o login"); return -1; }
     char url[512]; snprintf(url, sizeof(url), "%s/api/auth/login", BASE);
     struct membuf out = { 0 }; const char *err = NULL;
     long code = net_request_timeout(url, "POST", body, NULL, &out, &err, 8L, 20L);
+    free(body);
     int ok = -1;
     if (out.data) {
         cJSON *j = cJSON_Parse(out.data);
@@ -1612,13 +1757,13 @@ static void enter_tab(int tab) {
     load_landing(tab);
 }
 static void input_landing(int b) {
-    int nh = arr_len(g_heroesArr);
+    int nh = hero_count();
     if (g_railSel < 0) {   // destaque focado
         if (b == JOY_DOWN) g_railSel = 0; // primeira rail ou chamada de busca
         else if (b == JOY_DLEFT) { if (nh) g_heroIdx = (g_heroIdx - 1 + nh) % nh; g_hero_next = SDL_GetTicks() + 6000; }
         else if (b == JOY_DRIGHT) { if (nh) g_heroIdx = (g_heroIdx + 1) % nh; g_hero_next = SDL_GetTicks() + 6000; }
         else if (b == JOY_A) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); const char *k = jstr(h, "kind"); open_item(h, k ? strcmp(k, "movie") != 0 : g_heroSeriesDefault); } }
-        else if (b == JOY_X) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); const char *k = jstr(h, "kind"); int is = k ? strcmp(k, "movie") != 0 : g_heroSeriesDefault; if (is) toggle_fav_series(jint(h, "id")); else toggle_fav_item(jint(h, "id")); } }
+        else if (b == JOY_X) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); int is = catalog_item_is_series(h, g_heroSeriesDefault); int id = catalog_favorite_id(h, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
         g_homeScroll = 0;
         return;
     }
@@ -1642,7 +1787,7 @@ static void input_landing(int b) {
     else if (b == JOY_DLEFT) { if (g_railItem > 0) g_railItem--; }
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
-    else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { if (g_rails[g_railSel].is_series) toggle_fav_series(jint(it, "id")); else toggle_fav_item(jint(it, "id")); } }
+    else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { int is = catalog_item_is_series(it, g_rails[g_railSel].is_series); int id = catalog_favorite_id(it, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
     int ry = (nh > 0 ? RAILS_TOP : 120) + g_railSel * (30 + RCH + 40);
     int item_h = g_railSel == g_railsN ? 112 : RCH + 60;
     if (ry + item_h - g_homeScroll > WIN_H - 52) g_homeScroll = ry + item_h - (WIN_H - 52) + 20;
@@ -1650,17 +1795,24 @@ static void input_landing(int b) {
     if (g_homeScroll < 0) g_homeScroll = 0;
 }
 static void input_search(int b) {
-    int n = srch_movies() + srch_series();
+    int n = srch_count_for(g_srchFilter);
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
+    if (b == JOY_Y) { do_search(); return; }
+    if (b == JOY_ZL || b == JOY_ZR) {
+        int step = b == JOY_ZR ? 1 : -1;
+        g_srchFilter = (g_srchFilter + step + 4) % 4;
+        g_srchSel = 0; g_srchScroll = 0;
+        return;
+    }
     if (b == JOY_UP) { if (g_srchSel - GCOLS >= 0) g_srchSel -= GCOLS; }
     else if (b == JOY_DOWN) { if (g_srchSel + GCOLS < n) g_srchSel += GCOLS; }
     else if (b == JOY_DLEFT) { if (g_srchSel > 0) g_srchSel--; }
     else if (b == JOY_DRIGHT) { if (g_srchSel + 1 < n) g_srchSel++; }
     else if (b == JOY_A) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) open_item(it, is); }
     else if (b == JOY_X) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) { if (is) toggle_fav_series(jint(it, "id")); else toggle_fav_item(jint(it, "id")); } }
-    int row = g_srchSel / GCOLS, rowTop = 138 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    int row = g_srchSel / GCOLS, rowTop = 184 + row * (GCH + GGAP), rowBot = rowTop + GCH;
     if (rowBot - g_srchScroll > WIN_H - 52) g_srchScroll = rowBot - (WIN_H - 52) + 16;
-    if (rowTop - g_srchScroll < 138) g_srchScroll = rowTop - 138;
+    if (rowTop - g_srchScroll < 184) g_srchScroll = rowTop - 184;
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
 static void input_series(int b) {
@@ -1690,7 +1842,7 @@ static void input_series(int b) {
             cJSON *ep = ser_ep_at(idx); if (!ep) break;
             g_epSel = idx;
             int ended = resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title")));
-            if (ended != 1) break;   // usuario saiu / erro / virou download -> para
+            if (ended != 1 || !g_pref_autoplay) break;
             idx++;
         }
     }
@@ -1833,7 +1985,7 @@ static void input_downloads(int b) {
                 cJSON *j = dlg_job(g, idx);
                 if (!cJSON_IsTrue(cJSON_GetObjectItem(j, "ready"))) { toast("Ainda estamos preparando..."); break; }
                 g_dlDetSel = idx;
-                if (dl_play(j) != 1) break;
+                if (dl_play(j) != 1 || !g_pref_autoplay) break;
                 idx++;
             }
         }
@@ -1863,8 +2015,8 @@ static void input_downloads(int b) {
 }
 
 // ------------------------------------------------------------- config
-static const char *SET_ITEMS[] = { "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
-#define NSET 4
+static const char *SET_ITEMS[] = { "Preferencias do Switch", "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
+#define NSET 5
 static int g_setSel = 0;
 static int g_diag_open = 0;
 
@@ -1891,7 +2043,8 @@ static int schedule_restart(const char *path) {
 }
 static int settings_fetch_thread(void *unused) {
     (void)unused;
-    g_account_pending = api_get("/api/auth/me");
+    g_account_pending = api_get("/api/account/me");
+    if (!g_account_pending) g_account_pending = api_get("/api/auth/me"); // servidor anterior
     SDL_AtomicSet(&g_account_ready, 1);
     g_settings_accel_pending = api_get("/api/accel/status");
     SDL_AtomicSet(&g_settings_done, 1);
@@ -1909,6 +2062,17 @@ static void pump_settings_status(void) {
     if (SDL_AtomicGet(&g_account_ready) && g_account_pending) {
         if (g_account_status) cJSON_Delete(g_account_status);
         g_account_status = g_account_pending; g_account_pending = NULL;
+        cJSON *prefs = cJSON_GetObjectItem(g_account_status, "prefs");
+        if (prefs) {
+            cJSON *v = cJSON_GetObjectItem(prefs, "hideAdult");
+            if (cJSON_IsBool(v)) g_pref_hide_adult = cJSON_IsTrue(v);
+            v = cJSON_GetObjectItem(prefs, "autoplayNext");
+            if (cJSON_IsBool(v)) g_pref_autoplay = cJSON_IsTrue(v);
+            v = cJSON_GetObjectItem(prefs, "reduceMotion");
+            if (cJSON_IsBool(v)) g_pref_reduce_motion = cJSON_IsTrue(v);
+            const char *audio = jstr(prefs, "audioPref");
+            g_pref_audio = audio && !strcmp(audio, "leg") ? 1 : audio && !strcmp(audio, "any") ? 2 : 0;
+        }
     }
     if (!g_settings_thread || !SDL_AtomicGet(&g_settings_done)) return;
     SDL_WaitThread(g_settings_thread, NULL); g_settings_thread = NULL;
@@ -1950,6 +2114,52 @@ static void draw_player_diagnostics(void) {
     }
     text_center_at("A ou B Fechar", 292, 696, 572, C_TEXT, 0);
 }
+static void draw_preferences(void) {
+    if (!g_prefs_open) return;
+    ui_panel(220, 84, 840, 552, C_ACC2);
+    text_draw(gRen, "PREFERENCIAS DO SWITCH", 260, 116, C_ACC2, 0);
+    text_draw(gRen, "Sincronizadas com sua conta Nplay", 260, 150, C_MUT, 0);
+    static const char *names[] = { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido" };
+    static const char *details[] = {
+        "Aplica o controle de catalogo da conta.",
+        "Continua a serie quando um episodio termina.",
+        "Desativa a rotacao automatica dos destaques.",
+        "Prioridade usada quando a obra oferece versoes diferentes."
+    };
+    const char *audio[] = { "Dublado", "Legendado", "Tanto faz" };
+    for (int i = 0; i < 4; i++) {
+        int y = 190 + i * 88;
+        fill_rect(252, y, 776, 72, C_BAR);
+        if (i == g_prefs_sel) { ui_focus(248, y - 4, 784, 80); fill_rect(252, y, 5, 72, C_ACC); }
+        text_draw(gRen, names[i], 278, y + 9, i == g_prefs_sel ? C_TEXT : C_MUT, 0);
+        text_draw(gRen, details[i], 278, y + 39, C_MUT, 0);
+        const char *value = i == 0 ? (g_pref_hide_adult ? "Ativado" : "Desativado") :
+                            i == 1 ? (g_pref_autoplay ? "Ativado" : "Desativado") :
+                            i == 2 ? (g_pref_reduce_motion ? "Ativado" : "Desativado") : audio[g_pref_audio];
+        text_right(value, 998, y + 21, i == g_prefs_sel ? C_GREEN : C_MUT, 0);
+    }
+    text_center_at("A Alterar    Esquerda/direita Escolher audio    B Concluir", 252, 776, 588, C_TEXT, 0);
+}
+static void save_selected_preference(int direction) {
+    int old_hide = g_pref_hide_adult, old_auto = g_pref_autoplay, old_motion = g_pref_reduce_motion, old_audio = g_pref_audio;
+    char body[96];
+    if (g_prefs_sel == 0) { g_pref_hide_adult = !g_pref_hide_adult; snprintf(body, sizeof(body), "{\"hideAdult\":%s}", g_pref_hide_adult ? "true" : "false"); }
+    else if (g_prefs_sel == 1) { g_pref_autoplay = !g_pref_autoplay; snprintf(body, sizeof(body), "{\"autoplayNext\":%s}", g_pref_autoplay ? "true" : "false"); }
+    else if (g_prefs_sel == 2) { g_pref_reduce_motion = !g_pref_reduce_motion; snprintf(body, sizeof(body), "{\"reduceMotion\":%s}", g_pref_reduce_motion ? "true" : "false"); }
+    else {
+        g_pref_audio = (g_pref_audio + (direction < 0 ? 2 : 1)) % 3;
+        const char *audio[] = { "dub", "leg", "any" };
+        snprintf(body, sizeof(body), "{\"audioPref\":\"%s\"}", audio[g_pref_audio]);
+    }
+    if (api_send("/api/account/prefs", "PUT", body) != 200) {
+        g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
+        toast("Nao foi possivel salvar a preferencia");
+    } else {
+        if (g_prefs_sel == 0 && g_tab <= 4) load_landing(g_tab);
+        g_hero_next = SDL_GetTicks() + 8000;
+        toast("Preferencia sincronizada");
+    }
+}
 static const char *subscription_status_label(const char *status) {
     if (!status || !status[0]) return "Status nao informado";
     if (!strcmp(status, "active")) return "Plano ativo";
@@ -1959,8 +2169,9 @@ static const char *subscription_status_label(const char *status) {
     if (!strcmp(status, "expired")) return "Plano expirado";
     return status;
 }
-static void format_subscription_period(cJSON *subscription, char *out, size_t cap) {
-    const char *end = subscription ? jstr(subscription, "current_period_end") : NULL;
+static void format_subscription_period(cJSON *account, cJSON *subscription, char *out, size_t cap) {
+    const char *end = account ? jstr(account, "access_expires_at") : NULL;
+    if ((!end || !end[0]) && subscription) end = jstr(subscription, "current_period_end");
     if (!end || !end[0]) { snprintf(out, cap, "Validade sem data definida"); return; }
     int year = 0, month = 0, day = 0;
     if (sscanf(end, "%d-%d-%d", &year, &month, &day) != 3) {
@@ -2011,31 +2222,44 @@ static void draw_settings(void) {
         int devices = plan ? jint(plan, "device_limit") : 0;
         if (screens <= 0) screens = jint(account, "max_sessions");
         if (devices <= 0) devices = jint(account, "max_devices");
+        int profiles = arr_len(cJSON_GetObjectItem(g_account_status, "profiles"));
+        int profile_limit = jint(account, "profile_limit");
         char limits[128];
-        if (screens > 0 && devices > 0) snprintf(limits, sizeof(limits), "%d tela%s simultanea%s  |  %d dispositivo%s", screens, screens == 1 ? "" : "s", screens == 1 ? "" : "s", devices, devices == 1 ? "" : "s");
+        if (screens > 0 && devices > 0 && profile_limit > 0) snprintf(limits, sizeof(limits), "%d tela%s  |  %d dispositivo%s  |  %d/%d perfis", screens, screens == 1 ? "" : "s", devices, devices == 1 ? "" : "s", profiles, profile_limit);
+        else if (screens > 0 && devices > 0) snprintf(limits, sizeof(limits), "%d tela%s simultanea%s  |  %d dispositivo%s", screens, screens == 1 ? "" : "s", screens == 1 ? "" : "s", devices, devices == 1 ? "" : "s");
         else if (screens > 0) snprintf(limits, sizeof(limits), "%d tela%s simultanea%s", screens, screens == 1 ? "" : "s", screens == 1 ? "" : "s");
         else snprintf(limits, sizeof(limits), "Limites gerenciados pela sua conta");
         text_draw(gRen, limits, 672, 288, C_MUT, 0);
-        char period[160]; format_subscription_period(subscription, period, sizeof(period));
+        char period[160]; format_subscription_period(account, subscription, period, sizeof(period));
         text_draw(gRen, period, 672, 316, C_MUT, 0);
     } else {
         text_draw(gRen, SDL_AtomicGet(&g_settings_done) ? "Plano indisponivel agora" : "Consultando seu plano...", 672, 238, C_TEXT, 0);
         text_draw(gRen, "Tente abrir as configuracoes novamente.", 672, 278, C_MUT, 0);
     }
 
-    text_draw(gRen, "ACOES", 40, 368, C_ACC2, 0);
+    text_draw(gRen, "ACOES", 40, 366, C_ACC2, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 400 + i * 52;
+        int y = 390 + i * 48;
         fill_rect(260, y, 760, 44, C_CARD);
         if (i == g_setSel) { ui_focus(256, y - 4, 768, 52); fill_rect(260, y, 4, 44, C_ACC2); }
         text_draw(gRen, SET_ITEMS[i], 286, y + 7, (i == g_setSel) ? C_TEXT : C_MUT, 0);
-        text_right(i == 0 ? "A Verificar" : "A Confirmar", 994, y + 7, C_MUT, 0);
+        text_right(i == 0 ? "A Abrir" : i == 1 ? "A Verificar" : "A Confirmar", 994, y + 7, C_MUT, 0);
     }
-    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 620, C_ACC, 0);
+    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 632, C_ACC, 0);
     ui_footer("Cima/baixo Navegar    A Confirmar    X Diagnostico do player    B Voltar");
     draw_player_diagnostics();
+    draw_preferences();
 }
 static void input_settings(int b) {
+    if (g_prefs_open) {
+        if (b == JOY_B || b == JOY_MINUS) { g_prefs_open = 0; return; }
+        if (b == JOY_UP && g_prefs_sel > 0) g_prefs_sel--;
+        else if (b == JOY_DOWN && g_prefs_sel < 3) g_prefs_sel++;
+        else if (b == JOY_A) save_selected_preference(1);
+        else if (g_prefs_sel == 3 && b == JOY_DLEFT) save_selected_preference(-1);
+        else if (g_prefs_sel == 3 && b == JOY_DRIGHT) save_selected_preference(1);
+        return;
+    }
     if (g_diag_open) {
         if (b == JOY_A || b == JOY_B || b == JOY_MINUS || b == JOY_X) g_diag_open = 0;
         return;
@@ -2045,9 +2269,10 @@ static void input_settings(int b) {
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
-        if (g_setSel == 0) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
-        else if (g_setSel == 1) schedule_restart(NULL);
-        else if (g_setSel == 2) g_running = 0;
+        if (g_setSel == 0) { g_prefs_sel = 0; g_prefs_open = 1; }
+        else if (g_setSel == 1) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
+        else if (g_setSel == 2) schedule_restart(NULL);
+        else if (g_setSel == 3) g_running = 0;
         else { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
     }
 }
@@ -2103,7 +2328,7 @@ static int stick_dir(SDL_Joystick *j) {
 }
 static void handle_button(int b) {
     if (g_screen == SC_LOGIN) {
-        if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
+        if (b == JOY_A) { if (do_login() == 0) { load_favs(); load_settings_status(); g_screen = SC_MAIN; enter_tab(0); } }
         else if (b == JOY_PLUS) g_running = 0;
     } else if (g_screen == SC_MAIN) {
         if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
@@ -2146,7 +2371,7 @@ int main(int argc, char **argv) {
 
     store_load_token(g_token, sizeof(g_token));
     store_load_user(g_user, sizeof(g_user));
-    if (g_token[0]) { load_favs(); g_screen = SC_MAIN; enter_tab(0); }
+    if (g_token[0]) { load_favs(); load_settings_status(); g_screen = SC_MAIN; enter_tab(0); }
 
     while (appletMainLoop() && g_running) {
         SDL_Event e;
@@ -2171,8 +2396,8 @@ int main(int argc, char **argv) {
         }
 
         // destaque rotativo nas abas 0..4 (a cada ~6s)
-        if (g_screen == SC_MAIN && g_tab <= 4 && g_land && SDL_GetTicks() > g_hero_next) {
-            int nh = arr_len(g_heroesArr);
+        if (!g_pref_reduce_motion && g_screen == SC_MAIN && g_tab <= 4 && g_land && SDL_GetTicks() > g_hero_next) {
+            int nh = hero_count();
             if (nh > 0) g_heroIdx = (g_heroIdx + 1) % nh;
             g_hero_next = SDL_GetTicks() + 6000;
         }
