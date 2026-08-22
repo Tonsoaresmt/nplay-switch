@@ -164,7 +164,7 @@ void draw_movie(void) {
 
     ui_panel(28, 86, 234, 343, C_ACC);
     SDL_Texture *poster = cover_get(logo);
-    if (poster) { SDL_Rect cr = {40, 98, 210, 315}; SDL_RenderCopy(gRen, poster, NULL, &cr); }
+    if (poster) { SDL_Rect cr = {40, 98, 210, 315}; ui_cover(poster, &cr); }
     else { fill_rect(40, 98, 210, 315, C_BAR); text_center_at("Sem capa", 40, 210, 242, C_MUT, 0); }
 
     const int dx = 280;
@@ -248,13 +248,17 @@ void draw_movie(void) {
             if (x + card_w < 0 || x > WIN_W) continue;
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
             int cover_x = x + (card_w - cover_w) / 2;
-            if (cover) { SDL_Rect rr = {cover_x, cards_y, cover_w, cover_h}; SDL_RenderCopy(gRen, cover, NULL, &rr); }
+            if (g_movie_zone == 1 && i == g_related_sel) {
+                fill_rect(cover_x - 8, cards_y - 8, cover_w + 16, cover_h + 16, (SDL_Color){ 4, 6, 11, 255 });
+                border_rect(cover_x - 5, cards_y - 5, cover_w + 10, cover_h + 10, 2, C_ACC);
+            }
+            if (cover) { SDL_Rect rr = {cover_x, cards_y, cover_w, cover_h}; ui_cover(cover, &rr); }
             else { fill_rect(cover_x, cards_y, cover_w, cover_h, C_CARD); text_center_at("Sem capa", cover_x, cover_w, cards_y + cover_h / 2 - 12, C_MUT, 0); }
             int title_y = cards_y + cover_h + (expanded ? 9 : 0);
             text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, title_y,
                       g_movie_zone == 1 && i == g_related_sel ? C_TEXT : C_MUT, 0, card_w);
             if (g_movie_zone == 1 && i == g_related_sel)
-                ui_focus(x - 3, cards_y - 3, card_w + 6, cover_h + 47);
+                fill_rect(x, title_y + 29, card_w, 2, C_ACC2);
         }
     }
     ui_footer(g_movie_zone == 1 ?

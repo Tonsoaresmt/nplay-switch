@@ -43,6 +43,7 @@ extern char g_toast[160];
 // Helpers de desenho
 void fill_rect(int x, int y, int w, int h, SDL_Color c);
 void border_rect(int x, int y, int w, int h, int th, SDL_Color c);
+void ui_cover(SDL_Texture *texture, const SDL_Rect *dst);
 void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw);
 int  text_center(const char *s, int y, SDL_Color c, int big);
 int  text_center_at(const char *s, int x, int w, int y, SDL_Color c, int big);
@@ -52,6 +53,7 @@ void ui_footer(const char *hint);
 void ui_panel(int x, int y, int w, int h, SDL_Color accent);
 void ui_focus(int x, int y, int w, int h);
 void ui_badge(const char *label, int x, int y, SDL_Color color);
+int ui_card_badge(const char *label, int x, int y, SDL_Color color);
 void ui_empty_state(const char *title, const char *detail);
 void ui_progress(int x, int y, int w, int value, SDL_Color color);
 

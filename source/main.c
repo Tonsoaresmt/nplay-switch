@@ -246,21 +246,16 @@ static void cover_pump(void) {   // main: converte surfaces prontas em texturas
 }
 
 // ------------------------------------------------------------- card
-static void render_texture_cover(SDL_Texture *texture, const SDL_Rect *dst) {
-    int tw = 0, th = 0;
-    if (!texture || !dst || SDL_QueryTexture(texture, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) return;
-    SDL_Rect src = { 0, 0, tw, th };
-    long long lhs = (long long)tw * dst->h, rhs = (long long)th * dst->w;
-    if (lhs > rhs) { src.w = th * dst->w / dst->h; src.x = (tw - src.w) / 2; }
-    else if (lhs < rhs) { src.h = tw * dst->h / dst->w; src.y = (th - src.h) / 2; }
-    SDL_RenderCopy(gRen, texture, &src, dst);
-}
 static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selected, int fav) {
     const char *title = jstr(item, "title"); if (!title) title = "";
     const char *logo = jstr(item, "logo");
     SDL_Texture *tex = cover_get(logo);
+    if (selected) {
+        fill_rect(x - 8, y - 8, cw + 16, coverH + 16, (SDL_Color){ 4, 6, 11, 255 });
+        border_rect(x - 5, y - 5, cw + 10, coverH + 10, 2, C_ACC);
+    }
     SDL_Rect cr = { x, y, cw, coverH };
-    if (tex) render_texture_cover(tex, &cr);
+    if (tex) ui_cover(tex, &cr);
     else {
         fill_rect(x, y, cw, coverH, C_CARD);
         char ini[2] = { title[0] ? title[0] : '?', 0 };
@@ -269,18 +264,26 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     const char *kind = jstr(item, "kind");
     int ready = cJSON_IsTrue(cJSON_GetObjectItem(item, "r2_ready")) || jint(item, "r2_ready") != 0;
     int cam = cJSON_IsTrue(cJSON_GetObjectItem(item, "is_cam")) || jint(item, "is_cam") != 0;
-    if (kind && !strcmp(kind, "live")) ui_badge("AO VIVO", x + 6, y + 6, C_ROSE);
-    else if (ready) ui_badge("PRONTO", x + 6, y + 6, C_GREEN);
-    else if (cam) ui_badge("CAM", x + 6, y + 6, C_ACC);
-    else {
-        const char *year = jstr(item, "year");
-        if (year && year[0]) ui_badge(year, x + 6, y + 6, C_BAR);
+    const char *year = jstr(item, "year");
+    if (kind && !strcmp(kind, "live")) ui_card_badge("AO VIVO", x + 7, y + 7, C_ROSE);
+    else if (cam) ui_card_badge("CAM", x + 7, y + 7, C_ROSE);
+    else if (year && year[0]) ui_card_badge(year, x + 7, y + 7, C_MUT);
+    if (ready && !(kind && !strcmp(kind, "live"))) {
+        int tw = 0, th = 0; text_cached(gRen, "Pronto", C_TEXT, 2, &tw, &th);
+        int bw = tw + 14; if (bw < 28) bw = 28;
+        ui_card_badge("Pronto", x + cw - bw - 7, y + coverH - 29, C_GREEN);
     }
-    if (fav) { fill_rect(x + cw - 26, y + 6, 20, 20, C_ROSE); text_draw(gRen, "*", x + cw - 21, y + 4, C_TEXT, 0); }
-    fill_rect(x, y + coverH, cw, 38, selected ? C_CARD : C_BG);
-    char sh[48]; short_title(title, sh, (int)sizeof(sh));
-    text_clip(sh, x, y + coverH + 6, selected ? C_TEXT : C_MUT, 0, cw);
-    if (selected) { ui_focus(x - 3, y - 3, cw + 6, coverH + 44); fill_rect(x, y + coverH + 35, cw, 3, C_ACC2); }
+    if (fav) {
+        if (selected) {
+            int tw = 0, th = 0; text_cached(gRen, "Na lista", C_TEXT, 2, &tw, &th);
+            int bw = tw + 14; if (bw < 28) bw = 28;
+            ui_card_badge("Na lista", x + cw - bw - 7, y + 7, C_ROSE);
+        } else fill_rect(x + cw - 5, y + 8, 3, 18, C_ROSE);
+    }
+    // O recorte e feito pelo renderer; nao corte por bytes, pois isso quebrava
+    // acentos/UTF-8 e abreviava titulos antes de ocupar a largura disponivel.
+    text_clip(title, x, y + coverH + 8, selected ? C_TEXT : C_MUT, 0, cw);
+    if (selected) fill_rect(x, y + coverH + 37, cw, 2, C_ACC2);
 }
 
 // ============================================================= estado / telas
@@ -1113,9 +1116,9 @@ static void draw_topbar(void) {
 }
 
 // ------------------------------------------------------------- render: landing
-#define RCW 150
-#define RCH 214
-#define RGAP 16
+#define RCW 164
+#define RCH 232
+#define RGAP 14
 #define HERO_H 224
 #define RAILS_TOP (108 + HERO_H + 24)
 static void draw_landing(void) {
@@ -1137,7 +1140,7 @@ static void draw_landing(void) {
         SDL_Texture *bg = cover_get(backdrop);
         if (bg) {
             SDL_Rect br = { 40, hy, WIN_W - 80, HERO_H };
-            render_texture_cover(bg, &br);
+            ui_cover(bg, &br);
             fill_rect(40, hy, 720, HERO_H, (SDL_Color){ 8, 10, 15, 218 });
             fill_rect(760, hy, 480, HERO_H, (SDL_Color){ 8, 10, 15, 92 });
             fill_rect(40, hy, 5, HERO_H, C_ACC);
@@ -1147,7 +1150,7 @@ static void draw_landing(void) {
         if (!bg) {
             SDL_Texture *tex = cover_get(jstr(h, "logo"));
             SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
-            if (tex) SDL_RenderCopy(gRen, tex, NULL, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
+            if (tex) ui_cover(tex, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
         }
         text_draw(gRen, "EM DESTAQUE AGORA", content_x, hy + 24, C_ACC, 0);
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
@@ -1186,10 +1189,10 @@ static void draw_landing(void) {
             int fav = series_item ? is_fav_series(fav_id) : is_fav_item(fav_id);
             draw_card(x, ry, RCW, RCH, it, (r == g_railSel && i == g_railItem), fav);
         }
-        y += 30 + RCH + 40;
+        y += 30 + RCH + 44;
         if (y > WIN_H + 240) break;
     }
-    int search_y = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 40) - g_homeScroll;
+    int search_y = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 44) - g_homeScroll;
     if (search_y + 116 >= 72 && search_y < WIN_H) {
         int selected = g_railSel == g_railsN;
         ui_panel(40, search_y, WIN_W - 80, 112, C_ACC2);
@@ -1302,7 +1305,7 @@ static void draw_series(void) {
     ui_panel(32, 88, 244, 548, C_ACC);
     SDL_Texture *tex = cover_get(jstr(s, "logo"));
     SDL_Rect cr = { LX, 104, LW, 302 };
-    if (tex) SDL_RenderCopy(gRen, tex, NULL, &cr); else fill_rect(LX, 104, LW, 302, C_BAR);
+    if (tex) ui_cover(tex, &cr); else fill_rect(LX, 104, LW, 302, C_BAR);
     const char *year = jstr(s, "year");
     double rating = 0; cJSON *jr = cJSON_GetObjectItem(s, "rating"); if (jr && cJSON_IsNumber(jr)) rating = jr->valuedouble;
     char l1[80];
@@ -1468,18 +1471,21 @@ static int horizontal_scroll(int selected, int item_w, int gap) {
 
 static void draw_history_card(int x, int y, cJSON *item, int selected) {
     const char *title = jstr(item, "title"); if (!title) title = "Titulo";
+    if (selected) {
+        fill_rect(x - 8, y - 8, HIST_CW + 16, HIST_CH + 16, (SDL_Color){ 4, 6, 11, 255 });
+        border_rect(x - 5, y - 5, HIST_CW + 10, HIST_CH + 10, 2, C_ACC);
+    }
     SDL_Texture *cover = cover_get(jstr(item, "logo"));
-    if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; SDL_RenderCopy(gRen, cover, NULL, &r); }
+    if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; ui_cover(cover, &r); }
     else fill_rect(x, y, HIST_CW, HIST_CH, C_CARD);
     int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
     int pct = dur > 0 ? pos * 100 / dur : 0;
     ui_progress(x, y + HIST_CH - 8, HIST_CW, pct, C_ACC);
-    fill_rect(x, y + HIST_CH, HIST_CW, 42, selected ? C_CARD : C_BG);
-    text_clip(title, x, y + HIST_CH + 6, selected ? C_TEXT : C_MUT, 0, HIST_CW);
-    if (selected) ui_focus(x - 3, y - 3, HIST_CW + 6, HIST_CH + 48);
+    text_clip(title, x, y + HIST_CH + 8, selected ? C_TEXT : C_MUT, 0, HIST_CW);
+    if (selected) fill_rect(x, y + HIST_CH + 37, HIST_CW, 2, C_ACC2);
     if (!strcmp(jstr(item, "kind") ? jstr(item, "kind") : "", "episode")) {
         char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
-        ui_badge(ep, x + 6, y + 6, C_ACC2);
+        ui_card_badge(ep, x + 7, y + 7, C_ACC2);
     }
 }
 
@@ -1594,21 +1600,24 @@ static void draw_dl_grid(void) {
         int yy = top + row * (GCH + GGAP) - g_dlScroll;
         if (yy + GCH < 66 || yy > WIN_H) continue;
         cJSON *j0 = dlg_job(i, 0);
+        if (i == g_dlSel) {
+            fill_rect(x - 8, yy - 8, GCOVERW + 16, GCOVERH + 16, (SDL_Color){ 4, 6, 11, 255 });
+            border_rect(x - 5, yy - 5, GCOVERW + 10, GCOVERH + 10, 2, C_ACC);
+        }
         SDL_Texture *cov = cover_get(jstr(j0, "cover"));
         SDL_Rect cr = { x, yy, GCOVERW, GCOVERH };
-        if (cov) SDL_RenderCopy(gRen, cov, NULL, &cr); else fill_rect(x, yy, GCOVERW, GCOVERH, C_CARD);
+        if (cov) ui_cover(cov, &cr); else fill_rect(x, yy, GCOVERW, GCOVERH, C_CARD);
         int nJobs = g_dlg[i].nJobs, baixando = 0;
         for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
         char badge[32];
-        if (g_dlg[i].isMovie) { if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "PRONTO"); }
-        else snprintf(badge, sizeof(badge), baixando ? "%d ep - preparando" : "%d ep", nJobs);
-        fill_rect(x, yy + GCOVERH - 26, GCOVERW, 26, C_BAR);
-        text_draw(gRen, badge, x + 6, yy + GCOVERH - 24, baixando ? C_ACC : C_GREEN, 0);
+        if (g_dlg[i].isMovie) { if (baixando) snprintf(badge, sizeof(badge), "%d%%", jint(j0, "percent")); else snprintf(badge, sizeof(badge), "Pronto"); }
+        else snprintf(badge, sizeof(badge), "%d ep%s", nJobs, nJobs == 1 ? "" : "s");
+        int tw = 0, th = 0; text_cached(gRen, badge, C_TEXT, 2, &tw, &th);
+        int bw = tw + 14; if (bw < 28) bw = 28;
+        ui_card_badge(badge, x + GCOVERW - bw - 7, yy + GCOVERH - 29, baixando ? C_ACC : C_GREEN);
         const char *title = jstr(j0, "title"); if (!title) title = "";
-        char sh[48]; short_title(title, sh, sizeof(sh));
-        fill_rect(x, yy + GCOVERH, GCOVERW, 38, i == g_dlSel ? C_CARD : C_BG);
-        text_clip(sh, x, yy + GCOVERH + 6, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
-        if (i == g_dlSel) { ui_focus(x - 3, yy - 3, GCOVERW + 6, GCOVERH + 44); fill_rect(x, yy + GCOVERH + 35, GCOVERW, 3, C_ACC2); }
+        text_clip(title, x, yy + GCOVERH + 8, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
+        if (i == g_dlSel) fill_rect(x, yy + GCOVERH + 37, GCOVERW, 2, C_ACC2);
     }
     ui_footer("A Abrir    X Remover    B Historico");
 }
@@ -1681,12 +1690,15 @@ static void draw_custom_list(void) {
         if (y + GCH < 72 || y > WIN_H - 52) continue;
         int id = 0, is_series = 0; char title[128], logo[720];
         if (!store_media_list_get(g_open_list, i, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) continue;
+        if (i == g_list_item_sel) {
+            fill_rect(x - 8, y - 8, GCOVERW + 16, GCOVERH + 16, (SDL_Color){ 4, 6, 11, 255 });
+            border_rect(x - 5, y - 5, GCOVERW + 10, GCOVERH + 10, 2, C_ACC);
+        }
         SDL_Texture *cover = cover_get(logo);
-        if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; SDL_RenderCopy(gRen, cover, NULL, &r); }
+        if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; ui_cover(cover, &r); }
         else fill_rect(x, y, GCOVERW, GCOVERH, C_CARD);
-        fill_rect(x, y + GCOVERH, GCOVERW, 38, i == g_list_item_sel ? C_CARD : C_BG);
-        text_clip(title, x, y + GCOVERH + 6, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
-        if (i == g_list_item_sel) ui_focus(x - 3, y - 3, GCOVERW + 6, GCOVERH + 44);
+        text_clip(title, x, y + GCOVERH + 8, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
+        if (i == g_list_item_sel) fill_rect(x, y + GCOVERH + 37, GCOVERW, 2, C_ACC2);
     }
     ui_footer("A Abrir    X Remover da lista    Y Renomear lista    ZR Excluir lista    B Voltar");
 }
@@ -1795,7 +1807,7 @@ static void input_landing(int b) {
             } else if (nh > 0) g_railSel = -1;
         } else if (b == JOY_A) do_search();
         if (g_railSel == g_railsN) {
-            int sy = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 40);
+            int sy = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 44);
             if (sy + 132 - g_homeScroll > WIN_H - 52) g_homeScroll = sy + 132 - (WIN_H - 52) + 12;
         } else if (g_railSel < 0) g_homeScroll = 0;
         return;
@@ -1807,7 +1819,7 @@ static void input_landing(int b) {
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
     else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { int is = catalog_item_is_series(it, g_rails[g_railSel].is_series); int id = catalog_favorite_id(it, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
-    int ry = (nh > 0 ? RAILS_TOP : 120) + g_railSel * (30 + RCH + 40);
+    int ry = (nh > 0 ? RAILS_TOP : 120) + g_railSel * (30 + RCH + 44);
     int item_h = g_railSel == g_railsN ? 112 : RCH + 60;
     if (ry + item_h - g_homeScroll > WIN_H - 52) g_homeScroll = ry + item_h - (WIN_H - 52) + 20;
     if (ry - g_homeScroll < 80) g_homeScroll = ry - 80;
