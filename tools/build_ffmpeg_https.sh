@@ -41,6 +41,7 @@ fi
 
 "${PATCH_BIN}" -Np1 -i "${WORK_DIR}/ffmpeg-7.1.patch"
 "${PATCH_BIN}" -Np1 -i "${WORK_DIR}/tls.patch"
+"${PATCH_BIN}" -Np1 -i "${ROOT_DIR}/tools/ffmpeg-libnx-tls-hostname.patch"
 
 if [[ -f /opt/devkitpro/switchvars.sh ]]; then
     source /opt/devkitpro/switchvars.sh
@@ -71,6 +72,11 @@ cp libavformat/libavformat.a "${VENDOR_LIB}/libavformat.a"
 
 if ! aarch64-none-elf-nm "${VENDOR_LIB}/libavformat.a" | grep -q 'ff_https_protocol'; then
     echo "Erro: a biblioteca gerada nao contem ff_https_protocol." >&2
+    exit 1
+fi
+
+if ! grep -q 'SslVerifyOption_HostName' libavformat/tls_libnx.c; then
+    echo "Erro: validacao de hostname nao foi aplicada ao TLS libnx." >&2
     exit 1
 fi
 

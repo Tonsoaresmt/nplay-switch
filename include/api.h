@@ -44,6 +44,12 @@ typedef struct {
 } PlaybackSource;
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out);
+int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out);
+int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out);
+int api_playback_heartbeat(int session_id);
+int api_playback_progress(int item_id, int position_sec, int duration_sec);
+int api_stop_playback(int item_id);
+const char *api_last_error(void);
 
 
 SDL_Texture *cover_get(const char *url);

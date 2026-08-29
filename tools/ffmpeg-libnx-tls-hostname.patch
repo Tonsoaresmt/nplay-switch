@@ -1,0 +1,9 @@
+--- a/libavformat/tls_libnx.c
++++ b/libavformat/tls_libnx.c
+@@ -96,7 +96,7 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **o
+     if (R_SUCCEEDED(rc)) {
+         u32 verifyopt = SslVerifyOption_DateCheck;
+-        if (shr->verify) verifyopt |= SslVerifyOption_PeerCa;
++        if (shr->verify) verifyopt |= SslVerifyOption_PeerCa | SslVerifyOption_HostName;
+         rc = sslConnectionSetVerifyOption(&tls_ctx->conn, verifyopt);
+     }

@@ -218,8 +218,10 @@ AVIOContext *nplay_curl_avio_open(const char *url) {
     curl_easy_setopt(c->easy, CURLOPT_URL, c->url);
     curl_easy_setopt(c->easy, CURLOPT_USERAGENT, "Nplay-Switch/1.0");
     curl_easy_setopt(c->easy, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYHOST, 0L);
+    // O backend TLS do libcurl usa a PKI interna do sistema do Switch.
+    // MP4 direto carrega URLs assinadas e deve validar CA e hostname como a API.
+    curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(c->easy, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPIDLE, 120L);

@@ -5,9 +5,10 @@ protocolo `https` da lista de protocolos registrados. Isso impede o demuxer HLS
 de abrir os manifestos HTTPS usados pelo Nplay e produz `Protocol not found`.
 
 `lib/libavformat.a` e recompilada a partir do FFmpeg 7.1 com os dois patches
-oficiais do devkitPro. A unica diferenca de configuracao e adicionar `https` a
-`--enable-protocol`. As outras bibliotecas continuam sendo as do pacote oficial
-da mesma versao.
+oficiais do devkitPro. As diferencas locais sao adicionar `https` a
+`--enable-protocol` e exigir a verificacao do hostname no backend TLS libnx,
+alem da CA e da data do certificado. As outras bibliotecas continuam sendo as
+do pacote oficial da mesma versao.
 
 Para reproduzir o artefato, execute no ambiente MSYS2 do devkitPro:
 
