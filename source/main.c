@@ -459,11 +459,22 @@ static void load_landing(int tab) {
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {
-    if (dur > 0 && pos > 5) {
-        char body[160];
-        snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", item_id, pos, dur);
-        api_send("/api/sync/progress", "POST", body);
-    }
+    (void)u;
+    api_playback_progress(item_id, pos, dur);
+}
+
+static int on_player_heartbeat(int session_id, void *u) {
+    (void)u;
+    return api_playback_heartbeat(session_id);
+}
+
+static int on_player_renew(const PlaybackSource *current, PlaybackSource *out, void *u) {
+    (void)u;
+    if (!current) return -1;
+    if (current->delivery == DELIVERY_R2 && current->session_id > 0)
+        return api_refresh_playback(current, out);
+    return api_reresolve_playback(current->item_id,
+                                  current->quality[0] ? current->quality : NULL, out);
 }
 
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
@@ -487,7 +498,8 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.url = url;
     req.start_sec = start;
     req.progress_cb = on_player_progress;
-    // Sem resolve_cb pois não é stream resolvida via API
+    req.heartbeat_cb = NULL;
+    // Sem renew_cb pois nao e uma stream resolvida via API.
     req.userdata = NULL;
 
     appletSetMediaPlaybackState(true);
@@ -508,10 +520,6 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     return (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
 }
 
-static int on_player_resolve(int item_id, const char *quality, PlaybackSource *out, void *u) {
-    return api_resolve_playback(item_id, quality, out);
-}
-
 // Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
@@ -525,7 +533,8 @@ int resolve_and_play(int itemId, const char *title) {
     
     PlaybackSource src = {0};
     if (api_resolve_playback(itemId, NULL, &src) < 0) {
-        toast("Falha de rede ou de acesso ao abrir o video");
+        const char *detail = api_last_error();
+        toast(detail && detail[0] ? detail : "Falha de rede ou de acesso ao abrir o video");
         return 0;
     }
     
@@ -547,6 +556,7 @@ int resolve_and_play(int itemId, const char *title) {
         }
 
         PlayerRequest req = {0};
+        req.playback = src;
         req.item_id = itemId;
         req.session_id = src.session_id;
         req.source_id = src.source_id;
@@ -559,7 +569,8 @@ int resolve_and_play(int itemId, const char *title) {
         req.episode = src.episode;
         req.start_sec = start;
         req.progress_cb = on_player_progress;
-        req.resolve_cb = on_player_resolve;
+        req.renew_cb = on_player_renew;
+        req.heartbeat_cb = on_player_heartbeat;
         req.userdata = NULL;
 
         appletSetMediaPlaybackState(true);
@@ -584,10 +595,7 @@ int resolve_and_play(int itemId, const char *title) {
     }
     
     // Stop the session if we had one
-    if (src.session_id > 0) {
-        char stop[96]; snprintf(stop, sizeof(stop), "/api/stream/%d/stop", itemId);
-        api_send(stop, "POST", "{}");
-    }
+    if (src.session_id > 0) api_stop_playback(itemId);
     
     return rc;
 }

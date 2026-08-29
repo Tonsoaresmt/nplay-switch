@@ -21,9 +21,13 @@ typedef enum {
 } PlayerExitReason;
 
 typedef void (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec, void *userdata);
-typedef int (*PlayerResolveCallback)(int item_id, const char *quality, PlaybackSource *out, void *userdata);
+typedef int (*PlayerRenewCallback)(const PlaybackSource *current, PlaybackSource *out, void *userdata);
+typedef int (*PlayerHeartbeatCallback)(int session_id, void *userdata);
 
 typedef struct {
+    // Snapshot completo do contrato da API. Para arquivos locais, fica zerado e
+    // os campos legados abaixo continuam sendo usados.
+    PlaybackSource playback;
     int item_id;
     int session_id;
     int source_id;
@@ -41,7 +45,8 @@ typedef struct {
     double start_sec;
 
     PlayerProgressCallback progress_cb;
-    PlayerResolveCallback resolve_cb;
+    PlayerRenewCallback renew_cb;
+    PlayerHeartbeatCallback heartbeat_cb;
     void *userdata;
 } PlayerRequest;
 
@@ -49,11 +54,10 @@ typedef struct {
     PlayerExitReason reason;
     double position;
     double duration;
+    PlayerState final_state;
+    int recovery_count;
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);
-int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hls,
-                const char *title, double start_sec, double *out_pos, double *out_dur);
 
 const char *player_last_error(void);
-

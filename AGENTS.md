@@ -501,3 +501,38 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   minutos, anime MP4, troca de faixas, seek e retorno; depois abrir Diagnostico e
   confirmar NVTEGRA, descartes, bufferings e fila de audio. Se houver engasgo, enviar
   foto dessa tela, titulo e timestamp antes de alterar buffers ou filas.
+
+## Auditoria corretiva da sessao em 29/08/2026 (0.8.1)
+
+- A implementacao 0.8.0 foi auditada contra o contrato real do backend em
+  `C:/iptv/src/routes/stream.js`, sem alterar esse repositorio. A renovacao R2 usa
+  agora `POST /api/stream/session/:sessionId/refresh`, preservando a sessao e a
+  fonte atuais. Upstream usa nova resolucao curta; uma queda de Wi-Fi nao encadeia
+  mais refresh de 8 s com resolve de 20 s na mesma tentativa.
+- `player_run` nao sobrescreve mais `PlayerRequest.userdata`. O contexto completo
+  de `PlaybackSource` fica local ao ciclo de reproducao e e substituido de forma
+  transacional somente depois que a API entrega uma URL valida. A URL deixou de
+  usar buffer `static`, e o session id observado pelo heartbeat e atomico.
+- Apenas falhas de abertura, leitura de faixas e rede (`-10`, `-2`, `-5`) entram
+  em recuperacao. Falhas de codec, memoria ou renderer terminam com diagnostico em
+  vez de repetir uma operacao incapaz de resolver o problema. Ha tres ciclos de
+  pipeline, cada um com quatro renovacoes e espera progressiva; `B`/`-` cancela
+  entre tentativas.
+- Heartbeat (20 s) e progresso (15 s) continuam fora do decode, mas o player nao
+  chama mais a API diretamente: usa callbacks e preserva o `userdata` do chamador.
+  Pausa e seeks confirmados forcam salvamento de progresso. Chamadas periodicas e
+  stop usam timeouts de 3/6 s para reduzir atraso ao sair.
+- TLS foi realmente fechado nos dois caminhos. O AVIO libcurl direto usa
+  `VERIFYPEER=1`/`VERIFYHOST=2`; a biblioteca FFmpeg HLS foi reconstruida com
+  verificacao de CA, data e hostname no backend libnx. O patch local e aplicado por
+  `tools/build_ffmpeg_https.sh`, que tambem valida os hashes das fontes oficiais.
+- `tools/validate_release.ps1` verifica versoes, regressao de TLS, contrato de
+  refresh/heartbeat/progresso, preservacao de userdata e simbolos HLS/HTTPS/NVTEGRA,
+  alem de fazer build limpo e emitir tamanho/SHA-256 do NRO.
+- Versao preparada: 0.8.1. Validacao local concluida com build limpo do aplicativo,
+  sem erros ou avisos, e com `ff_https_protocol`, `ff_hls_demuxer`,
+  `ff_h264_nvtegra_hwaccel` e `av_hwdevice_ctx_create` no ELF. A unica validacao que
+  permanece obrigatoriamente no hardware e: filme e serie HLS por 10+ min, anime
+  MP4, Wi-Fi desligado por 5/20 s, pausa longa, seek, audio/legenda e Diagnostico.
+  Nao alterar buffers com base apenas em impressao; guardar titulo, timestamp e
+  `player_stats.txt` se ainda houver engasgo.
