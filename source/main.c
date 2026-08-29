@@ -20,17 +20,18 @@
 #include "cJSON.h"
 #include "update.h"
 #include "player.h"
+#include "api.h"
 
 #define WIN_W 1280
 #define WIN_H 720
 
 
 
-static const char *BASE = "https://nplay.tonserverlocal.uk";
+const char *BASE = "https://nplay.tonserverlocal.uk";
 
 SDL_Renderer *gRen = NULL;
 static SDL_Joystick *g_joy = NULL;
-static char g_token[640] = {0};
+char g_token[640] = {0};
 static char g_status[160] = {0};
 Uint32 g_toast_until = 0;
 char g_toast[160] = {0};
@@ -39,45 +40,11 @@ static char g_user[128] = {0};
 static int g_do_update = 0;
 static Uint32 g_restart_at = 0;
 static int g_running; // definido/inicializado na secao de roteamento de input
-static int g_play_session_id = 0;
+
 
 #include "ui.h"
 #include "screen_movie.h"
 
-cJSON *api_get(const char *path) {
-    char url[1024];
-    snprintf(url, sizeof(url), "%s%s", BASE, path);
-    struct membuf out = { 0 };
-    const char *err = NULL;
-    // Chamadas de UI nao podem congelar a tela por 45 s. Endpoints JSON devem
-    // responder rapido; falhas continuam tratadas pelas telas sem derrubar o app.
-    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, 5L, 15L);
-    cJSON *j = NULL;
-    if (code == 200 && out.data) j = cJSON_Parse(out.data);
-    membuf_free(&out);
-    return j;
-}
-// POST/DELETE simples (retorna o codigo HTTP). Body padrao "{}" evita 415.
-long api_send(const char *path, const char *method, const char *body) {
-    char url[1024];
-    snprintf(url, sizeof(url), "%s%s", BASE, path);
-    struct membuf out = { 0 };
-    const char *err = NULL;
-    long code = net_request_timeout(url, method, body ? body : "{}",
-                                    g_token[0] ? g_token : NULL, &out, &err, 5L, 20L);
-    membuf_free(&out);
-    return code;
-}
-const char *jstr(cJSON *o, const char *k) {
-    cJSON *v = o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
-    return (v && v->valuestring) ? v->valuestring : NULL;
-}
-int jint(cJSON *o, const char *k) {
-    cJSON *v = o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
-    return v ? v->valueint : 0;
-}
-int arr_len(cJSON *a) { return cJSON_IsArray(a) ? cJSON_GetArraySize(a) : 0; }
 
 // ============================================================= capas (threads)
 // state: 0 novo, 1 na fila/baixando, 2 surface pronta (main cria textura), 3 feito
@@ -491,18 +458,12 @@ static void load_landing(int tab) {
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
 }
 
-typedef struct { int session_id; SDL_atomic_t running; } PlaybackHeartbeat;
-static int playback_heartbeat_thread(void *userdata) {
-    PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
-    while (SDL_AtomicGet(&hb->running)) {
-        // A abertura do FFmpeg e o trecho mais sensivel da reproducao. Esperar o
-        // primeiro intervalo evita disputar DNS/TLS/banda com o proprio video.
-        for (int i = 0; i < 40 && SDL_AtomicGet(&hb->running); i++) SDL_Delay(500);
-        if (!SDL_AtomicGet(&hb->running)) break;
-        char path[112]; snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", hb->session_id);
-        api_send(path, "POST", "{}");
+static void on_player_progress(int item_id, int pos, int dur, void *u) {
+    if (dur > 0 && pos > 5) {
+        char body[160];
+        snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", item_id, pos, dur);
+        api_send("/api/sync/progress", "POST", body);
     }
-    return 0;
 }
 
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
@@ -518,38 +479,40 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
         if (ps && cJSON_IsNumber(ps)) start = ps->valuedouble;
         cJSON_Delete(pr);
     }
-    double pos = 0, dur = 0;
-    PlaybackHeartbeat hb = { .session_id = g_play_session_id };
-    SDL_Thread *heartbeat = NULL;
-    if (hb.session_id > 0) {
-        SDL_AtomicSet(&hb.running, 1);
-        heartbeat = SDL_CreateThread(playback_heartbeat_thread, "play-heartbeat", &hb);
-    }
-    // Cobre tambem a abertura da rede/FFmpeg e todos os retornos de erro.
+    
+    PlayerRequest req = {0};
+    req.item_id = itemId;
+    req.session_id = 0; // Local ou arquivo direto
+    req.title = title;
+    req.url = url;
+    req.start_sec = start;
+    req.progress_cb = on_player_progress;
+    // Sem resolve_cb pois não é stream resolvida via API
+    req.userdata = NULL;
+
     appletSetMediaPlaybackState(true);
-    int r = player_play(gRen, g_joy, url, is_hls, title, start, &pos, &dur);
+    PlayerResult res = {0};
+    int run_rc = player_run(gRen, g_joy, &req, &res);
     appletSetMediaPlaybackState(false);
-    if (heartbeat) { SDL_AtomicSet(&hb.running, 0); SDL_WaitThread(heartbeat, NULL); }
-    // O player controla a mesma flag de energia e sempre a desliga ao sair.
-    // Forca o Historico a recalcular/reaplicar seu proprio estado no proximo frame.
     g_download_awake = 0;
-    if (dur > 0 && pos > 5) {
-        char body[160];
-        snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", itemId, (int)pos, (int)dur);
-        api_send("/api/sync/progress", "POST", body);
-    }
+
     if (g_tab == TAB_DOWNLOADS) load_history();
-    if (r < 0) {
+    
+    if (run_rc < 0) {
         char m[160]; const char *detail = player_last_error();
         if (detail && detail[0]) snprintf(m, sizeof(m), "%s", detail);
-        else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", r);
-        toast(m); return 0;
+        else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", run_rc);
+        toast(m); 
+        return 0;
     }
-    return r;   // 1 = terminou
+    return (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
 }
 
-// Resolve a fonte e reproduz. Link direto (anime/dorama) toca na hora; torrent
-// fica numa preparacao visual e inicia automaticamente quando estiver pronto.
+static int on_player_resolve(int item_id, const char *quality, PlaybackSource *out, void *u) {
+    return api_resolve_playback(item_id, quality, out);
+}
+
+// Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play(int itemId, const char *title) {
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     ui_header("NPLAY", "Abrindo video", "");
@@ -559,46 +522,73 @@ int resolve_and_play(int itemId, const char *title) {
     text_center_at("Organizando tudo para comecar...", 300, WIN_W - 600, 354, C_MUT, 0);
     for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
     SDL_RenderPresent(gRen);
-    char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, itemId);
-    struct membuf out = { 0 }; const char *err = NULL;
-    long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
-                                    &out, &err, 8L, 20L);
-    cJSON *j = out.data ? cJSON_Parse(out.data) : NULL;
-    if (code != 200 || !j) {
-        const char *detail = jstr(j, "error");
-        if (!detail) detail = jstr(j, "message");
-        char msg[160];
-        if (code > 0) snprintf(msg, sizeof(msg), "Falha ao abrir (HTTP %ld)%s%s", code,
-                               detail ? ": " : "", detail ? detail : "");
-        else snprintf(msg, sizeof(msg), "Falha de rede ao abrir%s%s", err ? ": " : "", err ? err : "");
-        toast(msg);
-        if (j) cJSON_Delete(j);
-        membuf_free(&out);
+    
+    PlaybackSource src = {0};
+    if (api_resolve_playback(itemId, NULL, &src) < 0) {
+        toast("Falha de rede ou de acesso ao abrir o video");
         return 0;
     }
-    g_play_session_id = jint(j, "session_id");
-    const char *container = jstr(j, "container");
-    const char *play = jstr(j, "play_url");
-    char purl[1200] = { 0 };
-    if (play) {
-        if (strncmp(play, "http", 4) == 0) snprintf(purl, sizeof(purl), "%s", play);
-        else snprintf(purl, sizeof(purl), "%s%s", BASE, play);
-    }
+    
     int rc = 0;
-    if (container && !strcmp(container, "torrent")) {
+    if (src.container[0] && !strcmp(src.container, "torrent")) {
+        // Para torrent, o fluxo e separado (usa accel_wait_and_play que tem I/O diferente)
         rc = accel_wait_and_play(itemId, title);
-    } else if (container && !strcmp(container, "embed")) {
+    } else if (src.container[0] && !strcmp(src.container, "embed")) {
         toast("Este conteudo ainda nao esta disponivel neste dispositivo");
-    } else if (purl[0]) {
-        rc = play_with_progress(itemId, title, purl, container && !strcmp(container, "m3u8"));
-    } else toast("Este titulo esta indisponivel no momento");
-    if (g_play_session_id > 0) {
+    } else if (src.play_url[0]) {
+        double start = 0;
+        char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
+        cJSON *pr = api_get(p);
+        if (pr) {
+            cJSON *prog = cJSON_GetObjectItem(pr, "progress");
+            cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
+            if (ps && cJSON_IsNumber(ps)) start = ps->valuedouble;
+            cJSON_Delete(pr);
+        }
+
+        PlayerRequest req = {0};
+        req.item_id = itemId;
+        req.session_id = src.session_id;
+        req.source_id = src.source_id;
+        req.delivery = src.delivery;
+        req.title = title;
+        req.section = src.section;
+        req.container = src.container;
+        req.url = src.play_url;
+        req.season = src.season;
+        req.episode = src.episode;
+        req.start_sec = start;
+        req.progress_cb = on_player_progress;
+        req.resolve_cb = on_player_resolve;
+        req.userdata = NULL;
+
+        appletSetMediaPlaybackState(true);
+        PlayerResult res = {0};
+        int run_rc = player_run(gRen, g_joy, &req, &res);
+        appletSetMediaPlaybackState(false);
+        g_download_awake = 0;
+
+        if (g_tab == TAB_DOWNLOADS) load_history();
+        
+        if (run_rc < 0) {
+            char m[160]; const char *detail = player_last_error();
+            if (detail && detail[0]) snprintf(m, sizeof(m), "%s", detail);
+            else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", run_rc);
+            toast(m); 
+            rc = 0;
+        } else {
+            rc = (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
+        }
+    } else {
+        toast("Este titulo esta indisponivel no momento");
+    }
+    
+    // Stop the session if we had one
+    if (src.session_id > 0) {
         char stop[96]; snprintf(stop, sizeof(stop), "/api/stream/%d/stop", itemId);
         api_send(stop, "POST", "{}");
-        g_play_session_id = 0;
     }
-    if (j) cJSON_Delete(j);
-    membuf_free(&out);
+    
     return rc;
 }
 static void open_series(int id) {

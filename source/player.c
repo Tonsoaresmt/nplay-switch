@@ -498,12 +498,24 @@ static void draw_sub(SDL_Renderer *ren, const char *txt) {
         SDL_RenderCopy(ren, t2, w2 > maxw ? &src : NULL, &d);
     }
 }
-int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hls,
-                const char *title, double start_sec, double *out_pos, double *out_dur) {
+
+typedef struct { 
+    int item_id;
+    int session_id; 
+    SDL_atomic_t running;
+    SDL_atomic_t current_pos;
+    SDL_atomic_t duration;
+} PlaybackHeartbeat;
+static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *req,
+                                double start_sec, double *out_pos, double *out_dur) {
     (void)joy;
     g_player_last_error[0] = '\0';
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
+    
+    const char *url = req->url;
+    int is_hls = (req->container && !strcmp(req->container, "m3u8"));
+    const char *title = req->title;
     // Tela de preparacao enquanto abre a conexao e le os metadados.
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
     draw_center_state(ren, "PREPARANDO VIDEO", "Conectando e lendo o arquivo...", 0);
@@ -525,20 +537,20 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     AVDictionary *open_opts = NULL;
     if (native_hls) {
         av_dict_set(&open_opts, "user_agent", "Nplay-Switch/1.0", 0);
-        av_dict_set(&open_opts, "tls_verify", "0", 0);
+        // Habilitar verificacao TLS
+        av_dict_set(&open_opts, "tls_verify", "1", 0);
         av_dict_set(&open_opts, "rw_timeout", "30000000", 0);
-        // O CDN comprime manifestos e responde Range com Content-Range baseado
-        // no tamanho comprimido. Isso truncava a playlist (ex.: 646 -> 447 B).
-        // FFmpeg recomenda estes dois flags para servidores HLS sem Range seguro:
-        // seekable cobre o manifesto inicial; http_seekable cobre os filhos.
         av_dict_set(&open_opts, "seekable", "0", 0);
         av_dict_set(&open_opts, "http_seekable", "0", 0);
-        // URLs assinadas carregam query string e podem nao terminar na extensao
-        // esperada pelo filtro conservador do demuxer HLS.
         av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
         av_dict_set(&open_opts, "reconnect", "1", 0);
         av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
+        av_dict_set(&open_opts, "reconnect_on_network_error", "1", 0);
+        av_dict_set(&open_opts, "reconnect_on_http_error", "4xx,5xx", 0);
         av_dict_set(&open_opts, "reconnect_delay_max", "5", 0);
+        av_dict_set(&open_opts, "reconnect_max_retries", "3", 0);
+        av_dict_set(&open_opts, "reconnect_delay_total_max", "15", 0);
+        av_dict_set(&open_opts, "respect_retry_after", "1", 0);
     }
     int rc = avformat_open_input(&fmt, native_hls ? url : (remote ? NULL : url), NULL, &open_opts);
     av_dict_free(&open_opts);
@@ -726,7 +738,20 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
         wall_start = av_gettime() / 1000000.0 - start_sec;
     }
 
+    // Heartbeat & Progress tracking are now managed by a separate thread
+    Uint32 last_heartbeat = SDL_GetTicks();
+    PlaybackHeartbeat *hb = (PlaybackHeartbeat *)req->userdata;
+
     while (running) {
+        Uint32 now_ticks = SDL_GetTicks();
+        if (now_ticks - last_heartbeat > 1000) {
+            last_heartbeat = now_ticks;
+            if (hb) {
+                SDL_AtomicSet(&hb->current_pos, (int)cur_pos);
+                SDL_AtomicSet(&hb->duration, (int)dur);
+            }
+        }
+
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN) {
@@ -1119,4 +1144,125 @@ int player_play(SDL_Renderer *ren, SDL_Joystick *joy, const char *url, int is_hl
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
     return playback_error ? playback_error : reached_end;
+}
+
+
+
+static int playback_heartbeat_thread(void *userdata) {
+    PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
+    int ticks = 0;
+    while (SDL_AtomicGet(&hb->running)) {
+        for (int i = 0; i < 40 && SDL_AtomicGet(&hb->running); i++) SDL_Delay(500);
+        if (!SDL_AtomicGet(&hb->running)) break;
+        
+        // Heartbeat
+        if (hb->session_id > 0) {
+            char path[112]; snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", hb->session_id);
+            api_send(path, "POST", "{}");
+        }
+        
+        // Progresso a cada ~20s
+        ticks++;
+        if (ticks % 1 == 0) { // O loop de 40*500ms da 20s
+            int pos = SDL_AtomicGet(&hb->current_pos);
+            int dur = SDL_AtomicGet(&hb->duration);
+            if (dur > 0 && pos > 5) {
+                char body[160];
+                snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}", hb->item_id, pos, dur);
+                api_send("/api/sync/progress", "POST", body);
+            }
+        }
+    }
+    return 0;
+}
+
+int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result) {
+    if (!request || !result) return -1;
+    memset(result, 0, sizeof(PlayerResult));
+
+    PlaybackHeartbeat hb = {0};
+    hb.item_id = request->item_id;
+    hb.session_id = request->session_id;
+    SDL_AtomicSet(&hb.current_pos, (int)request->start_sec);
+    SDL_AtomicSet(&hb.duration, 0);
+    
+    SDL_Thread *heartbeat = NULL;
+    SDL_AtomicSet(&hb.running, 1);
+    heartbeat = SDL_CreateThread(playback_heartbeat_thread, "play-heartbeat", &hb);
+
+    int retry_count = 0;
+    double current_pos = request->start_sec;
+    double dur = 0.0;
+    int final_rc = 0;
+
+    while (1) {
+        double out_pos = 0, out_dur = 0;
+        request->userdata = &hb; // Pass heartbeat to player_play_internal
+        int rc = player_play_internal(ren, joy, request, current_pos, &out_pos, &out_dur);
+        if (out_pos > 0) current_pos = out_pos;
+        if (out_dur > 0) dur = out_dur;
+
+        if (rc == 1) { // Terminou naturalmente
+            result->reason = EXIT_REASON_NATURAL;
+            final_rc = rc;
+            break;
+        } else if (rc == 0) { // Usuario saiu
+            result->reason = EXIT_REASON_USER;
+            final_rc = rc;
+            break;
+        } else { // Erro
+            // rc < 0
+            if (retry_count >= 3 || !request->resolve_cb) {
+                result->reason = EXIT_REASON_ERROR;
+                final_rc = rc;
+                break;
+            }
+
+            // Tentar re-resolver a URL (Watchdog fallback)
+            SDL_SetRenderDrawColor(ren, 15, 15, 15, 255);
+            SDL_RenderClear(ren);
+            draw_center_state(ren, "RECUPERANDO SESSAO", "Buscando nova rota de streaming...", 1);
+            SDL_RenderPresent(ren);
+
+            PlaybackSource new_src = {0};
+            if (request->resolve_cb(request->item_id, NULL, &new_src, request->userdata) == 0) {
+                // Sucesso ao renovar URL
+                if (new_src.play_url[0]) {
+                    // Substitui a URL do request
+                    static char play_url_buf[1536];
+                    snprintf(play_url_buf, sizeof(play_url_buf), "%s", new_src.play_url);
+                    request->url = play_url_buf;
+                    
+                    if (heartbeat && new_src.session_id != hb.session_id) {
+                        SDL_AtomicSet(&hb.running, 0);
+                        SDL_WaitThread(heartbeat, NULL);
+                        hb.session_id = new_src.session_id;
+                        SDL_AtomicSet(&hb.running, 1);
+                        heartbeat = SDL_CreateThread(playback_heartbeat_thread, "play-heartbeat", &hb);
+                    }
+                    retry_count++;
+                    continue;
+                }
+            }
+            // Falha ao re-resolver ou payload sem URL
+            result->reason = EXIT_REASON_ERROR;
+            final_rc = rc;
+            break;
+        }
+    }
+
+    result->position = current_pos;
+    result->duration = dur;
+
+    if (heartbeat) {
+        SDL_AtomicSet(&hb.running, 0);
+        SDL_WaitThread(heartbeat, NULL);
+    }
+    
+    // Save progress once at the end
+    if (request->progress_cb) {
+        request->progress_cb(request->item_id, (int)current_pos, (int)dur, request->userdata);
+    }
+
+    return final_rc;
 }
