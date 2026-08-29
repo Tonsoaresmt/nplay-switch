@@ -536,3 +536,44 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   MP4, Wi-Fi desligado por 5/20 s, pausa longa, seek, audio/legenda e Diagnostico.
   Nao alterar buffers com base apenas em impressao; guardar titulo, timestamp e
   `player_stats.txt` se ainda houver engasgo.
+
+## Paridade funcional com o site em 29/08/2026 (0.9.0)
+
+- O cliente foi novamente comparado com `C:/iptv` sem editar o backend, que estava
+  com mudancas do usuario. `tools/validate_site_contract.ps1` verifica os cinco
+  catalogos, busca contextual e rotas de refresh/failover/heartbeat. As rotas
+  publicadas foram sondadas sem credencial: health respondeu 200; search-v2,
+  anime-home, dorama, refresh, fail e heartbeat responderam 401, confirmando que
+  existem em producao e exigem autenticacao (nao sao contratos apenas locais).
+- A busca antiga `/api/catalog/search` foi substituida por `search-v2`. Filtros
+  agora separam Tudo, Filmes, Series, Animes e Doramas usando `search_scope`, como
+  o site. A consulta usa percent-encoding de cada byte UTF-8; acentos, `&`, `#`,
+  barras e outros caracteres nao podem mais truncar a URL.
+- Anime consome `continueWatching`, `updatedToday`, `updatedWeek`, `popular`,
+  favoritos, dublados, filmes e generos. O hero combina ate oito obras sem repetir
+  ids, priorizando atualizados hoje e populares. `Filmes de anime` continua sendo
+  tratado como serie porque o contrato real entrega essas obras em `series` com
+  episodios; nao converter essa rail para filme.
+- O detalhe de Serie/Anime/Dorama abre no primeiro episodio em andamento; sem um,
+  escolhe o primeiro nao concluido. O backend envia `completed` como numero 0/1 e
+  o cliente agora aceita numero ou booleano. Titulos enriquecidos (`ep_title`),
+  percentual e barra de progresso aparecem na lista; as areas recebem cabecalho
+  contextual NPLAY / SERIE, ANIME ou DORAMA.
+- Ao existir progresso, um modal oferece A Continuar, X Comecar do inicio e B
+  Cancelar; continuar e o padrao apos 6 s. Autoplay nao pula mais de forma brusca:
+  ao final, o proximo episodio fica selecionado e, se a preferencia estiver ativa,
+  aparece uma contagem de 5 s com A Assistir agora e B Ficar na lista.
+- O supervisor agora espelha o failover do site de forma conservadora. Depois do
+  reconnect nativo, quatro renovacoes e uma segunda falha da pipeline, chama uma
+  unica vez `/api/stream/session/:id/fail`. Nao repete a mutacao em timeout para
+  evitar penalizar varias fontes. Em sucesso tenta re-resolver o descritor completo,
+  pois o endpoint de fail atual devolve URL/source_id mas nao delivery/container.
+- Versao preparada: 0.9.0. `tools/validate_release.ps1` inclui o teste de contrato,
+  build limpo, protecoes TLS e simbolos HLS/HTTPS/NVTEGRA. Build local passou sem
+  erros ou avisos do aplicativo; NRO com 23.372.336 bytes e SHA-256
+  `1c968164e7990b934974710c7e5c4dabbae172bdba9fe724c02222cc4fd43b4a`.
+- Pendente obrigatorio no Switch: abrir um filme, serie, anime e dorama; pesquisar
+  titulo acentuado e com simbolo; confirmar retomada/reinicio; episodio visto e em
+  andamento; autoplay ligado/desligado; audio/legenda; HLS por 10+ min; queda de
+  Wi-Fi e failover. Se falhar, registrar area, obra, episodio, timestamp, mensagem
+  exata e Diagnostico/player_stats antes de alterar buffer ou fila de audio.

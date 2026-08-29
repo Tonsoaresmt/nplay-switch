@@ -1253,18 +1253,23 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             PlaybackSource renewed = {0};
             int renewed_ok = 0;
             int recovery_cancelled = 0;
-            for (int renew_try = 0; renew_try < 4 && !renewed_ok; renew_try++) {
+            int use_fallback = retry_count == 1 && request->fallback_cb;
+            int max_renew_tries = use_fallback ? 1 : 4;
+            PlayerRenewCallback recovery_cb = use_fallback ? request->fallback_cb : request->renew_cb;
+            for (int renew_try = 0; renew_try < max_renew_tries && !renewed_ok; renew_try++) {
                 SDL_SetRenderDrawColor(ren, 15, 15, 15, 255);
                 SDL_RenderClear(ren);
                 char detail[96];
-                snprintf(detail, sizeof(detail), "Reconectando com seguranca...  %d/4", renew_try + 1);
-                draw_center_state(ren, "RECUPERANDO SESSAO", detail, 1);
+                if (use_fallback) snprintf(detail, sizeof(detail), "A fonte atual nao respondeu. Buscando alternativa...");
+                else snprintf(detail, sizeof(detail), "Reconectando com seguranca...  %d/%d", renew_try + 1, max_renew_tries);
+                draw_center_state(ren, use_fallback ? "TENTANDO OUTRA FONTE" : "RECUPERANDO SESSAO", detail, 1);
                 SDL_RenderPresent(ren);
 
-                if (request->renew_cb(&active, &renewed, request->userdata) == 0 && renewed.play_url[0]) {
+                if (recovery_cb(&active, &renewed, request->userdata) == 0 && renewed.play_url[0]) {
                     renewed_ok = 1;
                     break;
                 }
+                if (use_fallback) break;
                 Uint32 wait_start = SDL_GetTicks();
                 int cancelled = 0;
                 while (SDL_GetTicks() - wait_start < (Uint32)(1000 + renew_try * 1000)) {
