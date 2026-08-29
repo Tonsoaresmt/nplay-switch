@@ -426,8 +426,17 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   contorno roxo discreto apenas no poster, titulo solto sobre o fundo e uma linha
   azul curta abaixo. As faixas solidas sob cards foram removidas.
 - O mesmo tratamento foi aplicado a Home, busca, Continuar assistindo,
-  Biblioteca, listas pessoais e relacionados. Status da Biblioteca deixou de ser
-  uma barra sobre toda a largura da capa e virou badge de canto.
+  Biblioteca, listas pessoais e Relacionados e miniaturas de episódios continuam quebrando a interface se
+  o título do filme/série exceder 3 linhas de largura em vez de truncar.
+
+## Rodada 0.8.0 - Sprint 1 (Sessão, HLS e Sobrevivência a Falhas)
+- O player agora é um `Session Player` (via `player_run`) isolado da chamada à API.
+- Segurança SSL reforçada no libcurl (1L/2L) e na reabertura de playlists via FFmpeg (tls_verify=1).
+- Máquina de estado para tolerância a falhas implementada: se o FFmpeg cair sem ser EOF, a tela congela com estado `RECUPERANDO SESSÃO` e uma re-resolução da URL é disparada.
+- O progresso de salvamento (histórico) e o _heartbeat_ de conexão da sessão foram migrados do `player_play` nativo e do `main.c` para dentro de uma thread isolada dedicada (`playback_heartbeat_thread`), parando de bloquear a _main_ thread por I/O síncrono e preservando o framerate de 60fps do decodificador de vídeo.
+- Construção e links (`api.h`) verificados, `.nro` compilado sem _warnings_ relativos às assinaturas antigas.
+- Versão e build empurrados para repositório (Git push). Aguardando testes pelo usuário no Nintendo Switch para confirmar resiliência da nova arquitetura e iniciar a Sprint 2 (Paridade de Experiência e Áudio/Legenda WebVTT).
+
 - Capas e backdrops agora compartilham `ui_cover`, equivalente a `object-fit:
   cover` do site. Historico, Biblioteca, listas, series e relacionados preservam
   a proporcao da imagem e recortam o excesso em vez de esticar a arte ou rostos.
