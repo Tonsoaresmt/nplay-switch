@@ -46,6 +46,7 @@ typedef struct {
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;
+    PlayerRenewCallback fallback_cb;
     PlayerHeartbeatCallback heartbeat_cb;
     void *userdata;
 } PlayerRequest;

@@ -181,6 +181,43 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     return out->play_url[0] ? 0 : -1;
 }
 
+int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
+    if (!current || !out || current->session_id <= 0) return -1;
+    *out = *current;
+    out->play_url[0] = '\0';
+    char path[128], body[80], url[1024];
+    snprintf(path, sizeof(path), "/api/stream/session/%d/fail", current->session_id);
+    snprintf(body, sizeof(body), "{\"source_id\":%d}", current->source_id);
+    snprintf(url, sizeof(url), "%s%s", BASE, path);
+    struct membuf resp = {0};
+    const char *err = NULL;
+    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
+                                    &resp, &err, 4L, 8L);
+    cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
+    if (code != 200 || !json) {
+        api_set_error(code, err, json);
+        if (json) cJSON_Delete(json);
+        membuf_free(&resp);
+        return -1;
+    }
+    parse_playback_source(json, out);
+    // O endpoint de fail troca a fonte, mas hoje nao devolve delivery/container.
+    // Tenta obter o descritor completo da nova fonte; se a rede cair justamente
+    // aqui, preserva a URL de fallback e o container anterior como ultimo recurso.
+    out->delivery = DELIVERY_UNKNOWN;
+    out->delivery_str[0] = '\0';
+    cJSON_Delete(json);
+    membuf_free(&resp);
+    if (!out->play_url[0]) return -1;
+    PlaybackSource complete = {0};
+    if (api_reresolve_playback(current->item_id,
+                               current->quality[0] ? current->quality : NULL,
+                               &complete) == 0 && complete.play_url[0]) {
+        *out = complete;
+    }
+    return 0;
+}
+
 int api_playback_heartbeat(int session_id) {
     if (session_id <= 0) return 0;
     char path[112], url[1024];

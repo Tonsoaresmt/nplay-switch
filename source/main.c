@@ -398,6 +398,20 @@ static void add_rail(const char *label, cJSON *arr, int is_series) {
     g_rails[g_railsN].arr = arr; g_rails[g_railsN].is_series = is_series;
     g_railsN++;
 }
+
+static void hero_pool_add(cJSON *pool, cJSON *items) {
+    if (!pool || !cJSON_IsArray(items)) return;
+    cJSON *item;
+    cJSON_ArrayForEach(item, items) {
+        if (arr_len(pool) >= 8) break;
+        int id = jint(item, "id"), duplicate = 0;
+        cJSON *existing;
+        cJSON_ArrayForEach(existing, pool) {
+            if (id > 0 && jint(existing, "id") == id) { duplicate = 1; break; }
+        }
+        if (!duplicate) cJSON_AddItemReferenceToArray(pool, item);
+    }
+}
 // Carrega a landing da aba (0..4). Cada aba vira hero + rails, como no app de PC.
 static void load_landing(int tab) {
     if (g_land) { cJSON_Delete(g_land); g_land = NULL; }
@@ -431,10 +445,21 @@ static void load_landing(int tab) {
         sh = cJSON_GetObjectItem(g_land, "liveShelves");
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
     } else if (tab == 3) {   // anime-home
-        g_heroesArr = cJSON_GetObjectItem(g_land, "updated");
-        add_rail("Minha lista",       cJSON_GetObjectItem(g_land, "favoritos"), 1);
-        add_rail("Recem-atualizados", cJSON_GetObjectItem(g_land, "updated"), 1);
-        add_rail("Em alta",           cJSON_GetObjectItem(g_land, "popular"), 1);
+        g_heroesArr = cJSON_CreateArray();
+        hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "updatedToday"));
+        hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "popular"));
+        hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "updatedWeek"));
+        hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "updated"));
+        cJSON_AddItemToObject(g_land, "_switchHeroes", g_heroesArr);
+        add_rail("Continuar assistindo", cJSON_GetObjectItem(g_land, "continueWatching"), 1);
+        add_rail("Minha lista",          cJSON_GetObjectItem(g_land, "favoritos"), 1);
+        cJSON *today = cJSON_GetObjectItem(g_land, "updatedToday");
+        cJSON *week = cJSON_GetObjectItem(g_land, "updatedWeek");
+        add_rail("Atualizados hoje", today, 1);
+        add_rail("Atualizados esta semana", week, 1);
+        if (arr_len(today) == 0 && arr_len(week) == 0)
+            add_rail("Atualizacoes recentes", cJSON_GetObjectItem(g_land, "updated"), 1);
+        add_rail("Populares",          cJSON_GetObjectItem(g_land, "popular"), 1);
         add_rail("Dublados",          cJSON_GetObjectItem(g_land, "dublados"), 1);
         add_rail("Filmes de anime",   cJSON_GetObjectItem(g_land, "filmes"), 1);
         cJSON *gs = cJSON_GetObjectItem(g_land, "genreShelves"), *e;
@@ -477,18 +502,76 @@ static int on_player_renew(const PlaybackSource *current, PlaybackSource *out, v
                                   current->quality[0] ? current->quality : NULL, out);
 }
 
+static int on_player_fallback(const PlaybackSource *current, PlaybackSource *out, void *u) {
+    (void)u;
+    return api_fail_playback(current, out);
+}
+
+static void format_short_time(int seconds, char *out, size_t cap) {
+    if (seconds < 0) seconds = 0;
+    int hours = seconds / 3600;
+    int minutes = (seconds % 3600) / 60;
+    int secs = seconds % 60;
+    if (hours > 0) snprintf(out, cap, "%d:%02d:%02d", hours, minutes, secs);
+    else snprintf(out, cap, "%d:%02d", minutes, secs);
+}
+
+// 1 continua, 0 recomeca, -1 cancela. Continuar e o padrao depois de 6 s,
+// como no site, mas nenhuma escolha e aplicada antes de o modal aparecer.
+static int prompt_resume_playback(const char *title, int position_seconds) {
+    Uint32 deadline = SDL_GetTicks() + 6000;
+    while (g_running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; return -1; }
+            if (event.type != SDL_JOYBUTTONDOWN) continue;
+            if (event.jbutton.button == JOY_A) return 1;
+            if (event.jbutton.button == JOY_X) return 0;
+            if (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS) return -1;
+        }
+        Uint32 now = SDL_GetTicks();
+        if ((Sint32)(deadline - now) <= 0) return 1;
+        int remaining = (int)((deadline - now + 999) / 1000);
+        char at[32], countdown[80]; format_short_time(position_seconds, at, sizeof(at));
+        snprintf(countdown, sizeof(countdown), "Continuando automaticamente em %d...", remaining);
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+        ui_header("NPLAY PLAYER", "Retomar reproducao", "B Cancelar");
+        ui_panel(238, 178, WIN_W - 476, 350, C_ACC);
+        text_draw(gRen, "CONTINUAR ASSISTINDO", 282, 218, C_ACC, 0);
+        text_clip(title && title[0] ? title : "Sua obra", 282, 258, C_TEXT, 1, WIN_W - 564);
+        char point[96]; snprintf(point, sizeof(point), "Voce parou em %s", at);
+        text_draw(gRen, point, 282, 310, C_MUT, 0);
+        fill_rect(282, 370, 300, 58, C_ACC);
+        text_center_at("A  Continuar", 282, 300, 385, C_TEXT, 0);
+        fill_rect(606, 370, 300, 58, C_CARD);
+        text_center_at("X  Comecar do inicio", 606, 300, 385, C_TEXT, 0);
+        text_draw(gRen, countdown, 282, 462, C_MUT, 0);
+        fill_rect(282, 494, (WIN_W - 564) * (6 - remaining) / 6, 4, C_ACC2);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    return -1;
+}
+
 // Toca uma URL retomando de onde parou e salvando o progresso ("continuar
 // assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
 // Retorna 1 se o video terminou naturalmente (p/ auto-play do proximo).
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls) {
     double start = 0;
+    int completed = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
     cJSON *pr = api_get(p);
     if (pr) {
         cJSON *prog = cJSON_GetObjectItem(pr, "progress");
         cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
         if (ps && cJSON_IsNumber(ps)) start = ps->valuedouble;
+        completed = prog ? jint(prog, "completed") : 0;
         cJSON_Delete(pr);
+    }
+    if (!completed && start > 10) {
+        int choice = prompt_resume_playback(title, (int)start);
+        if (choice < 0) return 0;
+        if (choice == 0) start = 0;
     }
     
     PlayerRequest req = {0};
@@ -546,13 +629,20 @@ int resolve_and_play(int itemId, const char *title) {
         toast("Este conteudo ainda nao esta disponivel neste dispositivo");
     } else if (src.play_url[0]) {
         double start = 0;
+        int completed = 0;
         char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
         cJSON *pr = api_get(p);
         if (pr) {
             cJSON *prog = cJSON_GetObjectItem(pr, "progress");
             cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
             if (ps && cJSON_IsNumber(ps)) start = ps->valuedouble;
+            completed = prog ? jint(prog, "completed") : 0;
             cJSON_Delete(pr);
+        }
+        if (!completed && start > 10) {
+            int choice = prompt_resume_playback(title, (int)start);
+            if (choice < 0) { if (src.session_id > 0) api_stop_playback(itemId); return 0; }
+            if (choice == 0) start = 0;
         }
 
         PlayerRequest req = {0};
@@ -570,6 +660,7 @@ int resolve_and_play(int itemId, const char *title) {
         req.start_sec = start;
         req.progress_cb = on_player_progress;
         req.renew_cb = on_player_renew;
+        req.fallback_cb = on_player_fallback;
         req.heartbeat_cb = on_player_heartbeat;
         req.userdata = NULL;
 
@@ -599,12 +690,52 @@ int resolve_and_play(int itemId, const char *title) {
     
     return rc;
 }
+static int episode_completed(cJSON *episode) {
+    return jint(episode, "completed") != 0 || cJSON_IsTrue(cJSON_GetObjectItem(episode, "completed"));
+}
+
+static int episode_started(cJSON *episode) {
+    return !episode_completed(episode) && jint(episode, "position_seconds") > 10;
+}
+
+static void select_series_resume_target(cJSON *detail) {
+    cJSON *series = detail ? cJSON_GetObjectItem(detail, "series") : NULL;
+    cJSON *seasons = detail ? cJSON_GetObjectItem(detail, "seasons") : NULL;
+    int grouped = arr_len(cJSON_GetObjectItem(series, "season_group")) > 1;
+    int best_season = 0, best_local = 0, best_flat = 0;
+    int fallback_season = 0, fallback_local = 0, fallback_flat = 0;
+    int have_started = 0, have_fallback = 0, season_index = 0, flat_index = 0;
+    cJSON *season;
+    cJSON_ArrayForEach(season, seasons) {
+        int local = 0;
+        cJSON *episode;
+        cJSON_ArrayForEach(episode, season) {
+            if (!have_fallback && !episode_completed(episode)) {
+                fallback_season = season_index; fallback_local = local;
+                fallback_flat = flat_index; have_fallback = 1;
+            }
+            if (!have_started && episode_started(episode)) {
+                best_season = season_index; best_local = local;
+                best_flat = flat_index; have_started = 1;
+            }
+            local++; flat_index++;
+        }
+        season_index++;
+    }
+    if (!have_started && have_fallback) {
+        best_season = fallback_season; best_local = fallback_local; best_flat = fallback_flat;
+    }
+    g_seasonIdx = best_season;
+    g_epSel = grouped ? best_flat : best_local;
+    g_epScroll = 0;
+}
+
 static void open_series(int id) {
     if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
     char p[96]; snprintf(p, sizeof(p), "/api/catalog/series/%d", id);
     g_ser = api_get(p);
     g_seasonIdx = 0; g_epSel = 0; g_epScroll = 0;
-    if (g_ser) g_screen = SC_SERIES;
+    if (g_ser) { select_series_resume_target(g_ser); g_screen = SC_SERIES; }
     else toast("Nao consegui abrir a serie");
 }
 static void open_item(cJSON *item, int is_series) {
@@ -844,7 +975,7 @@ static void load_dl_done(int series_id) {
     cJSON_ArrayForEach(arr, seasons) {
         cJSON *ep;
         cJSON_ArrayForEach(ep, arr) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed")) && g_dlDoneN < 256) g_dlDone[g_dlDoneN++] = jint(ep, "id");
+            if (episode_completed(ep) && g_dlDoneN < 256) g_dlDone[g_dlDoneN++] = jint(ep, "id");
         }
     }
     cJSON_Delete(sd);
@@ -1060,10 +1191,11 @@ static int dl_play(cJSON *job) {
 // para canais ao vivo. A camada abaixo tipa e filtra sem copiar o JSON recebido.
 static int srch_matches(cJSON *item, int is_series, int filter) {
     if (filter == 0) return 1;
-    if (filter == 2) return is_series;
-    if (is_series) return 0;
-    const char *kind = jstr(item, "kind");
-    return filter == 3 ? (kind && !strcmp(kind, "live")) : (!kind || strcmp(kind, "live"));
+    const char *scope = jstr(item, "search_scope");
+    if (filter == 3) return scope && !strcmp(scope, "anime");
+    if (filter == 4) return scope && !strcmp(scope, "dorama");
+    if (filter == 2) return is_series && (!scope || !strcmp(scope, "series"));
+    return !is_series && (!scope || !strcmp(scope, "movie"));
 }
 static int srch_count_for(int filter) {
     if (!g_search) return 0;
@@ -1084,14 +1216,30 @@ static cJSON *srch_at(int wanted, int *is_series) {
     }
     *is_series = 0; return NULL;
 }
+static void url_encode_utf8(const char *input, char *output, size_t capacity) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t used = 0;
+    if (!output || capacity == 0) return;
+    for (const unsigned char *p = (const unsigned char *)(input ? input : ""); *p; p++) {
+        int safe = (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                   (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.' || *p == '~';
+        size_t needed = safe ? 1 : 3;
+        if (used + needed >= capacity) break;
+        if (safe) output[used++] = (char)*p;
+        else {
+            output[used++] = '%';
+            output[used++] = hex[*p >> 4];
+            output[used++] = hex[*p & 15];
+        }
+    }
+    output[used] = '\0';
+}
 static void do_search(void) {
     char q[128];
     if (prompt_text("Buscar filme, serie, anime, dorama...", q, sizeof(q), 0) != 0) return;
     if (g_search) { cJSON_Delete(g_search); g_search = NULL; }
-    char enc[300]; int k = 0;
-    for (int i = 0; q[i] && k < 294; i++) { if (q[i] == ' ') { enc[k++] = '%'; enc[k++] = '2'; enc[k++] = '0'; } else enc[k++] = q[i]; }
-    enc[k] = 0;
-    char path[360]; snprintf(path, sizeof(path), "/api/catalog/search?q=%s", enc);
+    char enc[400]; url_encode_utf8(q, enc, sizeof(enc));
+    char path[460]; snprintf(path, sizeof(path), "/api/catalog/search-v2?q=%s", enc);
     g_search = api_get(path);
     g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
     snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", q);
@@ -1225,9 +1373,9 @@ static void draw_search(void) {
     text_clip(hd, 40, 88, C_TEXT, 1, 850);
     char count[64]; snprintf(count, sizeof(count), "%d resultado%s", n, n == 1 ? "" : "s");
     text_right(count, WIN_W - 40, 94, C_MUT, 0);
-    static const char *filters[] = { "Tudo", "Filmes", "Series", "Ao vivo" };
+    static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes", "Doramas" };
     int chip_x = 40;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         int count = srch_count_for(i); char label[48];
         snprintf(label, sizeof(label), "%s  %d", filters[i], count);
         int tw = 0, th = 0; text_cached(gRen, label, C_TEXT, 0, &tw, &th);
@@ -1292,12 +1440,20 @@ static const char *ep_clean(const char *t) {
     }
     return t ? t : "Episodio";
 }
+static const char *ep_display_title(cJSON *episode) {
+    const char *title = jstr(episode, "ep_title");
+    if (!title || !title[0]) title = jstr(episode, "title");
+    return ep_clean(title);
+}
 static void draw_series(void) {
     cJSON *s = ser_obj();
     int sid = jint(s, "id");
     int fav = is_fav_series(sid);
     const char *title = jstr(s, "title"); if (!title) title = "Serie";
-    ui_header("NPLAY / SERIE", title, "B Voltar");
+    const char *section = jstr(s, "section");
+    const char *area = section && !strcmp(section, "anime") ? "NPLAY / ANIME" :
+                       section && !strcmp(section, "dorama") ? "NPLAY / DORAMA" : "NPLAY / SERIE";
+    ui_header(area, title, "B Voltar");
 
     int LX = 48, LW = 212;
     ui_panel(32, 88, 244, 548, C_ACC);
@@ -1344,7 +1500,7 @@ static void draw_series(void) {
                    WIN_W - 276, 236, 99, C_TEXT, 0);
     fill_rect(RX, 148, REND - RX, 2, C_CARD);
 
-    int listTop = 168, rowH = 40, visible = (WIN_H - listTop - 44) / rowH;
+    int listTop = 168, rowH = 44, visible = (WIN_H - listTop - 44) / rowH;
     if (g_epSel < g_epScroll) g_epScroll = g_epSel;
     if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
     for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
@@ -1352,10 +1508,19 @@ static void draw_series(void) {
         int yy = listTop + (i - g_epScroll) * rowH;
         if (i == g_epSel) { fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD); fill_rect(RX - 8, yy - 5, 4, rowH - 2, C_ACC2); }
         int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
-        int done = cJSON_IsTrue(cJSON_GetObjectItem(ep, "completed"));
+        int done = episode_completed(ep);
+        int pos = jint(ep, "position_seconds"), duration = jint(ep, "duration_seconds");
+        int progress = (!done && pos > 10 && duration > 0) ? pos * 100 / duration : 0;
+        if (progress > 99) progress = 99;
         text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : (done ? C_GREEN : C_MUT), 0);
-        text_clip(ep_clean(jstr(ep, "title")), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 110);
-        if (done) text_draw(gRen, "visto", REND - 60, yy, C_GREEN, 0);
+        text_clip(ep_display_title(ep), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 130);
+        if (done) text_draw(gRen, "Visto", REND - 70, yy, C_GREEN, 2);
+        else if (progress > 0) {
+            char pct[16]; snprintf(pct, sizeof(pct), "%d%%", progress);
+            text_draw(gRen, pct, REND - 62, yy, C_ACC2, 2);
+            fill_rect(RX + 52, yy + 29, REND - RX - 138, 3, C_CARD);
+            fill_rect(RX + 52, yy + 29, (REND - RX - 138) * progress / 100, 3, C_ACC);
+        }
     }
     // barra de rolagem (ha muitos episodios)
     if (nep > visible) {
@@ -1393,7 +1558,7 @@ static void draw_dlmenu(void) {
         if (chk) fill_rect(53, yy + 6, 12, 12, C_ACC);
         int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "Ep %d", en > 0 ? en : i + 1);
         text_draw(gRen, nb, 86, yy, sel ? C_ACC : C_MUT, 0);
-        text_clip(ep_clean(jstr(ep, "title")), 170, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 240);
+        text_clip(ep_display_title(ep), 170, yy, sel ? C_TEXT : C_MUT, 0, WIN_W - 240);
     }
     char foot[140]; snprintf(foot, sizeof(foot), "%d selecionado%s    A Marcar    X Todos    Y Salvar selecionados    B Cancelar", cnt, cnt == 1 ? "" : "s");
     ui_footer(foot);
@@ -1829,7 +1994,7 @@ static void input_search(int b) {
     if (b == JOY_Y) { do_search(); return; }
     if (b == JOY_ZL || b == JOY_ZR) {
         int step = b == JOY_ZR ? 1 : -1;
-        g_srchFilter = (g_srchFilter + step + 4) % 4;
+        g_srchFilter = (g_srchFilter + step + 5) % 5;
         g_srchSel = 0; g_srchScroll = 0;
         return;
     }
@@ -1843,6 +2008,49 @@ static void input_search(int b) {
     if (rowBot - g_srchScroll > WIN_H - 52) g_srchScroll = rowBot - (WIN_H - 52) + 16;
     if (rowTop - g_srchScroll < 184) g_srchScroll = rowTop - 184;
     if (g_srchScroll < 0) g_srchScroll = 0;
+}
+static int prompt_next_episode(cJSON *episode) {
+    Uint32 deadline = SDL_GetTicks() + 5000;
+    cJSON *series = ser_obj();
+    while (g_running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; return 0; }
+            if (event.type != SDL_JOYBUTTONDOWN) continue;
+            if (event.jbutton.button == JOY_A) return 1;
+            if (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS) return 0;
+        }
+        Uint32 now = SDL_GetTicks();
+        if ((Sint32)(deadline - now) <= 0) return 1;
+        int remaining = (int)((deadline - now + 999) / 1000);
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+        SDL_Texture *backdrop = cover_get(jstr(series, "backdrop"));
+        if (!backdrop) backdrop = cover_get(jstr(series, "logo"));
+        if (backdrop) {
+            SDL_Rect bg = {0, 0, WIN_W, WIN_H}; ui_cover(backdrop, &bg);
+            fill_rect(0, 0, WIN_W, WIN_H, (SDL_Color){7, 9, 15, 224});
+        }
+        ui_header("NPLAY PLAYER", "Proximo episodio", "B Cancelar");
+        ui_panel(210, 170, WIN_W - 420, 360, C_ACC2);
+        text_draw(gRen, "A SEGUIR", 258, 212, C_ACC2, 0);
+        text_clip(jstr(series, "title") ? jstr(series, "title") : "Serie",
+                  258, 252, C_TEXT, 1, WIN_W - 516);
+        char number[64];
+        snprintf(number, sizeof(number), "Temporada %d  |  Episodio %d",
+                 jint(episode, "season") > 0 ? jint(episode, "season") : 1,
+                 jint(episode, "episode") > 0 ? jint(episode, "episode") : g_epSel + 1);
+        text_draw(gRen, number, 258, 306, C_MUT, 0);
+        text_clip(ep_display_title(episode), 258, 346, C_TEXT, 0, WIN_W - 516);
+        char countdown[80]; snprintf(countdown, sizeof(countdown), "Comecando em %d segundos", remaining);
+        text_draw(gRen, countdown, 258, 408, C_MUT, 0);
+        fill_rect(258, 456, 300, 54, C_ACC);
+        text_center_at("A  Assistir agora", 258, 300, 469, C_TEXT, 0);
+        fill_rect(582, 456, 300, 54, C_CARD);
+        text_center_at("B  Ficar na lista", 582, 300, 469, C_TEXT, 0);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    return 0;
 }
 static void input_series(int b) {
     if (g_dlmenu) { input_dlmenu(b); return; }   // menu "baixar episodios" aberto
@@ -1870,9 +2078,14 @@ static void input_series(int b) {
         while (idx < ser_nep()) {
             cJSON *ep = ser_ep_at(idx); if (!ep) break;
             g_epSel = idx;
-            int ended = resolve_and_play(jint(ep, "id"), ep_clean(jstr(ep, "title")));
-            if (ended != 1 || !g_pref_autoplay) break;
-            idx++;
+            int ended = resolve_and_play(jint(ep, "id"), ep_display_title(ep));
+            if (ended != 1) break;
+            int next = idx + 1;
+            if (next >= ser_nep()) break;
+            g_epSel = next;
+            cJSON *next_ep = ser_ep_at(next);
+            if (!g_pref_autoplay || !next_ep || !prompt_next_episode(next_ep)) break;
+            idx = next;
         }
     }
 }

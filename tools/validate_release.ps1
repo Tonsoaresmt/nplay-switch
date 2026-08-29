@@ -20,6 +20,7 @@ Assert-True ($sources -notmatch 'request->userdata\s*=') 'O player voltou a sobr
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
+Assert-True ($apiSource -match '/api/stream/session/%d/fail') 'Failover para outra fonte nao esta implementado.'
 Assert-True ($apiSource -match '/api/stream/session/%d/heartbeat') 'Heartbeat da sessao nao esta implementado.'
 Assert-True ($apiSource -match '/api/sync/progress') 'Progresso periodico nao esta implementado.'
 Assert-True ($apiSource -match 'api_reresolve_playback') 'Nova resolucao curta para recuperacao nao esta implementada.'
@@ -28,6 +29,8 @@ $tlsPatch = Get-Content tools/ffmpeg-libnx-tls-hostname.patch -Raw
 $ffmpegBuild = Get-Content tools/build_ffmpeg_https.sh -Raw
 Assert-True ($tlsPatch -match 'SslVerifyOption_PeerCa \| SslVerifyOption_HostName') 'Patch TLS nao valida CA e hostname juntos.'
 Assert-True ($ffmpegBuild -match 'ffmpeg-libnx-tls-hostname\.patch') 'Build do FFmpeg nao aplica o patch TLS local.'
+
+& (Join-Path $PSScriptRoot 'validate_site_contract.ps1')
 
 if (-not $SkipBuild) {
     & make clean
