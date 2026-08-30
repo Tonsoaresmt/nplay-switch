@@ -17,12 +17,17 @@ Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYPEER\s*,\s*0L') 'SSL_VERIFYPE
 Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYHOST\s*,\s*0L') 'SSL_VERIFYHOST inseguro encontrado.'
 Assert-True ($sources -notmatch 'tls_verify"\s*,\s*"0') 'tls_verify inseguro encontrado.'
 Assert-True ($sources -notmatch 'request->userdata\s*=') 'O player voltou a sobrescrever userdata do chamador.'
-Assert-True ($sources -match 'nplay_curl_avio_open\(url, req->playback\.source_bytes\)') 'MP4 remoto nao recebe o tamanho informado pela API.'
+Assert-True ($sources -match 'AVIOContext \*avio = NULL') 'MP4 remoto voltou ao AVIO por blocos que falha no Switch.'
+Assert-True ($sources -match 'avformat_open_input\(&fmt, url, NULL') 'Fonte remota nao usa o HTTPS nativo do FFmpeg.'
 Assert-True ($sources -match 'CURLOPT_ACCEPT_ENCODING, "identity"') 'Ranges do MP4 podem ser alterados por compressao HTTP.'
 Assert-True ($sources -match 'http_multiple", "1"') 'HLS nao habilita conexoes simultaneas para video/audio.'
 Assert-True ($sources -match 'http_persistent", "1"') 'HLS nao reutiliza conexoes entre segmentos.'
+Assert-True ($sources -match 'fmt->video_codec_id = AV_CODEC_ID_H264') 'R2 sem CODECS voltou a exigir sondagem completa de video.'
+Assert-True ($sources -match 'fmt->audio_codec_id = AV_CODEC_ID_AAC') 'R2 sem CODECS voltou a exigir sondagem completa de audio.'
 Assert-True ($sources -match 'SDL_UpdateNVTexture') 'Player perdeu o upload NV12 direto do decoder por hardware.'
 Assert-True ($sources -match 'attempt\.playback = active') 'Tentativa recuperada nao recebe o descritor atualizado.'
+Assert-True ($sources -match 'SDL_JoystickGetButton\(watch->joy, JOY_B\)') 'Preparacao do player nao pode ser cancelada por B.'
+Assert-True ($sources -match 'pipeline_ready') 'Heartbeat pode voltar a disputar rede durante a abertura.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'

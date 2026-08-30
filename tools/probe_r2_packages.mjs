@@ -1,15 +1,19 @@
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 // Auditoria somente leitura: nao imprime URLs, tokens ou segredos. Confirma os
 // pacotes locais registrados no backend e mede abertura/vazao do delivery R2.
 
-const backend = process.argv[2] || 'C:/iptv';
+const backend = resolve(process.argv[2] || 'C:/iptv');
+// O backend carrega .env/configuracao a partir do cwd. Sem isso o auditor pode
+// assinar com o segredo default e produzir um falso HTTP 403.
+process.chdir(backend);
 const { config } = await import(pathToFileURL(join(backend, 'src/config.js')));
 const { decrypt, signMediaDeliveryToken } = await import(pathToFileURL(join(backend, 'src/lib/crypto.js')));
-const db = new DatabaseSync(config.dbPath, { readOnly: true });
+const databasePath = isAbsolute(config.dbPath) ? config.dbPath : resolve(backend, config.dbPath);
+const db = new DatabaseSync(databasePath, { readOnly: true });
 
 const rows = db.prepare(`
   SELECT ci.kind, ci.title, s.stream_url_enc
@@ -58,6 +62,10 @@ for (const row of selected) {
     throw new Error(`${row.kind}: manifesto principal invalido (HTTP ${master.response.status}, ${master.text.length} bytes)`);
   }
   const masterRefs = references(master.text);
+  const variant = master.text.split(/\r?\n/).find((line) => line.startsWith('#EXT-X-STREAM-INF')) || '';
+  if (!/RESOLUTION=\d+x\d+/i.test(variant)) {
+    throw new Error(`${row.kind}: master sem RESOLUTION para abertura rapida`);
+  }
   const childRefs = masterRefs.filter((value) => /\.m3u8(?:[?#]|$)/i.test(value));
   let playlists = 0, objects = 0;
   for (const ref of childRefs) {
@@ -77,7 +85,7 @@ for (const row of selected) {
     await response.arrayBuffer();
     objects++;
   }
-  console.log(`${row.kind}: master=${master.text.length}B playlists=${playlists} objetos=${objects} status=OK`);
+  console.log(`${row.kind}: master=${master.text.length}B playlists=${playlists} objetos=${objects} codecs=${/CODECS=/i.test(variant) ? 'sim' : 'nao'} status=OK`);
 
   const started = Date.now();
   const probe = spawnSync(config.storage.ffprobePath || 'ffprobe', [

@@ -62,11 +62,23 @@ static void player_error_message(const char *message) {
 
 typedef struct {
     int64_t deadline_us;
+    SDL_Joystick *joy;
+    int cancelled;
 } PlayerOpenDeadline;
 
 static int player_open_interrupted(void *userdata) {
     PlayerOpenDeadline *watch = (PlayerOpenDeadline *)userdata;
-    return watch && watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us;
+    if (!watch) return 0;
+    // avformat_open_input/find_stream_info sao sincronas. Bombeie o controle
+    // dentro do callback de interrupcao para B/- realmente funcionarem mesmo
+    // enquanto FFmpeg espera rede ou uma rendition HLS.
+    SDL_PumpEvents();
+    if (watch->joy && (SDL_JoystickGetButton(watch->joy, JOY_B) ||
+                       SDL_JoystickGetButton(watch->joy, JOY_MINUS))) {
+        watch->cancelled = 1;
+        return 1;
+    }
+    return watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us;
 }
 
 static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
@@ -523,6 +535,7 @@ typedef struct {
     SDL_atomic_t current_pos;
     SDL_atomic_t duration;
     SDL_atomic_t force_progress;
+    SDL_atomic_t pipeline_ready;
     PlayerProgressCallback progress_cb;
     PlayerHeartbeatCallback heartbeat_cb;
     void *callback_userdata;
@@ -530,7 +543,6 @@ typedef struct {
 static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *req,
                                 PlaybackHeartbeat *heartbeat, double start_sec,
                                 double *out_pos, double *out_dur) {
-    (void)joy;
     g_player_last_error[0] = '\0';
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
@@ -540,7 +552,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     const char *title = req->title;
     // Tela de preparacao enquanto abre a conexao e le os metadados.
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
-    draw_center_state(ren, "PREPARANDO VIDEO", "Conectando e lendo o arquivo...", 0);
+    draw_center_state(ren, "PREPARANDO VIDEO", "Conectando...  |  B para cancelar", 0);
     SDL_RenderPresent(ren);
 
     // HTTPS usa o AVIO do libcurl; arquivos sdmc:/ usam o protocolo local do
@@ -550,36 +562,39 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // AVIO libcurl representa um unico arquivo, portanto HLS usa os protocolos
     // http+tls nativos desta build do FFmpeg. MP4/MKV remoto permanece no AVIO.
     int native_hls = remote && is_hls;
-    AVIOContext *avio = (remote && !native_hls)
-        ? nplay_curl_avio_open(url, req->playback.source_bytes) : NULL;
-    if (remote && !native_hls && !avio) { player_error_message("memoria insuficiente para abrir a rede"); return -1; }
+    // A build local ja possui HTTPS+TLS validado. Use o protocolo nativo tambem
+    // para MP4: ele conhece Range/seek do MOV e elimina o AVIO por blocos que no
+    // hardware ainda encerrava anime com `abrir fonte: End of file`.
+    AVIOContext *avio = NULL;
     AVFormatContext *fmt = avformat_alloc_context();
     if (!fmt) { nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1; }
     if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
     // A sondagem padrao pode ler cinco segundos/5 MB de CADA rendition HLS.
     // O R2 publica video, audios e legendas em playlists separadas; limite o
     // trabalho inicial sem impedir a leitura dos headers fMP4.
-    fmt->probesize = native_hls ? 4 * 1024 * 1024 : 5 * 1024 * 1024;
-    fmt->max_analyze_duration = native_hls ? 3000000 : 5000000;
-    fmt->fps_probe_size = native_hls ? 12 : -1;
-    PlayerOpenDeadline open_watch = { av_gettime_relative() + 35000000LL };
+    fmt->probesize = native_hls ? 2 * 1024 * 1024 : 5 * 1024 * 1024;
+    fmt->max_analyze_duration = native_hls ? 1500000 : 5000000;
+    fmt->fps_probe_size = native_hls ? 6 : -1;
+    if (native_hls) av_opt_set_int(fmt, "max_probe_packets", 64, 0);
+    if (native_hls && req->delivery == DELIVERY_R2) {
+        // O empacotador R2 e fixo em H.264/AAC/WebVTT, mas manifests antigos
+        // reparados nao trazem CODECS. Sem esta informacao o Switch tenta inferir
+        // codec abrindo todas as playlists antes do primeiro quadro.
+        fmt->video_codec_id = AV_CODEC_ID_H264;
+        fmt->audio_codec_id = AV_CODEC_ID_AAC;
+        fmt->subtitle_codec_id = AV_CODEC_ID_WEBVTT;
+    }
+    PlayerOpenDeadline open_watch = {
+        av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL), joy, 0
+    };
     fmt->interrupt_callback.callback = player_open_interrupted;
     fmt->interrupt_callback.opaque = &open_watch;
 
     AVDictionary *open_opts = NULL;
-    if (native_hls) {
+    if (remote) {
         av_dict_set(&open_opts, "user_agent", "Nplay-Switch/1.0", 0);
-        // Habilitar verificacao TLS
         av_dict_set(&open_opts, "tls_verify", "1", 0);
         av_dict_set(&open_opts, "rw_timeout", "30000000", 0);
-        av_dict_set(&open_opts, "seekable", "0", 0);
-        av_dict_set(&open_opts, "http_seekable", "0", 0);
-        av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
-        // O pacote R2 tem playlists independentes de video/audio. Conexoes
-        // persistentes e simultaneas evitam um novo TLS a cada segmento/faixa.
-        av_dict_set(&open_opts, "http_persistent", "1", 0);
-        av_dict_set(&open_opts, "http_multiple", "1", 0);
-        av_dict_set(&open_opts, "seg_max_retry", "3", 0);
         av_dict_set(&open_opts, "reconnect", "1", 0);
         av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
         av_dict_set(&open_opts, "reconnect_on_network_error", "1", 0);
@@ -588,24 +603,75 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         av_dict_set(&open_opts, "reconnect_max_retries", "3", 0);
         av_dict_set(&open_opts, "reconnect_delay_total_max", "15", 0);
         av_dict_set(&open_opts, "respect_retry_after", "1", 0);
+        if (native_hls) {
+            av_dict_set(&open_opts, "seekable", "0", 0);
+            av_dict_set(&open_opts, "http_seekable", "0", 0);
+            av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
+            // O pacote R2 tem playlists independentes de video/audio. Conexoes
+            // persistentes e simultaneas evitam um novo TLS a cada segmento/faixa.
+            av_dict_set(&open_opts, "http_persistent", "1", 0);
+            av_dict_set(&open_opts, "http_multiple", "1", 0);
+            av_dict_set(&open_opts, "seg_max_retry", "3", 0);
+        } else {
+            av_dict_set(&open_opts, "seekable", "1", 0);
+            av_dict_set(&open_opts, "multiple_requests", "1", 0);
+        }
     }
-    int rc = avformat_open_input(&fmt, native_hls ? url : (remote ? NULL : url), NULL, &open_opts);
+    int rc = avformat_open_input(&fmt, url, NULL, &open_opts);
     av_dict_free(&open_opts);
     if (rc != 0) {
-        if (rc == AVERROR_EXIT) player_error_message(native_hls ? "abrir playlist HLS: tempo esgotado" : "abrir fonte: tempo esgotado");
+        if (open_watch.cancelled) player_error_message("Abertura cancelada");
+        else if (rc == AVERROR_EXIT) player_error_message(native_hls ? "abrir playlist HLS: tempo esgotado" : "abrir fonte: tempo esgotado");
         else player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc);
-        nplay_curl_avio_close(avio); return -10;
+        nplay_curl_avio_close(avio); return open_watch.cancelled ? -11 : -10;
     }
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
     draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
     SDL_RenderPresent(ren);
-    open_watch.deadline_us = av_gettime_relative() + 35000000LL;
-    rc = avformat_find_stream_info(fmt, NULL);
+    open_watch.deadline_us = av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL);
+    // Na abertura HLS, priorize video e um audio. Legendas e audios alternativos
+    // continuam enumerados/restaurados depois, mas nao podem segurar o primeiro
+    // quadro enquanto FFmpeg tenta sondar todas as 5-6 playlists do R2.
+    enum AVDiscard saved_discard[64];
+    unsigned saved_count = fmt->nb_streams < 64 ? fmt->nb_streams : 64;
+    int probe_audio = -1;
+    if (native_hls) {
+        for (unsigned i = 0; i < saved_count; i++) {
+            saved_discard[i] = fmt->streams[i]->discard;
+            if (probe_audio < 0 && fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+                probe_audio = (int)i;
+        }
+        for (unsigned i = 0; i < saved_count; i++) {
+            enum AVMediaType type = fmt->streams[i]->codecpar->codec_type;
+            if (type == AVMEDIA_TYPE_SUBTITLE || (type == AVMEDIA_TYPE_AUDIO && (int)i != probe_audio))
+                fmt->streams[i]->discard = AVDISCARD_ALL;
+        }
+    }
+    int headers_ready = 0;
+    if (native_hls) {
+        int header_video = -1, header_audio = -1;
+        for (unsigned i = 0; i < fmt->nb_streams; i++) {
+            AVCodecParameters *par = fmt->streams[i]->codecpar;
+            if (header_video < 0 && par->codec_type == AVMEDIA_TYPE_VIDEO &&
+                par->codec_id != AV_CODEC_ID_NONE && par->width > 0 && par->height > 0)
+                header_video = (int)i;
+            if (header_audio < 0 && par->codec_type == AVMEDIA_TYPE_AUDIO &&
+                par->codec_id != AV_CODEC_ID_NONE)
+                header_audio = (int)i;
+        }
+        headers_ready = header_video >= 0 && (probe_audio < 0 || header_audio >= 0);
+    }
+    rc = headers_ready ? 0 : avformat_find_stream_info(fmt, NULL);
+    if (native_hls) {
+        for (unsigned i = 0; i < saved_count; i++) fmt->streams[i]->discard = saved_discard[i];
+    }
     open_watch.deadline_us = 0;
     if (rc < 0) {
-        if (rc == AVERROR_EXIT) player_error_message("ler faixas do video: tempo esgotado");
+        if (open_watch.cancelled) player_error_message("Abertura cancelada");
+        else if (rc == AVERROR_EXIT) player_error_message("ler faixas do video: tempo esgotado");
         else player_error_text("ler faixas do video", rc);
-        avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2;
+        avformat_close_input(&fmt); nplay_curl_avio_close(avio);
+        return open_watch.cancelled ? -11 : -2;
     }
 
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
@@ -791,6 +857,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // Heartbeat & Progress tracking are now managed by a separate thread
     Uint32 last_heartbeat = SDL_GetTicks();
     PlaybackHeartbeat *hb = heartbeat;
+    if (hb) SDL_AtomicSet(&hb->pipeline_ready, 1);
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
@@ -1247,6 +1314,11 @@ static int playback_heartbeat_thread(void *userdata) {
     while (SDL_AtomicGet(&hb->running)) {
         SDL_Delay(500);
         if (!SDL_AtomicGet(&hb->running)) break;
+        if (!SDL_AtomicGet(&hb->pipeline_ready)) {
+            elapsed_ms = 0;
+            progress_ms = 0;
+            continue;
+        }
         elapsed_ms += 500;
         progress_ms += 500;
 
@@ -1278,6 +1350,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     SDL_AtomicSet(&hb.current_pos, (int)request->start_sec);
     SDL_AtomicSet(&hb.duration, 0);
     SDL_AtomicSet(&hb.force_progress, 0);
+    SDL_AtomicSet(&hb.pipeline_ready, 0);
     hb.progress_cb = request->progress_cb;
     hb.heartbeat_cb = request->heartbeat_cb;
     hb.callback_userdata = request->userdata;
@@ -1300,6 +1373,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     if (!active.play_url[0] && request->url) snprintf(active.play_url, sizeof(active.play_url), "%s", request->url);
 
     while (1) {
+        SDL_AtomicSet(&hb.pipeline_ready, 0);
         double out_pos = 0, out_dur = 0;
         PlayerRequest attempt = *request;
         attempt.playback = active;
@@ -1326,7 +1400,9 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         } else { // Erro
             // rc < 0
             int recoverable = rc == -2 || rc == -5 || rc == -10;
-            if (!recoverable || retry_count >= 3 || !request->renew_cb) {
+            int startup_failure = current_pos <= request->start_sec + 1.0;
+            int retry_limit = startup_failure ? 1 : 3;
+            if (!recoverable || retry_count >= retry_limit || !request->renew_cb) {
                 result->reason = EXIT_REASON_ERROR;
                 result->final_state = PLAYER_ERROR;
                 final_rc = rc;

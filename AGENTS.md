@@ -614,3 +614,29 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   aparecer o primeiro quadro, serie por 10+ min, anime MP4, audio/legenda e tela
   Configuracoes > X Diagnostico. Confirmar `NVTEGRA ativo`; se houver engasgo,
   registrar obra/episodio, timestamp, mensagem exata e foto do diagnostico.
+
+## Correcao de abertura sem bloqueio em 29/08/2026 (0.9.2)
+
+- Teste real da 0.9.1 falhou no requisito principal: filmes e series R2 ficaram
+  presos em `Preparando video / Lendo video e audio`, B nao respondia e animes
+  MP4 continuaram sem abrir. Portanto a reproducao ainda nao deve ser considerada
+  resolvida ate a 0.9.2 ser instalada e validada no Switch.
+- A auditoria autenticada do R2 confirmou masters, child playlists, init/segmentos
+  e MP4 por Range acessiveis. `ffprobe` no PC abre os HLS em cerca de dois segundos;
+  a origem nao explica o bloqueio indefinido observado no console.
+- Os masters R2 reais possuem `RESOLUTION`, mas nao `CODECS=`. O cliente agora
+  aplica o contrato conhecido do empacotador (H.264/AAC/WebVTT), prioriza video e
+  o primeiro audio e limita pacotes/duracao de probe para nao abrir 5-6 renditions
+  antes do primeiro quadro. Faixas alternativas voltam a ficar disponiveis depois.
+- Todo MP4 remoto, inclusive anime, passou do AVIO libcurl em blocos para HTTPS
+  nativo do FFmpeg com Range/seek. Isso remove o caminho associado ao erro
+  `abrir fonte: End of file`; arquivos locais continuam usando o protocolo local.
+- A abertura e descoberta agora tem prazo de 20 s para HLS e 30 s para MP4. B ou
+  menos interrompe ambas pelo callback do FFmpeg e retorna ao catalogo; falha no
+  inicio faz no maximo uma renovacao, evitando prender o usuario em retries longos.
+- Heartbeat e progresso permanecem suspensos ate codecs, decoders e saidas estarem
+  prontos, eliminando concorrencia de API durante DNS/TLS/probe.
+- Validacao local obrigatoria: build limpo, contrato estatico e auditoria R2. Teste
+  pendente no hardware: filme R2, episodio R2 e anime MP4 por pelo menos 30 s,
+  audio, seek e B durante cada etapa de preparacao. Se falhar, registrar exatamente
+  o ultimo texto/etapa exibido; nao declarar a rodada concluida apenas pelo build.
