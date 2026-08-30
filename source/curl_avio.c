@@ -31,6 +31,7 @@ typedef struct {
     volatile int64_t seek_req;         // pedido de seek (-1 = nenhum)
     volatile int running, eof, err;
     int delivered, fetch_complete;
+    int64_t response_length, range_total;
     SDL_mutex *mtx;
     SDL_cond  *c_data, *c_space;
     SDL_Thread *th;
@@ -44,8 +45,21 @@ static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
 }
 static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
     CurlIO *c = (CurlIO *)ud; size_t n = sz * nm;
-    if (n > 14 && strncasecmp(ptr, "Content-Range:", 14) == 0)
-        for (size_t i = 0; i + 1 < n; i++) if (ptr[i] == '/') { long long t = atoll(ptr + i + 1); if (t > 0) c->size = t; break; }
+    // Redirecionamentos entregam mais de um bloco de cabecalhos. Ao encontrar
+    // uma nova linha de status, descarte os comprimentos da resposta anterior.
+    if (n > 5 && !strncasecmp(ptr, "HTTP/", 5)) {
+        c->response_length = -1;
+        c->range_total = -1;
+    } else if (n > 14 && !strncasecmp(ptr, "Content-Range:", 14)) {
+        for (size_t i = 0; i + 1 < n; i++) if (ptr[i] == '/') {
+            long long total = atoll(ptr + i + 1);
+            if (total > 0) c->range_total = total;
+            break;
+        }
+    } else if (n > 15 && !strncasecmp(ptr, "Content-Length:", 15)) {
+        long long length = atoll(ptr + 15);
+        if (length >= 0) c->response_length = length;
+    }
     return n;
 }
 // aborta o transfer em andamento quando fecha ou pede seek (deixa o close/seek rapidos)
@@ -58,16 +72,25 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
 static int fetch_block(CurlIO *c, int64_t start) {
     c->tmp_len = 0;
     c->fetch_complete = 0;
+    c->response_length = -1;
+    c->range_total = -1;
     char range[64];
     snprintf(range, sizeof(range), "%lld-%lld", (long long)start, (long long)(start + BLOCK - 1));
     curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
     CURLcode r = curl_easy_perform(c->easy);
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    if (c->range_total > 0) c->size = c->range_total;
+    else if (code == 200 && start == 0 && c->response_length > 0) c->size = c->response_length;
     // Em uma queda depois de receber parte do range, preserve esses bytes e
     // retome exatamente do offset seguinte. Antes todo o trecho parcial era
     // descartado, causando o ciclo "carrega/toca/trava" em fontes lentas.
     // 4xx permanentes nao melhoram com repeticao. Timeout/rate limit continuam
     // transitorios; 5xx e falhas do curl tambem podem se recuperar.
+    // Range exatamente depois do ultimo byte e EOF normal, nao uma fonte morta.
+    if (code == 416 && c->size >= 0 && start >= c->size) {
+        c->fetch_complete = 1;
+        return 0;
+    }
     if (code >= 400 && code < 500 && code != 408 && code != 429) return -2;
     if (code != 200 && code != 206) return -1;
     if (start > 0 && code != 206) return -1; // servidor ignorou Range: seek inseguro
@@ -126,11 +149,29 @@ static int producer(void *arg) {
             SDL_Delay(300);
             continue;
         }
-        fail_since = 0;
         c->err = 0;
+        // Sucesso sem corpo so e fim quando o tamanho confirma a posicao. Tratar
+        // qualquer 200 vazio como EOF fazia o anime morrer durante a abertura.
+        if (got == 0) {
+            if (c->size >= 0 && prod >= c->size) {
+                c->eof = 1;
+                SDL_CondSignal(c->c_data);
+            } else {
+                Uint32 now = SDL_GetTicks();
+                if (!fail_since) fail_since = now;
+                else if (now - fail_since >= 120000) {
+                    c->err = 1;
+                    SDL_CondSignal(c->c_data);
+                }
+            }
+            SDL_UnlockMutex(c->mtx);
+            SDL_Delay(100);
+            continue;
+        }
+        fail_since = 0;
         ring_put(c, c->tmp, (size_t)got);
         prod += got;
-        if (c->fetch_complete && got < BLOCK && c->size < 0) c->size = prod;
+        if (c->fetch_complete && got > 0 && got < BLOCK && c->size < 0) c->size = prod;
         SDL_CondSignal(c->c_data);
         SDL_UnlockMutex(c->mtx);
     }
@@ -202,12 +243,14 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
     return np;
 }
 
-AVIOContext *nplay_curl_avio_open(const char *url) {
+AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
     if (!url || !url[0]) return NULL;
     CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
     if (!c) return NULL;
     snprintf(c->url, sizeof(c->url), "%s", url);
-    c->size = -1; c->seek_req = -1; c->base = 0; c->running = 1; c->ring_cap = RINGCAP;
+    c->size = expected_size > 0 ? expected_size : -1;
+    c->response_length = c->range_total = -1;
+    c->seek_req = -1; c->base = 0; c->running = 1; c->ring_cap = RINGCAP;
     c->ring = (unsigned char *)malloc(c->ring_cap);
     c->tmp  = (unsigned char *)malloc(TMPCAP);
     c->easy = curl_easy_init();
@@ -218,6 +261,10 @@ AVIOContext *nplay_curl_avio_open(const char *url) {
     curl_easy_setopt(c->easy, CURLOPT_URL, c->url);
     curl_easy_setopt(c->easy, CURLOPT_USERAGENT, "Nplay-Switch/1.0");
     curl_easy_setopt(c->easy, CURLOPT_FOLLOWLOCATION, 1L);
+    // Byte ranges de MP4 precisam se referir aos bytes originais. Nao permita
+    // gzip/brotli nem decodificacao transparente mudar offsets e tamanho.
+    curl_easy_setopt(c->easy, CURLOPT_ACCEPT_ENCODING, "identity");
+    curl_easy_setopt(c->easy, CURLOPT_HTTP_CONTENT_DECODING, 0L);
     // O backend TLS do libcurl usa a PKI interna do sistema do Switch.
     // MP4 direto carrega URLs assinadas e deve validar CA e hostname como a API.
     curl_easy_setopt(c->easy, CURLOPT_SSL_VERIFYPEER, 1L);

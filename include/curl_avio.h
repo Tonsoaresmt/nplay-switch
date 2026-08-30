@@ -9,7 +9,10 @@
 
 // Cria um AVIOContext que le a URL via libcurl. Retorna NULL em falha.
 // Passe o resultado em fmt->pb + AVFMT_FLAG_CUSTOM_IO antes de avformat_open_input.
-AVIOContext *nplay_curl_avio_open(const char *url);
+// expected_size pode ser -1 quando a API nao conhece o tamanho. Quando existe,
+// evita que o demuxer MP4 dependa de uma segunda requisicao apenas para descobrir
+// onde fica o indice/moov no fim do arquivo.
+AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size);
 
 // Fecha e libera o AVIOContext criado acima (curl + buffers). Chame DEPOIS de
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).

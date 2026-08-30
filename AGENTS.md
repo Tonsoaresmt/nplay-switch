@@ -577,3 +577,40 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   andamento; autoplay ligado/desligado; audio/legenda; HLS por 10+ min; queda de
   Wi-Fi e failover. Se falhar, registrar area, obra, episodio, timestamp, mensagem
   exata e Diagnostico/player_stats antes de alterar buffer ou fila de audio.
+
+## Correcao de abertura e fluidez em 29/08/2026 (0.9.1)
+
+- Teste no Switch da 0.9.0: filme R2 permanecia em Preparando/lendo faixas, serie
+  chegava a tocar mas engasgava e anime MP4 encerrava a abertura com `End of file`.
+  Os sintomas foram separados por transporte; nao tratar os tres como uma unica
+  falha de servidor.
+- `tools/probe_r2_packages.mjs` audita o banco/backend em modo somente leitura e
+  nao imprime URL, token ou segredo. O teste real encontrou filme com 5 playlists,
+  episodio com 6 e todos os primeiros objetos HTTP validos. O mesmo contrato abriu
+  no ffprobe em 1,9-2,1 s. Trinta segundos foram lidos em 6,0 s no filme (5,0x) e
+  9,0 s no episodio (3,3x). O MP4 de anime respondeu Range 206 com 512 KiB e tamanho
+  total de 422.560.192 bytes. Assim, nesta amostra, R2/origem tinham vazao suficiente;
+  a falha observada estava no caminho cliente do Switch.
+- HLS agora limita `probesize` a 4 MiB, analise a 3 s de midia e 12 quadros de FPS.
+  A abertura e a leitura de faixas possuem watchdogs de 35 s separados, evitando
+  spinner indefinido. A UI diferencia playlist/fonte aberta de leitura de faixas.
+- HLS ativa explicitamente conexoes persistentes e simultaneas para as playlists
+  separadas de video/audio, alem de tres tentativas por segmento. Isso reduz novos
+  handshakes TLS entre as renditions do pacote R2.
+- MP4 remoto recebe `source_bytes` ja informado pela API, usa `Accept-Encoding:
+  identity`, reconhece Content-Length/Content-Range atraves de redirecionamentos e
+  nao interpreta resposta vazia inesperada como EOF. HTTP 416 exatamente no limite
+  do arquivo e tratado como fim normal; resposta vazia incoerente termina em erro
+  apos a janela de recuperacao, sem loop infinito.
+- O decoder seleciona NVTEGRA explicitamente quando o formato e oferecido. Quadros
+  transferidos como NV12 seguem direto por `SDL_UpdateNVTexture`, evitando swscale
+  YUV420P em todos os frames; se o renderer do hardware recusar NV12, o fallback
+  transacional recria IYUV e preserva o caminho antigo. Tentativas renovadas agora
+  recebem o `PlaybackSource` completo atualizado, incluindo tamanho e entrega.
+- `tools/validate_release.ps1` passou com build limpo, contrato site/cliente, TLS e
+  simbolos HLS/HTTPS/NVTEGRA. NRO 0.9.1: 23.376.432 bytes, SHA-256
+  `02cd0878cd3eaefecda992a09fe282a3667c1d1efe30ed0257fd95464049732c`.
+- Pendente obrigatorio no hardware antes de afirmar resolucao final: filme R2 ate
+  aparecer o primeiro quadro, serie por 10+ min, anime MP4, audio/legenda e tela
+  Configuracoes > X Diagnostico. Confirmar `NVTEGRA ativo`; se houver engasgo,
+  registrar obra/episodio, timestamp, mensagem exata e foto do diagnostico.

@@ -60,6 +60,23 @@ static void player_error_message(const char *message) {
     snprintf(g_player_last_error, sizeof(g_player_last_error), "%s", message);
 }
 
+typedef struct {
+    int64_t deadline_us;
+} PlayerOpenDeadline;
+
+static int player_open_interrupted(void *userdata) {
+    PlayerOpenDeadline *watch = (PlayerOpenDeadline *)userdata;
+    return watch && watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us;
+}
+
+static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
+                                                       const enum AVPixelFormat *formats) {
+    for (const enum AVPixelFormat *it = formats; it && *it != AV_PIX_FMT_NONE; it++) {
+        if (*it == AV_PIX_FMT_NVTEGRA) return *it;
+    }
+    return avcodec_default_get_format(ctx, formats);
+}
+
 static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
 static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
 static const SDL_Color PC_ACC  = { 139, 92, 246, 255 };
@@ -533,11 +550,21 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // AVIO libcurl representa um unico arquivo, portanto HLS usa os protocolos
     // http+tls nativos desta build do FFmpeg. MP4/MKV remoto permanece no AVIO.
     int native_hls = remote && is_hls;
-    AVIOContext *avio = (remote && !native_hls) ? nplay_curl_avio_open(url) : NULL;
+    AVIOContext *avio = (remote && !native_hls)
+        ? nplay_curl_avio_open(url, req->playback.source_bytes) : NULL;
     if (remote && !native_hls && !avio) { player_error_message("memoria insuficiente para abrir a rede"); return -1; }
     AVFormatContext *fmt = avformat_alloc_context();
     if (!fmt) { nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1; }
     if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
+    // A sondagem padrao pode ler cinco segundos/5 MB de CADA rendition HLS.
+    // O R2 publica video, audios e legendas em playlists separadas; limite o
+    // trabalho inicial sem impedir a leitura dos headers fMP4.
+    fmt->probesize = native_hls ? 4 * 1024 * 1024 : 5 * 1024 * 1024;
+    fmt->max_analyze_duration = native_hls ? 3000000 : 5000000;
+    fmt->fps_probe_size = native_hls ? 12 : -1;
+    PlayerOpenDeadline open_watch = { av_gettime_relative() + 35000000LL };
+    fmt->interrupt_callback.callback = player_open_interrupted;
+    fmt->interrupt_callback.opaque = &open_watch;
 
     AVDictionary *open_opts = NULL;
     if (native_hls) {
@@ -548,6 +575,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         av_dict_set(&open_opts, "seekable", "0", 0);
         av_dict_set(&open_opts, "http_seekable", "0", 0);
         av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
+        // O pacote R2 tem playlists independentes de video/audio. Conexoes
+        // persistentes e simultaneas evitam um novo TLS a cada segmento/faixa.
+        av_dict_set(&open_opts, "http_persistent", "1", 0);
+        av_dict_set(&open_opts, "http_multiple", "1", 0);
+        av_dict_set(&open_opts, "seg_max_retry", "3", 0);
         av_dict_set(&open_opts, "reconnect", "1", 0);
         av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
         av_dict_set(&open_opts, "reconnect_on_network_error", "1", 0);
@@ -559,9 +591,22 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     int rc = avformat_open_input(&fmt, native_hls ? url : (remote ? NULL : url), NULL, &open_opts);
     av_dict_free(&open_opts);
-    if (rc != 0) { player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc); nplay_curl_avio_close(avio); return -10; }
+    if (rc != 0) {
+        if (rc == AVERROR_EXIT) player_error_message(native_hls ? "abrir playlist HLS: tempo esgotado" : "abrir fonte: tempo esgotado");
+        else player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc);
+        nplay_curl_avio_close(avio); return -10;
+    }
+    SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
+    draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
+    SDL_RenderPresent(ren);
+    open_watch.deadline_us = av_gettime_relative() + 35000000LL;
     rc = avformat_find_stream_info(fmt, NULL);
-    if (rc < 0) { player_error_text("ler faixas do video", rc); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2; }
+    open_watch.deadline_us = 0;
+    if (rc < 0) {
+        if (rc == AVERROR_EXIT) player_error_message("ler faixas do video: tempo esgotado");
+        else player_error_text("ler faixas do video", rc);
+        avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -2;
+    }
 
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (vidx < 0) { player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
@@ -670,6 +715,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             vctx->hw_device_ctx = av_buffer_ref(device);
             av_buffer_unref(&device);
             tried_hw = vctx->hw_device_ctx != NULL;
+            if (tried_hw) vctx->get_format = player_select_video_format;
         }
     }
     if (avcodec_open2(vctx, vdec, NULL) < 0) {
@@ -695,10 +741,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     int vw = vctx->width, vh = vctx->height;
     if (vw <= 0 || vh <= 0) PLAYER_SETUP_FAIL(-4);
-    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, vw, vh);
-    if (!tex) PLAYER_SETUP_FAIL(-4);
     transfer = av_frame_alloc();
     if (!transfer) PLAYER_SETUP_FAIL(-4);
+    Uint32 texture_format = 0;
 
     // retangulo com letterbox (1280x720)
     int dw = PWIN_W, dh = PWIN_H;
@@ -1086,7 +1131,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         hardware_decode = 1;
                         u = transfer;
                     }
-                    if (u->format != AV_PIX_FMT_YUV420P) {
+                    int direct_nv12 = u->format == AV_PIX_FMT_NV12;
+                    if (!direct_nv12 && u->format != AV_PIX_FMT_YUV420P) {
                         sws = sws_getCachedContext(sws, u->width, u->height, u->format,
                                                    vw, vh, AV_PIX_FMT_YUV420P,
                                                    SWS_BILINEAR, NULL, NULL, NULL);
@@ -1102,7 +1148,43 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                   0, u->height, yuv->data, yuv->linesize);
                         u = yuv;
                     }
-                    SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
+                    Uint32 wanted_format = direct_nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV;
+                    if (!tex || texture_format != wanted_format) {
+                        SDL_Texture *next = SDL_CreateTexture(ren, wanted_format,
+                                                              SDL_TEXTUREACCESS_STREAMING, vw, vh);
+                        // Alguns renderers SDL anunciam NV12 no header mas nao o
+                        // implementam. Nesse caso preserve a reproducao pelo
+                        // conversor YUV420P em vez de transformar otimizacao em erro.
+                        if (!next && direct_nv12) {
+                            direct_nv12 = 0;
+                            sws = sws_getCachedContext(sws, u->width, u->height, u->format,
+                                                       vw, vh, AV_PIX_FMT_YUV420P,
+                                                       SWS_BILINEAR, NULL, NULL, NULL);
+                            if (!sws) { playback_error = -4; running = 0; break; }
+                            if (!yuv) {
+                                yuv = av_frame_alloc();
+                                if (!yuv) { playback_error = -4; running = 0; break; }
+                                yuv->format = AV_PIX_FMT_YUV420P; yuv->width = vw; yuv->height = vh;
+                                if (av_frame_get_buffer(yuv, 32) < 0) { playback_error = -4; running = 0; break; }
+                            }
+                            if (av_frame_make_writable(yuv) < 0) { playback_error = -4; running = 0; break; }
+                            sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
+                                      0, u->height, yuv->data, yuv->linesize);
+                            u = yuv;
+                            wanted_format = SDL_PIXELFORMAT_IYUV;
+                            next = SDL_CreateTexture(ren, wanted_format,
+                                                     SDL_TEXTUREACCESS_STREAMING, vw, vh);
+                        }
+                        if (!next) { playback_error = -4; running = 0; break; }
+                        if (tex) SDL_DestroyTexture(tex);
+                        tex = next;
+                        texture_format = wanted_format;
+                    }
+                    int upload_rc = direct_nv12
+                        ? SDL_UpdateNVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1])
+                        : SDL_UpdateYUVTexture(tex, NULL, u->data[0], u->linesize[0],
+                                               u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
+                    if (upload_rc < 0) { playback_error = -4; running = 0; break; }
                     have_video_frame = 1;
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                     SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -1220,6 +1302,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     while (1) {
         double out_pos = 0, out_dur = 0;
         PlayerRequest attempt = *request;
+        attempt.playback = active;
         attempt.session_id = active.session_id;
         attempt.source_id = active.source_id;
         attempt.delivery = active.delivery;

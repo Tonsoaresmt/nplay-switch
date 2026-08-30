@@ -17,6 +17,12 @@ Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYPEER\s*,\s*0L') 'SSL_VERIFYPE
 Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYHOST\s*,\s*0L') 'SSL_VERIFYHOST inseguro encontrado.'
 Assert-True ($sources -notmatch 'tls_verify"\s*,\s*"0') 'tls_verify inseguro encontrado.'
 Assert-True ($sources -notmatch 'request->userdata\s*=') 'O player voltou a sobrescrever userdata do chamador.'
+Assert-True ($sources -match 'nplay_curl_avio_open\(url, req->playback\.source_bytes\)') 'MP4 remoto nao recebe o tamanho informado pela API.'
+Assert-True ($sources -match 'CURLOPT_ACCEPT_ENCODING, "identity"') 'Ranges do MP4 podem ser alterados por compressao HTTP.'
+Assert-True ($sources -match 'http_multiple", "1"') 'HLS nao habilita conexoes simultaneas para video/audio.'
+Assert-True ($sources -match 'http_persistent", "1"') 'HLS nao reutiliza conexoes entre segmentos.'
+Assert-True ($sources -match 'SDL_UpdateNVTexture') 'Player perdeu o upload NV12 direto do decoder por hardware.'
+Assert-True ($sources -match 'attempt\.playback = active') 'Tentativa recuperada nao recebe o descritor atualizado.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
