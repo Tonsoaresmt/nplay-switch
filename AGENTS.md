@@ -670,3 +670,56 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente obrigatorio no hardware: filme e serie por 30+ s, audio presente, seek,
   B durante preparacao e uma obra cuja primeira fonte falhe para confirmar fallback.
   Se houver falha, fotografar o ultimo texto exato e Diagnostico do player.
+
+## Cadeia CA e bootstrap seguro em 31/08/2026 (0.9.4)
+
+- A 0.9.3 foi publicada, mas o console instalado nao conseguiu consulta-la:
+  `SSL peer certificate or SSH remote key was not OK (-60)`. A falha ocorre antes
+  do download e nao tem relacao com a troca atomica do NRO.
+- Causa confirmada no toolchain: libcurl 7.69.1/mbedTLS do port Switch tem
+  `curl-config --ca` vazio. O cliente ativava `CURLOPT_SSL_VERIFYPEER=1` e
+  `CURLOPT_SSL_VERIFYHOST=2`, mas nao fornecia `CURLOPT_CAINFO`; a confianca TLS
+  dependia de um armazenamento que nao e garantido no homebrew.
+- `data/cacert.bin` contem o bundle Mozilla publicado pelo curl em 13/08/2026,
+  188.900 bytes, 121 CAs, SHA-256
+  `f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9`.
+  O checksum oficial e exigido por `tools/validate_release.ps1`.
+- No boot, `net_init` compara o arquivo embutido com
+  `sdmc:/switch/.nplay-ca.pem`; se ausente/divergente, grava `.new` e ativa por
+  rename. Todos os easy handles recebem esse caminho por `net_configure_curl`,
+  cobrindo API, GitHub updater, downloads e o AVIO HLS da 0.9.3. Verificacao de
+  peer e hostname permanece ligada; nao foi criado fallback TLS inseguro.
+- Erro -60 agora mostra orientacao para conferir data/hora do console, pois um
+  relogio incorreto ainda invalida certificados mesmo com a CA correta.
+- Bootstrap inevitavel: 0.9.2/0.9.3 ja instaladas nao possuem o bundle e nao podem
+  adquirir esta correcao se o GitHub continuar recusado. Primeiro testar sincronizar
+  data/hora do Switch. Se persistir, copiar o Nplay.nro 0.9.4 manualmente uma unica
+  vez (microSD/FTP/USB); atualizacoes seguintes voltam a funcionar pelo aplicativo.
+- Pendente no hardware apos o bootstrap: buscar update no GitHub, login/catalogo,
+  filme/serie HLS por 30+ s, anime MP4 e confirmar criacao de `.nplay-ca.pem`.
+
+## Catalogo assincrono e isolamento do HLS em 31/08/2026 (0.9.5)
+
+- Teste real da 0.9.4 confirmou que a cadeia CA corrigiu a atualizacao e que o
+  catalogo/animes abrem. Permaneceram tres falhas: filme HLS fechava o software,
+  Series falhava ao sincronizar e cada troca de aba congelava por 15-20 segundos.
+- A causa objetiva da navegacao lenta era `load_landing` chamar `api_get` de forma
+  sincrona na thread que desenha e le o controle. Inicio, Filmes, Series, Animes e
+  Doramas agora carregam em uma thread dedicada, com cache independente por aba.
+  A troca visual e imediata; a primeira visita mostra carregamento responsivo e as
+  seguintes reutilizam o payload. Series recebe ate 30 s sem bloquear a interface.
+- A troca repetida entre abas podia reconstruir `_switchHeroes` dentro do mesmo JSON
+  em cache. O array auxiliar anterior agora e removido antes da reconstrucao, evitando
+  duplicatas e crescimento de memoria em navegacao prolongada.
+- A diferenca do crash continua isolada ao transporte HLS: animes MP4 funcionam,
+  enquanto filmes/series usam varias conexoes libcurl simultaneas para master,
+  renditions e segmentos. Esses handles longos deixaram de entrar no `CURLSH` global
+  do libcurl 7.69; mantem CA e keepalive, mas possuem cache de conexao/DNS/TLS proprio.
+- Cada abertura grava atomicamente a ultima etapa em
+  `sdmc:/switch/.nplay-player-boot.txt`, de `01 inicio` ate `09 reproduzindo`.
+  Configuracoes > X Diagnostico exibe essa etapa mesmo se o processo foi encerrado
+  pelo sistema antes de gerar `player_stats.txt`.
+- Pendente obrigatorio no hardware: alternar rapidamente Filmes/Series/Animes,
+  confirmar que B continua responsivo durante carga, abrir filme e serie por 30 s.
+  Se ainda fechar, reiniciar, abrir Configuracoes > X e fotografar `Ultima etapa`;
+  esse marcador passa a localizar o crash sem depender de suposicao.

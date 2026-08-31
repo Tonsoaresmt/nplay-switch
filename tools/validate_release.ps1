@@ -16,6 +16,8 @@ $sources = (Get-Content source/net.c,source/curl_avio.c,source/player.c -Raw) -j
 Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYPEER\s*,\s*0L') 'SSL_VERIFYPEER inseguro encontrado.'
 Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYHOST\s*,\s*0L') 'SSL_VERIFYHOST inseguro encontrado.'
 Assert-True ($sources -notmatch 'tls_verify"\s*,\s*"0') 'tls_verify inseguro encontrado.'
+Assert-True ($sources -match 'CURLOPT_CAINFO') 'libcurl nao recebe um bundle CA explicito no Switch.'
+Assert-True ($sources -match 'net_configure_curl_isolated\(c->easy\)') 'AVIO libcurl compartilha conexoes longas ou nao usa a cadeia CA embutida.'
 Assert-True ($sources -notmatch 'request->userdata\s*=') 'O player voltou a sobrescrever userdata do chamador.'
 Assert-True ($sources -match 'AVIOContext \*avio = NULL') 'MP4 remoto voltou ao AVIO por blocos que falha no Switch.'
 Assert-True ($sources -match 'avformat_open_input\(&fmt, url, NULL') 'Fonte remota nao usa o HTTPS nativo do FFmpeg.'
@@ -30,6 +32,14 @@ Assert-True ($sources -match 'attempt\.playback = active') 'Tentativa recuperada
 Assert-True ($sources -match 'SDL_JoystickGetButton\(watch->joy, JOY_B\)') 'Preparacao do player nao pode ser cancelada por B.'
 Assert-True ($sources -match 'pipeline_ready') 'Heartbeat pode voltar a disputar rede durante a abertura.'
 Assert-True ($sources -match 'retry_limit = startup_failure \? 2 : 3') 'Falha inicial voltou a encerrar antes de tentar a fonte alternativa.'
+Assert-True ($sources -match 'player_boot_stage\("03 abrindo fonte"\)') 'Crash do player voltou a nao deixar diagnostico persistente.'
+Assert-True ($sources -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnostico de crash depende de uma subpasta opcional.'
+
+$mainSource = Get-Content source/main.c -Raw
+Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
+Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
+Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
+Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes de um crash nao aparece no diagnostico.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
@@ -42,6 +52,11 @@ $tlsPatch = Get-Content tools/ffmpeg-libnx-tls-hostname.patch -Raw
 $ffmpegBuild = Get-Content tools/build_ffmpeg_https.sh -Raw
 Assert-True ($tlsPatch -match 'SslVerifyOption_PeerCa \| SslVerifyOption_HostName') 'Patch TLS nao valida CA e hostname juntos.'
 Assert-True ($ffmpegBuild -match 'ffmpeg-libnx-tls-hostname\.patch') 'Build do FFmpeg nao aplica o patch TLS local.'
+
+$caBundle = Join-Path $root 'data/cacert.bin'
+Assert-True (Test-Path $caBundle) 'Bundle CA Mozilla nao foi incluido no NRO.'
+$caHash = (Get-FileHash $caBundle -Algorithm SHA256).Hash.ToLowerInvariant()
+Assert-True ($caHash -eq 'f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9') 'Bundle CA diverge do checksum oficial do curl.'
 
 & (Join-Path $PSScriptRoot 'validate_site_contract.ps1')
 

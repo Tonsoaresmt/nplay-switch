@@ -8,6 +8,7 @@ extern char g_token[640];
 
 // Para podermos usar as funcoes compartilhadas de main.c sem mover tudo:
 cJSON *api_get(const char *path);
+cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeout);
 long api_send(const char *path, const char *method, const char *body);
 
 const char *jstr(cJSON *o, const char *k);

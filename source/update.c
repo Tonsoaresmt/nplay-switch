@@ -307,7 +307,10 @@ int update_check(struct update_info *info) {
     if (info) info->http_code = http_code;
     if (http_code != 200 || !resp.data) {
         if (info) {
-            if (net_err && net_err[0]) {
+            if (http_code == -(long)CURLE_PEER_FAILED_VERIFICATION) {
+                copy_text(info->message, sizeof(info->message),
+                          "Certificado HTTPS recusado. Confira data e hora do console.");
+            } else if (net_err && net_err[0]) {
                 snprintf(info->message, sizeof(info->message), "GitHub falhou: %s (%ld).", net_err, http_code);
             } else {
                 snprintf(info->message, sizeof(info->message), "GitHub respondeu HTTP %ld.", http_code);
@@ -379,6 +382,7 @@ int update_apply(const struct update_info *info, const char *target_path,
     int ok_count = 0;
     int i;
     long code;
+    const char *download_err = NULL;
 
     if (err && errcap) err[0] = '\0';
     if (installed_path && installed_cap) installed_path[0] = '\0';
@@ -395,9 +399,15 @@ int update_apply(const struct update_info *info, const char *target_path,
     snprintf(tmp, sizeof(tmp), "sdmc:/switch/.nplay-update.download");
     remove(tmp);
 
-    code = net_download_file(info->download_url, NULL, tmp, NULL);
+    code = net_download_file(info->download_url, NULL, tmp, &download_err);
     if (code != 200) {
-        if (err && errcap) snprintf(err, errcap, "Download falhou (HTTP %ld).", code);
+        if (err && errcap) {
+            if (code == -(long)CURLE_PEER_FAILED_VERIFICATION)
+                copy_text(err, errcap, "Certificado HTTPS recusado. Confira data e hora do console.");
+            else if (download_err && download_err[0])
+                snprintf(err, errcap, "Download falhou: %.170s (%ld).", download_err, code);
+            else snprintf(err, errcap, "Download falhou (HTTP %ld).", code);
+        }
         remove(tmp);
         return -1;
     }

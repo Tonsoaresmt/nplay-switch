@@ -63,17 +63,26 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     out->is_cam = jint(j, "is_cam");
 }
 
-cJSON *api_get(const char *path) {
+cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeout) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
+    g_api_last_error[0] = '\0';
     long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, 5L, 15L);
+                                    &out, &err, connect_timeout, total_timeout);
     cJSON *j = NULL;
     if (code == 200 && out.data) j = cJSON_Parse(out.data);
+    if (!j) {
+        if (code == 200) snprintf(g_api_last_error, sizeof(g_api_last_error), "Resposta de catalogo invalida");
+        else api_set_error(code, err, NULL);
+    }
     membuf_free(&out);
     return j;
+}
+
+cJSON *api_get(const char *path) {
+    return api_get_timeout(path, 5L, 15L);
 }
 
 long api_send(const char *path, const char *method, const char *body) {

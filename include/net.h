@@ -1,6 +1,7 @@
 // net.h - camada fina de HTTP sobre libcurl para o Meruem.
 #pragma once
 #include <stddef.h>
+#include <curl/curl.h>
 
 struct membuf {
     char  *data;   // sempre terminado em '\0' (ou NULL se vazio)
@@ -13,6 +14,11 @@ void membuf_free(struct membuf *m);
 // Chamar uma vez no inicio / fim do programa.
 int  net_init(void);
 void net_exit(void);
+
+// Aplica cache compartilhado e a cadeia CA embutida a qualquer easy handle.
+// Deve ser chamado antes de curl_easy_perform, inclusive no AVIO do player.
+void net_configure_curl(CURL *curl);
+void net_configure_curl_isolated(CURL *curl);
 
 // Faz uma requisicao HTTP.
 //   url    : URL completa (https://...)

@@ -267,6 +267,12 @@ static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
 static cJSON *g_land = NULL;          // root JSON da aba atual (home / tab-home / anime-home)
+static cJSON *g_land_cache[5] = {0};  // troca de aba instantanea depois do 1o carregamento
+static cJSON *g_land_pending = NULL;
+static SDL_Thread *g_land_thread = NULL;
+static SDL_atomic_t g_land_done;
+static int g_land_fetch_tab = -1, g_land_queued_tab = -1;
+static char g_land_error[192] = "";
 static cJSON *g_heroesArr = NULL;     // array (dentro de g_land) usado no destaque
 static int g_heroSeriesDefault = 1;   // hero abre como serie? (Filmes = 0)
 typedef struct { char label[48]; cJSON *arr; int is_series; } Rail;
@@ -413,21 +419,12 @@ static void hero_pool_add(cJSON *pool, cJSON *items) {
     }
 }
 // Carrega a landing da aba (0..4). Cada aba vira hero + rails, como no app de PC.
-static void load_landing(int tab) {
-    if (g_land) { cJSON_Delete(g_land); g_land = NULL; }
+static void landing_apply(int tab, cJSON *land) {
+    g_land = land;
     g_railsN = 0; g_railItem = 0; g_homeScroll = 0;
     g_heroIdx = 0; g_hero_next = SDL_GetTicks() + 6000; g_heroesArr = NULL;
     g_heroSeriesDefault = (tab == 1) ? 0 : 1;
 
-    const char *path;
-    switch (tab) {
-        case 1: path = "/api/catalog/tab-home?tab=movie"; break;
-        case 2: path = "/api/catalog/tab-home?tab=series"; break;
-        case 3: path = "/api/catalog/anime-home"; break;
-        case 4: path = "/api/catalog/tab-home?tab=dorama"; break;
-        default: path = "/api/catalog/home"; break;
-    }
-    g_land = api_get(path);
     if (!g_land) { snprintf(g_status, sizeof(g_status), "Falha ao carregar %s", TAB_NAME[tab]); g_railSel = 0; return; }
     g_status[0] = '\0';
 
@@ -445,6 +442,7 @@ static void load_landing(int tab) {
         sh = cJSON_GetObjectItem(g_land, "liveShelves");
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
     } else if (tab == 3) {   // anime-home
+        cJSON_DeleteItemFromObject(g_land, "_switchHeroes");
         g_heroesArr = cJSON_CreateArray();
         hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "updatedToday"));
         hero_pool_add(g_heroesArr, cJSON_GetObjectItem(g_land, "popular"));
@@ -467,6 +465,7 @@ static void load_landing(int tab) {
     } else {                 // tab-home (movie/series/dorama)
         int is_series = (tab != 1);
         cJSON *hero = cJSON_GetObjectItem(g_land, "hero");
+        cJSON_DeleteItemFromObject(g_land, "_switchHeroes");
         g_heroesArr = cJSON_CreateArray();
         if (hero) cJSON_AddItemReferenceToArray(g_heroesArr, hero);
         if (arr_len(g_heroesArr) == 0) {
@@ -481,6 +480,83 @@ static void load_landing(int tab) {
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), is_series);
     }
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
+}
+
+static const char *landing_path(int tab) {
+    switch (tab) {
+        case 1: return "/api/catalog/tab-home?tab=movie";
+        case 2: return "/api/catalog/tab-home?tab=series";
+        case 3: return "/api/catalog/anime-home";
+        case 4: return "/api/catalog/tab-home?tab=dorama";
+        default: return "/api/catalog/home";
+    }
+}
+
+static int landing_fetch_thread(void *unused) {
+    (void)unused;
+    int tab = g_land_fetch_tab;
+    // Series pode gerar um payload grande no Pi. A espera maior nao bloqueia a
+    // interface porque esta funcao roda exclusivamente na thread de catalogo.
+    g_land_error[0] = '\0';
+    g_land_pending = api_get_timeout(landing_path(tab), 6L, 30L);
+    if (!g_land_pending) snprintf(g_land_error, sizeof(g_land_error), "%s", api_last_error());
+    SDL_AtomicSet(&g_land_done, 1);
+    return 0;
+}
+
+static void landing_start(int tab) {
+    g_land_fetch_tab = tab;
+    g_land_pending = NULL;
+    SDL_AtomicSet(&g_land_done, 0);
+    g_land_thread = SDL_CreateThread(landing_fetch_thread, "catalog-fetch", NULL);
+    if (!g_land_thread) {
+        g_land_fetch_tab = -1;
+        snprintf(g_status, sizeof(g_status), "Nao consegui iniciar a sincronizacao de %s", TAB_NAME[tab]);
+    }
+}
+
+static void load_landing(int tab) {
+    if (tab < 0 || tab > 4) return;
+    if (g_land_cache[tab]) {
+        landing_apply(tab, g_land_cache[tab]);
+        return;
+    }
+    g_land = NULL;
+    g_heroesArr = NULL;
+    g_railsN = 0;
+    g_railSel = 0;
+    snprintf(g_status, sizeof(g_status), "Carregando %s...", TAB_NAME[tab]);
+    if (g_land_thread) g_land_queued_tab = tab;
+    else landing_start(tab);
+}
+
+static void landing_invalidate(int tab) {
+    if (tab < 0 || tab > 4) return;
+    if (g_land == g_land_cache[tab]) g_land = NULL;
+    if (g_land_cache[tab]) { cJSON_Delete(g_land_cache[tab]); g_land_cache[tab] = NULL; }
+    load_landing(tab);
+}
+
+static void pump_landing(void) {
+    if (!g_land_thread || !SDL_AtomicGet(&g_land_done)) return;
+    SDL_WaitThread(g_land_thread, NULL);
+    g_land_thread = NULL;
+    int tab = g_land_fetch_tab;
+    g_land_fetch_tab = -1;
+    cJSON *received = g_land_pending;
+    g_land_pending = NULL;
+    if (received && tab >= 0 && tab <= 4) {
+        if (g_land_cache[tab]) cJSON_Delete(g_land_cache[tab]);
+        g_land_cache[tab] = received;
+        if (g_screen == SC_MAIN && g_tab == tab) landing_apply(tab, received);
+    } else if (g_screen == SC_MAIN && g_tab == tab) {
+        const char *detail = g_land_error;
+        if (detail && detail[0]) snprintf(g_status, sizeof(g_status), "Falha em %s: %.100s", TAB_NAME[tab], detail);
+        else snprintf(g_status, sizeof(g_status), "Falha ao sincronizar %s", TAB_NAME[tab]);
+    }
+    int queued = g_land_queued_tab;
+    g_land_queued_tab = -1;
+    if (queued >= 0 && queued <= 4 && !g_land_cache[queued]) landing_start(queued);
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {
@@ -2323,14 +2399,40 @@ static void pump_settings_status(void) {
         g_accel_status = g_settings_accel_pending; g_settings_accel_pending = NULL;
     }
 }
+static int load_player_boot_stage(char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    const char *paths[] = {
+        "sdmc:/switch/.nplay-player-boot.txt",
+        "sdmc:/switch/Nplay/player_boot.txt",
+        "sdmc:/switch/Meruem/player_boot.txt"
+    };
+    FILE *file = NULL;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && !file; i++)
+        file = fopen(paths[i], "rb");
+    if (!file) return 0;
+    size_t read = fread(out, 1, cap - 1, file);
+    fclose(file);
+    out[read] = '\0';
+    while (read > 0 && (out[read - 1] == '\n' || out[read - 1] == '\r' || out[read - 1] == ' '))
+        out[--read] = '\0';
+    return read > 0;
+}
 static void draw_player_diagnostics(void) {
     if (!g_diag_open) return;
     struct player_stats stats;
+    char boot_stage[96];
+    int has_boot_stage = load_player_boot_stage(boot_stage, sizeof(boot_stage));
     ui_panel(252, 96, 776, 526, C_ACC2);
     text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 292, 128, C_ACC2, 0);
     if (!store_load_player_stats(&stats)) {
         text_center_at("Nenhuma reproducao registrada ainda", 292, 696, 282, C_TEXT, 1);
-        text_center_at("Assista a um video e volte aqui para consultar.", 292, 696, 340, C_MUT, 0);
+        text_center_at("Assista a um video e volte aqui para consultar.", 292, 696, 326, C_MUT, 0);
+        if (has_boot_stage) {
+            char line[160];
+            snprintf(line, sizeof(line), "Ultima etapa: %s", boot_stage);
+            text_center_at(line, 292, 696, 388, C_ACC, 0);
+        }
     } else {
         int drop_pct = stats.decoded_frames > 0 ? stats.dropped_frames * 100 / stats.decoded_frames : 0;
         const char *state = stats.playback_error < 0 ? "REPRODUCAO INTERROMPIDA" :
@@ -2352,8 +2454,12 @@ static void draw_player_diagnostics(void) {
         text_draw(gRen, line, 292, 400, C_MUT, 0);
         snprintf(line, sizeof(line), "Resultado  %s", stats.playback_error < 0 ? "conexao ou fonte interrompida" : "saida normal do player");
         text_draw(gRen, line, 292, 442, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0);
+        if (has_boot_stage) {
+            snprintf(line, sizeof(line), "Ultima etapa  %s", boot_stage);
+            text_clip(line, 292, 480, C_ACC, 0, 696);
+        }
         text_clip("Ao relatar travamentos, fotografe esta tela junto com o titulo e o momento.",
-                  292, 502, C_MUT, 0, 696);
+                  292, 522, C_MUT, 0, 696);
     }
     text_center_at("A ou B Fechar", 292, 696, 572, C_TEXT, 0);
 }
@@ -2398,7 +2504,7 @@ static void save_selected_preference(int direction) {
         g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
         toast("Nao foi possivel salvar a preferencia");
     } else {
-        if (g_prefs_sel == 0 && g_tab <= 4) load_landing(g_tab);
+        if (g_prefs_sel == 0 && g_tab <= 4) landing_invalidate(g_tab);
         g_hero_next = SDL_GetTicks() + 8000;
         toast("Preferencia sincronizada");
     }
@@ -2654,6 +2760,7 @@ int main(int argc, char **argv) {
         pump_downloads();
         pump_history();
         pump_settings_status();
+        pump_landing();
         update_download_awake();
         // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.
         // Assim nenhuma textura usada neste frame e destruida antes do Present.
@@ -2694,7 +2801,12 @@ int main(int argc, char **argv) {
     if (g_settings_accel_pending) { cJSON_Delete(g_settings_accel_pending); g_settings_accel_pending = NULL; }
 
     if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
-    if (g_land) cJSON_Delete(g_land);
+    if (g_land_thread) { SDL_WaitThread(g_land_thread, NULL); g_land_thread = NULL; }
+    if (g_land_pending) { cJSON_Delete(g_land_pending); g_land_pending = NULL; }
+    for (int i = 0; i < 5; i++) {
+        if (g_land_cache[i]) { cJSON_Delete(g_land_cache[i]); g_land_cache[i] = NULL; }
+    }
+    g_land = NULL;
     if (g_search) cJSON_Delete(g_search);
     if (g_dl) cJSON_Delete(g_dl);
     if (g_history) cJSON_Delete(g_history);

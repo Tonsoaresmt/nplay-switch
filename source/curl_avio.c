@@ -7,6 +7,7 @@
 // buffer; o ffmpeg (consumidor) le do buffer sem esperar a rede. Seek reposiciona
 // a thread. Usa a interface EASY do curl (a MULTI falhava no Switch).
 #include "curl_avio.h"
+#include "net.h"
 #include <curl/curl.h>
 #include <SDL.h>
 #include <libavutil/mem.h>
@@ -293,6 +294,10 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     curl_easy_setopt(c->easy, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(c->easy, CURLOPT_XFERINFOFUNCTION, xfer_cb);
     curl_easy_setopt(c->easy, CURLOPT_XFERINFODATA, c);
+    // Cada rendition HLS tem uma thread/handle de longa duracao. Nao coloque
+    // essas conexoes no CURLSH 7.69 usado por requests curtos da UI; compartilhar
+    // o cache de conexoes entre produtores simultaneos causou crash no hardware.
+    net_configure_curl_isolated(c->easy);
 
     unsigned char *avio_buf = (unsigned char *)av_malloc(65536);
     if (!avio_buf) { free_cio(c); return NULL; }

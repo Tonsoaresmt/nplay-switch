@@ -6,6 +6,7 @@
 #include <string.h>
 #include <curl/curl.h>
 #include <SDL.h>
+#include "cacert_bin.h"
 
 // User-Agent de navegador: o Cloudflare do servidor bloqueia UAs "de bot".
 // TODO: trocar por "Meruem-Switch/x" + regra de allowlist no Cloudflare.
@@ -65,6 +66,40 @@ static int file_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow
 // compartilhamento seguro entre as threads.
 static CURLSH *g_share = NULL;
 static SDL_mutex *g_share_mtx[CURL_LOCK_DATA_LAST];
+static int g_ca_ready = 0;
+static const char *g_ca_path = "sdmc:/switch/.nplay-ca.pem";
+
+static int ca_file_matches(void) {
+    unsigned char buffer[8192];
+    size_t offset = 0, count;
+    FILE *file = fopen(g_ca_path, "rb");
+    if (!file) return 0;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (offset + count > cacert_bin_size ||
+            memcmp(buffer, cacert_bin + offset, count) != 0) {
+            fclose(file);
+            return 0;
+        }
+        offset += count;
+    }
+    int matches = !ferror(file) && offset == cacert_bin_size;
+    fclose(file);
+    return matches;
+}
+
+static int provision_ca_bundle(void) {
+    static const char *tmp_path = "sdmc:/switch/.nplay-ca.pem.new";
+    if (ca_file_matches()) return 0;
+    FILE *file = fopen(tmp_path, "wb");
+    if (!file) return -1;
+    size_t written = fwrite(cacert_bin, 1, cacert_bin_size, file);
+    int failed = written != cacert_bin_size || fflush(file) != 0 || ferror(file);
+    if (fclose(file) != 0) failed = 1;
+    if (failed) { remove(tmp_path); return -1; }
+    remove(g_ca_path);
+    if (rename(tmp_path, g_ca_path) != 0) { remove(tmp_path); return -1; }
+    return ca_file_matches() ? 0 : -1;
+}
 
 static void share_lock(CURL *h, curl_lock_data data, curl_lock_access acc, void *u) {
     (void)h; (void)acc; (void)u;
@@ -77,6 +112,7 @@ static void share_unlock(CURL *h, curl_lock_data data, void *u) {
 
 int net_init(void) {
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) return -1;
+    g_ca_ready = provision_ca_bundle() == 0;
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) g_share_mtx[i] = SDL_CreateMutex();
     g_share = curl_share_init();
     if (g_share) {
@@ -95,11 +131,19 @@ void net_exit(void) {
         if (g_share_mtx[i]) { SDL_DestroyMutex(g_share_mtx[i]); g_share_mtx[i] = NULL; }
     }
     curl_global_cleanup();
+    g_ca_ready = 0;
 }
 
-static void net_apply_shared(CURL *curl) {
-    if (g_share) curl_easy_setopt(curl, CURLOPT_SHARE, g_share);
+void net_configure_curl_isolated(CURL *curl) {
+    if (!curl) return;
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);   // mantem a conexao viva
+    if (g_ca_ready) curl_easy_setopt(curl, CURLOPT_CAINFO, g_ca_path);
+}
+
+void net_configure_curl(CURL *curl) {
+    if (!curl) return;
+    if (g_share) curl_easy_setopt(curl, CURLOPT_SHARE, g_share);
+    net_configure_curl_isolated(curl);
 }
 
 long net_request_timeout(const char *url, const char *method,
@@ -132,7 +176,7 @@ long net_request_timeout(const char *url, const char *method,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
-    net_apply_shared(curl);
+    net_configure_curl(curl);
 
     if (method && strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -211,7 +255,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 256L * 1024L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &dlctx);
-    net_apply_shared(curl);
+    net_configure_curl(curl);
 
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
@@ -266,7 +310,7 @@ long net_download_file_progress(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, file_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &dlctx);
-    net_apply_shared(curl);
+    net_configure_curl(curl);
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) { if (err) *err = curl_easy_strerror(res); code = -(long)res; }
     else curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);

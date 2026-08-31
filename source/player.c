@@ -1,7 +1,7 @@
 // player.c - player de video: ffmpeg decodifica, SDL desenha (textura YUV) e toca
 // o audio (SDL Audio + swresample). Sincroniza o video pelo relogio do audio.
-// MP4/MKV remoto usa I/O com prefetch via libcurl (curl_avio). HLS usa os
-// protocolos HTTP+TLS do FFmpeg porque precisa abrir playlist e segmentos.
+// MP4/MKV remoto usa HTTPS nativo. HLS usa callbacks AVIO com libcurl para abrir
+// cada playlist e segmento sem depender do TLS interno do FFmpeg/libnx.
 // Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur) e mostra
 // um HUD (titulo + barra de progresso + tempo) ao pausar/buscar.
 #include <switch.h>
@@ -47,6 +47,17 @@
 #define SEEK_HOLD_MS       550
 
 static char g_player_last_error[160] = "";
+
+static void player_boot_stage(const char *stage) {
+    // O caminho plano existe mesmo quando o NRO foi instalado fora de uma pasta.
+    // Os caminhos antigos ficam como fallback para instalacoes ja existentes.
+    FILE *file = fopen("sdmc:/switch/.nplay-player-boot.txt", "wb");
+    if (!file) file = fopen("sdmc:/switch/Nplay/player_boot.txt", "wb");
+    if (!file) file = fopen("sdmc:/switch/Meruem/player_boot.txt", "wb");
+    if (!file) return;
+    fprintf(file, "%s\n", stage ? stage : "desconhecido");
+    fclose(file);
+}
 
 const char *player_last_error(void) { return g_player_last_error; }
 
@@ -566,6 +577,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 PlaybackHeartbeat *heartbeat, double start_sec,
                                 double *out_pos, double *out_dur) {
     g_player_last_error[0] = '\0';
+    player_boot_stage("01 inicio do player");
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
     
@@ -593,6 +605,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         fmt->io_open = player_hls_io_open;
         fmt->io_close2 = player_hls_io_close;
     }
+    player_boot_stage(native_hls ? "02 contexto HLS libcurl pronto" : "02 contexto de arquivo pronto");
     // A sondagem padrao pode ler cinco segundos/5 MB de CADA rendition HLS.
     // O R2 publica video, audios e legendas em playlists separadas; limite o
     // trabalho inicial sem impedir a leitura dos headers fMP4.
@@ -641,6 +654,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             av_dict_set(&open_opts, "multiple_requests", "1", 0);
         }
     }
+    player_boot_stage("03 abrindo fonte");
     int rc = avformat_open_input(&fmt, url, NULL, &open_opts);
     av_dict_free(&open_opts);
     if (rc != 0) {
@@ -649,6 +663,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         else player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc);
         nplay_curl_avio_close(avio); return open_watch.cancelled ? -11 : -10;
     }
+    player_boot_stage("04 fonte aberta");
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
     draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
     SDL_RenderPresent(ren);
@@ -685,6 +700,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
         headers_ready = header_video >= 0 && (probe_audio < 0 || header_audio >= 0);
     }
+    player_boot_stage(headers_ready ? "05 headers completos" : "05 lendo faixas");
     rc = headers_ready ? 0 : avformat_find_stream_info(fmt, NULL);
     if (native_hls) {
         for (unsigned i = 0; i < saved_count; i++) fmt->streams[i]->discard = saved_discard[i];
@@ -698,6 +714,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         return open_watch.cancelled ? -11 : -2;
     }
 
+    player_boot_stage("06 faixas prontas");
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     if (vidx < 0) { player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
 
@@ -818,6 +835,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         vctx->thread_count = 4;
         if (avcodec_open2(vctx, vdec, NULL) < 0) PLAYER_SETUP_FAIL(-4);
     }
+    player_boot_stage("07 decoder de video pronto");
 
     // ---- decoder de audio + resample + saida SDL ----
     const int OCH = 2, ORATE = 48000;
@@ -828,6 +846,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         if (adev) SDL_PauseAudioDevice(adev, 0);
         else { if (swr) swr_free(&swr); avcodec_free_context(&actx); }
     }
+    player_boot_stage("08 audio pronto");
 
     int vw = vctx->width, vh = vctx->height;
     if (vw <= 0 || vh <= 0) PLAYER_SETUP_FAIL(-4);
@@ -882,6 +901,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 last_heartbeat = SDL_GetTicks();
     PlaybackHeartbeat *hb = heartbeat;
     if (hb) SDL_AtomicSet(&hb->pipeline_ready, 1);
+    player_boot_stage("09 reproduzindo");
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
