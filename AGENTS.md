@@ -640,3 +640,33 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   pendente no hardware: filme R2, episodio R2 e anime MP4 por pelo menos 30 s,
   audio, seek e B durante cada etapa de preparacao. Se falhar, registrar exatamente
   o ultimo texto/etapa exibido; nao declarar a rodada concluida apenas pelo build.
+
+## Transporte HLS libcurl e fallback real em 31/08/2026 (0.9.3)
+
+- Teste real da 0.9.2 ainda nao reproduziu filmes nem series. A hipotese de apenas
+  preencher codecs ausentes foi rejeitada; nao declarar reproducao resolvida sem
+  confirmacao desta versao no Switch.
+- Diferenca de transporte isolada: API/capas usam libcurl, mas HLS entregava master,
+  child playlists, init e segmentos ao HTTPS interno do FFmpeg/libnx. O master
+  abria e o bloqueio surgia nas conexoes aninhadas exibidas como leitura de audio
+  e video.
+- `AVFormatContext.io_open/io_close2` agora entrega cada recurso HTTP(S) aberto pelo
+  demuxer HLS ao AVIO libcurl. Isso preserva o demuxer/decoder FFmpeg, mas remove TLS,
+  redirects e Range do caminho libnx que travava. O perfil HLS usa ring de 2 MiB e
+  blocos de 256 KiB por recurso, evitando multiplicar o ring de 16 MiB do MP4 pelas
+  varias faixas abertas. Reuso HTTP interno foi desligado porque nao e compativel
+  com AVIO customizado.
+- Auditoria passou a enviar `Range: bytes=0-262143`, `Accept-Encoding: identity` e
+  User-Agent do Switch tambem para manifests. Em amostra conservadora de 100 fontes
+  ativas, 92 estavam validas e oito retornaram 404 real; filme e episodio validos
+  leram 30 s a 17,0x e 5,2x, respectivamente. Anime MP4 respondeu Range 206.
+- Foi encontrada uma regressao independente na 0.9.2: o limite de uma recuperacao
+  encerrava o player antes do ramo de fonte alternativa (`retry_count == 1`). O
+  inicio agora permite renovar a mesma sessao e depois chamar `/fail` para trocar
+  a fonte. Isso e essencial para os oito ponteiros R2 404 ainda publicados.
+- `tools/probe_r2_packages.mjs` verifica por padrao os 50 filmes e 50 episodios mais
+  recentes; `--full` percorre todas as 3.189 referencias. Timeout de rede e reportado
+  como nao confirmado, separado de 404, para nao desativar conteudo por saturacao.
+- Pendente obrigatorio no hardware: filme e serie por 30+ s, audio presente, seek,
+  B durante preparacao e uma obra cuja primeira fonte falhe para confirmar fallback.
+  Se houver falha, fotografar o ultimo texto exato e Diagnostico do player.

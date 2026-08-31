@@ -16,18 +16,11 @@ const databasePath = isAbsolute(config.dbPath) ? config.dbPath : resolve(backend
 const db = new DatabaseSync(databasePath, { readOnly: true });
 
 const rows = db.prepare(`
-  SELECT ci.kind, ci.title, s.stream_url_enc
+  SELECT ci.id AS item_id, s.id AS source_id, ci.kind, ci.title, s.stream_url_enc
     FROM item_sources s JOIN catalog_items ci ON ci.id=s.item_id
    WHERE s.active=1 AND s.source_stream_id LIKE 'r2:%' AND s.container_ext='m3u8'
    ORDER BY CASE ci.kind WHEN 'movie' THEN 0 WHEN 'episode' THEN 1 ELSE 2 END, s.id DESC
 `).all();
-const selected = [];
-for (const kind of ['movie', 'episode']) {
-  const row = rows.find((value) => value.kind === kind);
-  if (row) selected.push(row);
-}
-if (!selected.length) throw new Error('Nenhum pacote R2 pronto no banco local.');
-
 function authorize(raw) {
   const url = new URL(raw);
   const slash = url.pathname.lastIndexOf('/');
@@ -37,6 +30,49 @@ function authorize(raw) {
   }));
   return url;
 }
+
+// Antes de escolher amostras, confirme todos os ponteiros publicados. Um item
+// marcado como pronto com manifesto 404 e falha de catalogo, nao de decoder.
+const fullAudit = process.argv.includes('--full');
+const auditRows = fullAudit ? rows : [
+  ...rows.filter((row) => row.kind === 'movie').slice(0, 50),
+  ...rows.filter((row) => row.kind === 'episode').slice(0, 50),
+];
+const health = new Array(auditRows.length);
+let cursor = 0;
+console.log(`catalogo-r2: verificando ${auditRows.length}/${rows.length} fontes ativas${fullAudit ? ' (auditoria completa)' : ''}...`);
+await Promise.all(Array.from({ length: Math.min(16, auditRows.length) }, async () => {
+  while (cursor < auditRows.length) {
+    const index = cursor++;
+    const row = auditRows[index];
+    try {
+      const response = await fetch(authorize(decrypt(row.stream_url_enc)), {
+        method: 'HEAD',
+        headers: { 'accept-encoding': 'identity', 'user-agent': 'Nplay-Switch/1.0' },
+        signal: AbortSignal.timeout(8000),
+      });
+      health[index] = { row, status: response.status };
+    } catch {
+      health[index] = { row, status: 0 };
+    }
+  }
+}));
+const healthy = health.filter((entry) => entry?.status === 200);
+const unavailable = health.filter((entry) => entry?.status !== 200);
+const brokenByStatus = Object.entries(unavailable.reduce((all, entry) => {
+  const key = String(entry?.status || 'rede');
+  all[key] = (all[key] || 0) + 1;
+  return all;
+}, {})).map(([status, count]) => `${status}:${count}`).join(',') || 'nenhum';
+const missing = unavailable.filter((entry) => entry?.status === 404).length;
+const unconfirmed = unavailable.length - missing;
+console.log(`catalogo-r2: amostra=${auditRows.length} validos=${healthy.length} 404=${missing} nao-confirmados=${unconfirmed} (${brokenByStatus})`);
+const selected = [];
+for (const kind of ['movie', 'episode']) {
+  const entry = healthy.find((value) => value.row.kind === kind);
+  if (entry) selected.push(entry.row);
+}
+if (!selected.length) throw new Error('Nenhum pacote R2 realmente acessivel no catalogo local.');
 
 function references(manifest) {
   const found = [];
@@ -50,8 +86,18 @@ function references(manifest) {
 }
 
 async function getText(url) {
-  const response = await fetch(url, { headers: { accept: '*/*', 'accept-encoding': 'identity' } });
+  // O AVIO libcurl do Switch solicita blocos por Range inclusive para manifests.
+  // Exercite o Worker com os mesmos headers, nao apenas com um GET de navegador.
+  const response = await fetch(url, { headers: {
+    accept: '*/*',
+    'accept-encoding': 'identity',
+    range: 'bytes=0-262143',
+    'user-agent': 'Nplay-Switch/1.0',
+  } });
   const text = await response.text();
+  if (response.headers.get('content-encoding')) {
+    throw new Error(`manifesto respondeu comprimido apesar de accept-encoding identity`);
+  }
   return { response, text };
 }
 

@@ -1,7 +1,7 @@
 // curl_avio.h - AVIOContext do ffmpeg alimentado pelo libcurl.
-// Para arquivos remotos unicos, o libcurl fornece prefetch, leitura sequencial e
-// seek por HTTP Range. HLS nao usa este adaptador: a playlist precisa abrir
-// submanifestos e segmentos e segue pelo HTTP+TLS nativo do FFmpeg.
+// O libcurl fornece prefetch, leitura sequencial e seek por HTTP Range. Alem de
+// arquivos remotos unicos, o perfil HLS e usado pelo callback AVFormatContext.io_open
+// para que playlists e segmentos nao dependam do TLS interno do FFmpeg/libnx.
 #ifndef NPLAY_CURL_AVIO_H
 #define NPLAY_CURL_AVIO_H
 
@@ -13,6 +13,10 @@
 // evita que o demuxer MP4 dependa de uma segunda requisicao apenas para descobrir
 // onde fica o indice/moov no fim do arquivo.
 AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size);
+
+// Perfil leve para cada recurso HLS. Um master pode manter varias playlists
+// abertas ao mesmo tempo, portanto este usa blocos/ring menores que um MP4.
+AVIOContext *nplay_curl_avio_open_hls(const char *url);
 
 // Fecha e libera o AVIOContext criado acima (curl + buffers). Chame DEPOIS de
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).

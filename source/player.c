@@ -81,6 +81,28 @@ static int player_open_interrupted(void *userdata) {
     return watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us;
 }
 
+// O HTTPS nativo do FFmpeg/libnx abre o master R2, mas no hardware pode ficar
+// preso ao abrir as playlists/segmentos seguintes. O demuxer HLS chama io_open
+// para cada recurso aninhado; entregue todos ao libcurl, a mesma pilha TLS usada
+// com sucesso pela API e pelas capas do aplicativo.
+static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
+                              const char *url, int flags, AVDictionary **options) {
+    (void)fmt;
+    (void)options;
+    if (!pb || !url || (flags & AVIO_FLAG_WRITE)) return AVERROR(EINVAL);
+    *pb = NULL;
+    if (strncmp(url, "http://", 7) && strncmp(url, "https://", 8))
+        return AVERROR_PROTOCOL_NOT_FOUND;
+    *pb = nplay_curl_avio_open_hls(url);
+    return *pb ? 0 : AVERROR(ENOMEM);
+}
+
+static int player_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
+    (void)fmt;
+    nplay_curl_avio_close(pb);
+    return 0;
+}
+
 static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
                                                        const enum AVPixelFormat *formats) {
     for (const enum AVPixelFormat *it = formats; it && *it != AV_PIX_FMT_NONE; it++) {
@@ -555,12 +577,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     draw_center_state(ren, "PREPARANDO VIDEO", "Conectando...  |  B para cancelar", 0);
     SDL_RenderPresent(ren);
 
-    // HTTPS usa o AVIO do libcurl; arquivos sdmc:/ usam o protocolo local do
-    // FFmpeg e podem ser assistidos offline sem reservar o ring de rede.
+    // Arquivos sdmc:/ usam o protocolo local. HLS remoto delega master, filhos e
+    // segmentos ao callback libcurl; MP4 remoto continua no protocolo do FFmpeg.
     int remote = !strncmp(url, "http://", 7) || !strncmp(url, "https://", 8);
-    // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos. O
-    // AVIO libcurl representa um unico arquivo, portanto HLS usa os protocolos
-    // http+tls nativos desta build do FFmpeg. MP4/MKV remoto permanece no AVIO.
+    // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos.
     int native_hls = remote && is_hls;
     // A build local ja possui HTTPS+TLS validado. Use o protocolo nativo tambem
     // para MP4: ele conhece Range/seek do MOV e elimina o AVIO por blocos que no
@@ -569,6 +589,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     AVFormatContext *fmt = avformat_alloc_context();
     if (!fmt) { nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1; }
     if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
+    if (native_hls) {
+        fmt->io_open = player_hls_io_open;
+        fmt->io_close2 = player_hls_io_close;
+    }
     // A sondagem padrao pode ler cinco segundos/5 MB de CADA rendition HLS.
     // O R2 publica video, audios e legendas em playlists separadas; limite o
     // trabalho inicial sem impedir a leitura dos headers fMP4.
@@ -607,10 +631,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             av_dict_set(&open_opts, "seekable", "0", 0);
             av_dict_set(&open_opts, "http_seekable", "0", 0);
             av_dict_set(&open_opts, "allowed_extensions", "ALL", 0);
-            // O pacote R2 tem playlists independentes de video/audio. Conexoes
-            // persistentes e simultaneas evitam um novo TLS a cada segmento/faixa.
-            av_dict_set(&open_opts, "http_persistent", "1", 0);
-            av_dict_set(&open_opts, "http_multiple", "1", 0);
+            // Cada recurso e um AVIO libcurl proprio. A reutilizacao interna do
+            // protocolo HTTP do FFmpeg nao e compativel com um io_open customizado.
+            av_dict_set(&open_opts, "http_persistent", "0", 0);
+            av_dict_set(&open_opts, "http_multiple", "0", 0);
             av_dict_set(&open_opts, "seg_max_retry", "3", 0);
         } else {
             av_dict_set(&open_opts, "seekable", "1", 0);
@@ -1401,7 +1425,10 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             // rc < 0
             int recoverable = rc == -2 || rc == -5 || rc == -10;
             int startup_failure = current_pos <= request->start_sec + 1.0;
-            int retry_limit = startup_failure ? 1 : 3;
+            // Na abertura, tentativa 0 renova a mesma sessao e tentativa 1 usa
+            // fallback_cb para trocar a fonte. Limite 1 encerrava antes do
+            // fallback e deixava qualquer ponteiro R2 404 sem alternativa.
+            int retry_limit = startup_failure ? 2 : 3;
             if (!recoverable || retry_count >= retry_limit || !request->renew_cb) {
                 result->reason = EXIT_REASON_ERROR;
                 result->final_state = PLAYER_ERROR;

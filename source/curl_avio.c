@@ -16,15 +16,17 @@
 #include <strings.h>
 #include <stdio.h>
 
-#define BLOCK   (512 * 1024)           // entrega dados cedo mesmo em fontes lentas
-#define TMPCAP  (BLOCK + 65536)
-#define RINGCAP (16 * 1024 * 1024)     // prefetch amplo sem reservar 32MB por video
+#define FILE_BLOCK   (512 * 1024)
+#define FILE_RINGCAP (16 * 1024 * 1024)
+#define HLS_BLOCK    (256 * 1024)
+#define HLS_RINGCAP  (2 * 1024 * 1024)
 
 typedef struct {
     CURL *easy;
     char  url[2048];
     unsigned char *ring;
     size_t ring_cap;
+    size_t block_size, tmp_cap;
     size_t head, count;                // head = 1o byte disponivel; count = bytes no ring
     volatile int64_t base;             // offset (arquivo) de ring[head] = pos do consumidor
     volatile int64_t size;             // total (-1 desconhecido)
@@ -40,7 +42,7 @@ typedef struct {
 
 static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
     CurlIO *c = (CurlIO *)ud; size_t n = sz * nm;
-    if (c->tmp_len + n > TMPCAP) return 0;
+    if (c->tmp_len + n > c->tmp_cap) return 0;
     memcpy(c->tmp + c->tmp_len, ptr, n); c->tmp_len += n; return n;
 }
 static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
@@ -75,7 +77,8 @@ static int fetch_block(CurlIO *c, int64_t start) {
     c->response_length = -1;
     c->range_total = -1;
     char range[64];
-    snprintf(range, sizeof(range), "%lld-%lld", (long long)start, (long long)(start + BLOCK - 1));
+    snprintf(range, sizeof(range), "%lld-%lld", (long long)start,
+             (long long)(start + (int64_t)c->block_size - 1));
     curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
     CURLcode r = curl_easy_perform(c->easy);
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
@@ -127,7 +130,7 @@ static int producer(void *arg) {
         if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
         if (c->seek_req >= 0) { prod = c->seek_req; c->base = c->seek_req; c->head = c->count = 0; c->seek_req = -1; c->eof = 0; }
         if (c->size >= 0 && prod >= c->size) { c->eof = 1; SDL_CondSignal(c->c_data); SDL_CondWaitTimeout(c->c_space, c->mtx, 200); SDL_UnlockMutex(c->mtx); continue; }
-        if (c->count + BLOCK > c->ring_cap) { SDL_CondWaitTimeout(c->c_space, c->mtx, 200); SDL_UnlockMutex(c->mtx); continue; }
+        if (c->count + c->block_size > c->ring_cap) { SDL_CondWaitTimeout(c->c_space, c->mtx, 200); SDL_UnlockMutex(c->mtx); continue; }
         int64_t start = prod;
         SDL_UnlockMutex(c->mtx);
 
@@ -171,7 +174,7 @@ static int producer(void *arg) {
         fail_since = 0;
         ring_put(c, c->tmp, (size_t)got);
         prod += got;
-        if (c->fetch_complete && got > 0 && got < BLOCK && c->size < 0) c->size = prod;
+        if (c->fetch_complete && got > 0 && (size_t)got < c->block_size && c->size < 0) c->size = prod;
         SDL_CondSignal(c->c_data);
         SDL_UnlockMutex(c->mtx);
     }
@@ -243,16 +246,20 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
     return np;
 }
 
-AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
+static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
+                                           size_t block_size, size_t ring_cap) {
     if (!url || !url[0]) return NULL;
     CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
     if (!c) return NULL;
     snprintf(c->url, sizeof(c->url), "%s", url);
     c->size = expected_size > 0 ? expected_size : -1;
     c->response_length = c->range_total = -1;
-    c->seek_req = -1; c->base = 0; c->running = 1; c->ring_cap = RINGCAP;
+    c->seek_req = -1; c->base = 0; c->running = 1;
+    c->block_size = block_size;
+    c->ring_cap = ring_cap;
+    c->tmp_cap = block_size + 65536;
     c->ring = (unsigned char *)malloc(c->ring_cap);
-    c->tmp  = (unsigned char *)malloc(TMPCAP);
+    c->tmp  = (unsigned char *)malloc(c->tmp_cap);
     c->easy = curl_easy_init();
     c->mtx = SDL_CreateMutex();
     c->c_data = SDL_CreateCond();
@@ -294,6 +301,14 @@ AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
     AVIOContext *ctx = avio_alloc_context(avio_buf, 65536, 0, c, cio_read, NULL, cio_seek);
     if (!ctx) { av_free(avio_buf); free_cio(c); return NULL; }
     return ctx;
+}
+
+AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
+    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP);
+}
+
+AVIOContext *nplay_curl_avio_open_hls(const char *url) {
+    return curl_avio_open_profile(url, -1, HLS_BLOCK, HLS_RINGCAP);
 }
 
 void nplay_curl_avio_close(AVIOContext *ctx) {
