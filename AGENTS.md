@@ -723,3 +723,25 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   confirmar que B continua responsivo durante carga, abrir filme e serie por 30 s.
   Se ainda fechar, reiniciar, abrir Configuracoes > X e fotografar `Ultima etapa`;
   esse marcador passa a localizar o crash sem depender de suposicao.
+
+## Documento de investigacao do playback em 31/08/2026
+
+- Novo relato real da 0.9.5: anime ainda pode reproduzir, mas filmes fecham o
+  processo, Series pode falhar ao carregar e respostas HTTP 502 aparecem durante
+  a abertura. A latencia percebida continua alta em varias transicoes.
+- O fluxo completo foi documentado em
+  `docs/Nplay_Switch_Fluxo_Reproducao_e_Plano_de_Investigacao.docx`. O gerador
+  reproduzivel fica em `tools/build_playback_investigation_doc.py`.
+- Conclusao para o proximo agente: nao tratar 502 e crash como a mesma falha.
+  `/api/play/:itemId` devolve 502 quando `resolveStreamUrl` nao renova nenhuma
+  fonte; o fechamento nativo ocorre depois, dentro de HLS/AVIO/FFmpeg/decoder.
+- Permanecem sincronas na thread da interface: detalhe de filme, detalhe de serie
+  e consulta de progresso antes do player. A landing de abas ja e assincrona, mas
+  isso nao elimina esses bloqueios nem a latencia real do backend.
+- Proxima rodada deve ser de instrumentacao, nao outra mudanca ampla: correlacao
+  item/source/session, status e duracao de `/stream` e `/play`, ultima etapa,
+  quantidade/bytes de AVIO e memoria livre. Depois, comparar A/B HTTP nativo do
+  FFmpeg contra AVIO libcurl usando o mesmo manifesto R2.
+- O DOCX passou auditoria estrutural, de estilos, tabelas e acessibilidade (zero
+  alertas). Nao houve QA visual por PNG porque LibreOffice/`soffice` nao esta
+  instalado neste host; isso deve ser feito por um agente/host que o possua.
