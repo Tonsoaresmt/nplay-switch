@@ -26,6 +26,8 @@ Assert-True ($sources -match 'fmt->io_open = player_hls_io_open') 'HLS voltou a 
 Assert-True ($sources -match 'nplay_curl_avio_open_hls') 'Playlists e segmentos HLS nao usam o transporte libcurl.'
 Assert-True ($sources -match 'HLS_META_RINGCAP \(256 \* 1024\)') 'Manifestos HLS voltaram a reservar memoria excessiva.'
 Assert-True ($sources -match 'HLS_MEDIA_RINGCAP \(1024 \* 1024\)') 'Segmentos HLS perderam o teto de memoria por recurso.'
+Assert-True ($sources -match 'metadata-ready') 'Manifestos HLS voltaram a ser entregues enquanto a thread ainda os altera.'
+Assert-True ($sources -match '"meta", 1\)') 'Metadados HLS nao usam mais a abertura sincrona e imutavel.'
 Assert-True ($sources -match 'if \(c->write_overflow\) return -2') 'Bloco HTTP truncado pode voltar a ser entregue ao FFmpeg.'
 Assert-True ($sources -match 'nplay_curl_avio_stats') 'Diagnostico nao informa recursos HLS e memoria reservada.'
 Assert-True ($sources -match 'http_persistent", "0"') 'HLS customizado tentou reutilizar um AVIO como protocolo HTTP nativo.'
@@ -46,7 +48,8 @@ Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apr
 
 $diagSource = Get-Content source/diag.c -Raw
 Assert-True ($diagSource -match 'sdmc:/switch/\.nplay-player-trace\.log') 'Trace detalhado do player nao persiste na raiz de switch.'
-Assert-True ($diagSource -match 'InfoType_UsedMemorySize') 'Trace nao registra pressao de memoria do processo.'
+Assert-True ($diagSource -match 'InfoType_UsedMemorySize') 'Trace nao registra a reserva de memoria do processo.'
+Assert-True ($diagSource -match 'mallinfo') 'Trace nao registra uso e folga reais do heap.'
 Assert-True ($diagSource -match 'safe_path') 'Trace de rede pode voltar a persistir query string privada.'
 Assert-True ($diagSource -notmatch 'play_url|Authorization|Bearer') 'Trace diagnostico contem campo sensivel.'
 

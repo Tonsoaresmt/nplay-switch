@@ -48,12 +48,16 @@ typedef struct {
     unsigned char *tmp; size_t tmp_len;
     int write_overflow;
     int accounted, reserved_kb;
+    int static_data;
+    size_t static_pos, static_len;
     int resource_id, first_http_logged;
     char profile[8];
 } CurlIO;
 
 static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
-    CurlIO *c = (CurlIO *)ud; size_t n = sz * nm;
+    CurlIO *c = (CurlIO *)ud;
+    if (sz != 0 && nm > SIZE_MAX / sz) { c->write_overflow = 1; return 0; }
+    size_t n = sz * nm;
     if (n > c->tmp_cap - c->tmp_len) {
         c->write_overflow = 1;
         return 0;
@@ -61,20 +65,26 @@ static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
     memcpy(c->tmp + c->tmp_len, ptr, n); c->tmp_len += n; return n;
 }
 static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
-    CurlIO *c = (CurlIO *)ud; size_t n = sz * nm;
+    CurlIO *c = (CurlIO *)ud;
+    if (sz != 0 && nm > SIZE_MAX / sz) return 0;
+    size_t n = sz * nm;
+    char line[160];
+    size_t copy = n < sizeof(line) - 1 ? n : sizeof(line) - 1;
+    memcpy(line, ptr, copy);
+    line[copy] = '\0';
     // Redirecionamentos entregam mais de um bloco de cabecalhos. Ao encontrar
     // uma nova linha de status, descarte os comprimentos da resposta anterior.
-    if (n > 5 && !strncasecmp(ptr, "HTTP/", 5)) {
+    if (copy > 5 && !strncasecmp(line, "HTTP/", 5)) {
         c->response_length = -1;
         c->range_total = -1;
-    } else if (n > 14 && !strncasecmp(ptr, "Content-Range:", 14)) {
-        for (size_t i = 0; i + 1 < n; i++) if (ptr[i] == '/') {
-            long long total = atoll(ptr + i + 1);
+    } else if (copy > 14 && !strncasecmp(line, "Content-Range:", 14)) {
+        for (size_t i = 0; i + 1 < copy; i++) if (line[i] == '/') {
+            long long total = atoll(line + i + 1);
             if (total > 0) c->range_total = total;
             break;
         }
-    } else if (n > 15 && !strncasecmp(ptr, "Content-Length:", 15)) {
-        long long length = atoll(ptr + 15);
+    } else if (copy > 15 && !strncasecmp(line, "Content-Length:", 15)) {
+        long long length = atoll(line + 15);
         if (length >= 0) c->response_length = length;
     }
     return n;
@@ -219,6 +229,17 @@ static int producer(void *arg) {
 static int cio_read(void *opaque, uint8_t *out, int want) {
     CurlIO *c = (CurlIO *)opaque;
     if (want <= 0) return 0;
+    // Playlists e legendas sao baixadas por inteiro antes de retornar ao FFmpeg.
+    // Esse caminho nao possui thread produtora e permite seeks seguros no buffer.
+    if (c->static_data) {
+        if (c->static_pos >= c->static_len) return AVERROR_EOF;
+        size_t available = c->static_len - c->static_pos;
+        size_t n = available < (size_t)want ? available : (size_t)want;
+        memcpy(out, c->ring + c->static_pos, n);
+        c->static_pos += n;
+        c->delivered = 1;
+        return (int)n;
+    }
     SDL_LockMutex(c->mtx);
     // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
     // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
@@ -250,6 +271,15 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
 
 static int64_t cio_seek(void *opaque, int64_t off, int whence) {
     CurlIO *c = (CurlIO *)opaque;
+    if (c->static_data) {
+        if (whence == AVSEEK_SIZE) return (int64_t)c->static_len;
+        int64_t next = whence == SEEK_SET ? off :
+                       whence == SEEK_CUR ? (int64_t)c->static_pos + off :
+                       whence == SEEK_END ? (int64_t)c->static_len + off : -1;
+        if (next < 0 || next > (int64_t)c->static_len) return AVERROR(EINVAL);
+        c->static_pos = (size_t)next;
+        return next;
+    }
     if (whence == AVSEEK_SIZE) {
         SDL_LockMutex(c->mtx);
         int guard = 0;
@@ -283,7 +313,8 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
 
 static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
                                            size_t block_size, size_t ring_cap,
-                                           int avio_buffer_size, const char *profile) {
+                                           int avio_buffer_size, const char *profile,
+                                           int synchronous) {
     if (!url || !url[0]) return NULL;
     CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
     if (!c) return NULL;
@@ -349,15 +380,37 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
                       c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
                       SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
-    c->th = SDL_CreateThread(producer, "cavio", c);
-    if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }
+    if (synchronous) {
+        // O crash real da 0.9.8 ocorreu entre a primeira resposta HTTP e o
+        // retorno de avformat_open_input. Para recursos pequenos, nao existe
+        // beneficio em entregar ao demuxer enquanto outra thread ainda altera
+        // o mesmo contexto. Baixe, valide e congele o payload primeiro.
+        int got = fetch_block(c, 0);
+        if (got <= 0 || (size_t)got > c->ring_cap ||
+            (c->size > 0 && c->size > got)) {
+            diag_player_event("avio", "metadata-invalid",
+                              "id=%d got=%d total=%lld", c->resource_id, got,
+                              (long long)c->size);
+            av_free(avio_buf); free_cio(c); return NULL;
+        }
+        memcpy(c->ring, c->tmp, (size_t)got);
+        c->static_data = 1;
+        c->static_len = (size_t)got;
+        c->static_pos = 0;
+        c->size = got;
+        c->eof = 1;
+        diag_player_event("avio", "metadata-ready", "id=%d bytes=%d", c->resource_id, got);
+    } else {
+        c->th = SDL_CreateThread(producer, "cavio", c);
+        if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }
+    }
     AVIOContext *ctx = avio_alloc_context(avio_buf, avio_buffer_size, 0, c, cio_read, NULL, cio_seek);
     if (!ctx) { av_free(avio_buf); free_cio(c); return NULL; }
     return ctx;
 }
 
 AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
-    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP, 65536, "file");
+    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP, 65536, "file", 0);
 }
 
 static int hls_is_metadata_url(const char *url) {
@@ -375,8 +428,8 @@ static int hls_is_metadata_url(const char *url) {
 
 AVIOContext *nplay_curl_avio_open_hls(const char *url) {
     if (hls_is_metadata_url(url))
-        return curl_avio_open_profile(url, -1, HLS_META_BLOCK, HLS_META_RINGCAP, 32768, "meta");
-    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536, "media");
+        return curl_avio_open_profile(url, -1, HLS_META_RINGCAP, HLS_META_RINGCAP, 32768, "meta", 1);
+    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536, "media", 0);
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

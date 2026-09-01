@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <malloc.h>
 
 #define PLAYER_LOG "sdmc:/switch/.nplay-player-trace.log"
 #define PLAYER_PREV_LOG "sdmc:/switch/.nplay-player-trace.prev.log"
@@ -78,15 +79,15 @@ void diag_player_event(const char *component, const char *event,
         vsnprintf(detail, sizeof(detail), format, args);
         va_end(args);
     }
-    u64 total_memory = 0, used_memory = 0;
-    svcGetInfo(&total_memory, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
-    svcGetInfo(&used_memory, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    u64 process_memory = 0;
+    svcGetInfo(&process_memory, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    struct mallinfo heap = mallinfo();
     unsigned sequence = (unsigned)SDL_AtomicAdd(&g_player_sequence, 1) + 1;
     char line[DIAG_LINE_CAP];
-    snprintf(line, sizeof(line), "%04u %10u mem=%llu/%lluMB %-7.7s %-24.24s %s",
+    snprintf(line, sizeof(line), "%04u %10u heap=%u/%uKB proc=%lluMB %-7.7s %-24.24s %s",
              sequence, SDL_GetTicks(),
-             (unsigned long long)(used_memory / (1024 * 1024)),
-             (unsigned long long)(total_memory / (1024 * 1024)),
+             (unsigned)(heap.uordblks / 1024), (unsigned)(heap.fordblks / 1024),
+             (unsigned long long)(process_memory / (1024 * 1024)),
              component ? component : "player", event ? event : "event", detail);
     append_line(PLAYER_LOG, line, 0);
 }

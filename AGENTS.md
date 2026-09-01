@@ -809,3 +809,31 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   Repetir com um episodio de serie. O ultimo evento separara crash em abertura,
   probe, decoder, audio, primeiro frame ou renderer. Registrar tambem as duas
   linhas de rede para atacar a latencia de detalhe/catalogo na rodada seguinte.
+
+## Correcao orientada pelo trace real em 01/09/2026 (0.9.9)
+
+- A foto da 0.9.8 localizou o fechamento entre `avio http` do primeiro recurso e
+  o retorno de `avformat_open_input`: nenhum evento de probe, decoder, audio,
+  primeiro frame ou renderer ocorreu. O unico AVIO ativo era metadata HLS com
+  352 KB. Portanto a falha nao estava na decodificacao nem na GPU.
+- A causa atacada e o ciclo de vida do primeiro manifesto: `io_open` devolvia um
+  AVIO ao FFmpeg antes de a thread produtora terminar a primeira resposta. O
+  demuxer e a thread podiam observar/alterar `size`, EOF e buffer simultaneamente
+  justamente durante `avformat_open_input`.
+- Playlists, WebVTT/SRT e chaves HLS agora sao baixadas, limitadas, validadas e
+  congeladas antes de `io_open` retornar. O AVIO pequeno suporta leitura e seek
+  diretamente no buffer imutavel, sem thread. Segmentos de midia continuam no
+  prefetch assincrono de 1 MB para preservar throughput e fluidez.
+- O parser de `Content-Range`/`Content-Length` nao chama mais `atoll` em memoria
+  de header do curl que nao tem garantia de terminador NUL; copia para um buffer
+  local terminado e valida multiplicacao de tamanhos antes dos callbacks.
+- O valor `mem=3185/3189MB` da 0.9.8 era a reserva do processo Horizon, nao 4 MB
+  fisicamente livres. O novo trace mostra `heap=usado/livreKB` via `mallinfo` e
+  mantem `proc=...MB` apenas como contexto, evitando diagnostico enganoso.
+- Build limpo 0.9.9 e contrato site/Switch passaram. `Nplay.nro` possui
+  23.581.232 bytes e SHA-256
+  `7b3ec3a4839d6732aa99cc446718dd31f6f236a703f381e372c93894f578216c`.
+- Teste de hardware: filme e episodio HLS por 30 s. Se ainda fechar, a ultima
+  linha deve agora ser anterior a `metadata-ready`, entre `metadata-ready` e
+  `hls-io open-ok`, ou ja em outro recurso/etapa; isso define a proxima correcao
+  sem reabrir a hipotese de decoder antes da evidencia.
