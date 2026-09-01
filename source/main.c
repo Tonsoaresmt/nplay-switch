@@ -273,6 +273,7 @@ static cJSON *g_land_pending = NULL;
 static SDL_Thread *g_land_thread = NULL;
 static SDL_atomic_t g_land_done;
 static int g_land_fetch_tab = -1, g_land_queued_tab = -1;
+static unsigned g_land_attempted_mask = 0;
 static char g_land_error[192] = "";
 static cJSON *g_heroesArr = NULL;     // array (dentro de g_land) usado no destaque
 static int g_heroSeriesDefault = 1;   // hero abre como serie? (Filmes = 0)
@@ -506,6 +507,7 @@ static int landing_fetch_thread(void *unused) {
 }
 
 static void landing_start(int tab) {
+    g_land_attempted_mask |= 1u << tab;
     g_land_fetch_tab = tab;
     g_land_pending = NULL;
     SDL_AtomicSet(&g_land_done, 0);
@@ -557,7 +559,22 @@ static void pump_landing(void) {
     }
     int queued = g_land_queued_tab;
     g_land_queued_tab = -1;
-    if (queued >= 0 && queued <= 4 && !g_land_cache[queued]) landing_start(queued);
+    if (queued >= 0 && queued <= 4 && !g_land_cache[queued]) {
+        landing_start(queued);
+        return;
+    }
+    // Depois da Home, aquece catalogos em serie, nunca em paralelo. Assim a
+    // primeira entrada em Filmes/Series tende a ser instantanea sem repetir a
+    // disputa HTTPS que tornou a 0.7.0 instavel. Uma falha automatica nao entra
+    // em loop; abrir a aba continua permitindo nova tentativa manual.
+    static const int prefetch_order[] = { 1, 2, 3, 4 };
+    for (size_t i = 0; i < sizeof(prefetch_order) / sizeof(prefetch_order[0]); i++) {
+        int candidate = prefetch_order[i];
+        if (!g_land_cache[candidate] && !(g_land_attempted_mask & (1u << candidate))) {
+            landing_start(candidate);
+            break;
+        }
+    }
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {

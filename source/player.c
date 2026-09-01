@@ -623,10 +623,34 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1;
     }
     diag_player_event("format", "alloc-ok", NULL);
-    if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
+    const AVInputFormat *forced_format = NULL;
     if (native_hls) {
+        // Nao entregue o manifesto raiz pelo io_open do proprio probe. As duas
+        // capturas reais (0.9.8/0.9.9) mostram o processo morrendo exatamente
+        // depois desse callback e antes de avformat_open_input retornar. Abra o
+        // root explicitamente, marque-o como custom IO e informe o demuxer HLS;
+        // a URL continua presente para resolver playlists/segmentos relativos.
+        avio = nplay_curl_avio_open_hls(url);
+        if (!avio) {
+            diag_player_event("format", "root-open-fail", NULL);
+            avformat_free_context(fmt);
+            player_error_message("nao foi possivel baixar o manifesto HLS");
+            return -10;
+        }
+        fmt->pb = avio;
+        fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
         fmt->io_open = player_hls_io_open;
         fmt->io_close2 = player_hls_io_close;
+        forced_format = av_find_input_format("hls");
+        if (!forced_format) {
+            diag_player_event("format", "hls-demuxer-missing", NULL);
+            nplay_curl_avio_close(avio);
+            avformat_free_context(fmt);
+            player_error_message("demuxer HLS indisponivel nesta instalacao");
+            return -10;
+        }
+        diag_player_event("format", "root-ready", "forced=hls");
+        player_boot_stage("02 manifesto HLS raiz pronto");
     }
     player_boot_stage(native_hls ? "02 contexto HLS libcurl pronto" : "02 contexto de arquivo pronto");
     // A sondagem padrao pode ler cinco segundos/5 MB de CADA rendition HLS.
@@ -679,7 +703,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     player_boot_stage("03 abrindo fonte");
     diag_player_event("format", "open-begin", "timeout=%ds", native_hls ? 20 : 30);
-    int rc = avformat_open_input(&fmt, url, NULL, &open_opts);
+    int rc = avformat_open_input(&fmt, url, forced_format, &open_opts);
     av_dict_free(&open_opts);
     if (rc != 0) {
         diag_player_event("format", "open-fail", "rc=%d cancelled=%d", rc, open_watch.cancelled);

@@ -837,3 +837,34 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   linha deve agora ser anterior a `metadata-ready`, entre `metadata-ready` e
   `hls-io open-ok`, ou ja em outro recurso/etapa; isso define a proxima correcao
   sem reabrir a hipotese de decoder antes da evidencia.
+
+## Causa raiz da abertura confirmada em 01/09/2026 (0.10.0)
+
+- A foto real da 0.9.9 avancou ate `metadata-ready` e `hls-io open-ok`, com
+  aproximadamente 62 MB livres no heap, mas nao chegou a `format open-ok`.
+  Isso exclui download incompleto, falta de memoria, decoder, audio e renderer.
+- A revisao do FFmpeg 7.1 usado no NRO confirmou a fronteira: ao receber o
+  manifesto raiz por `io_open`, `avformat_open_input` ainda executava o probe
+  generico sobre esse AVIO antes de entrar em `hls_read_header`. Era exatamente
+  a etapa entre os dois breadcrumbs das capturas e o processo Horizon morria
+  dentro dela sem devolver codigo C.
+- O root HLS agora e aberto explicitamente por libcurl antes do FFmpeg, ligado a
+  `fmt->pb` como `AVFMT_FLAG_CUSTOM_IO`, e `av_find_input_format("hls")` e passado
+  a `avformat_open_input`. A URL original continua no contexto para resolver
+  filhos relativos; `io_open/io_close2` atendem apenas playlists, init e segmentos
+  internos. Assim o probe instavel do manifesto raiz nao e mais executado.
+- Um manifesto R2 real foi consultado de forma somente leitura e com token
+  ocultado: master valido, H.264 1080p, dois audios AAC e duas legendas. A analise
+  tambem confirmou que URLs assinadas possuem query longa; o cliente mantem
+  `allowed_extensions=ALL`, necessario no FFmpeg 7.1.
+- Para a lentidao inicial, apos carregar Home o cliente aquece Filmes, Series,
+  Animes e Doramas em uma unica thread e nessa ordem. Nunca existem dois fetches
+  de catalogo simultaneos; uma falha automatica nao entra em loop e abrir a aba
+  permite tentar novamente.
+- Build limpo 0.10.0 passou junto com contrato site/Switch e contrato integrado
+  do backend. `Nplay.nro` possui 23.581.232 bytes e SHA-256
+  `08addadd0ed81135b4afd07285d321ba5bbb6fa24dbaa0c45b3a3bfed170b348`.
+- Teste obrigatorio: apos abrir o app, aguardar Home estabilizar e alternar para
+  Filmes/Series (cache aquecido); reproduzir filme e episodio HLS por 30 s. Se
+  houver nova falha, o trace deve obrigatoriamente passar por `root-ready` e
+  localizar uma etapa interna diferente; nao voltar ao probe generico do root.
