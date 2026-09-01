@@ -868,3 +868,26 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   Filmes/Series (cache aquecido); reproduzir filme e episodio HLS por 30 s. Se
   houver nova falha, o trace deve obrigatoriamente passar por `root-ready` e
   localizar uma etapa interna diferente; nao voltar ao probe generico do root.
+
+## Correcao de pressao de memoria em 01/09/2026 (0.10.1)
+
+- A captura real da 0.10.0 confirmou que o root HLS e o demuxer ja estavam
+  funcionando: o trace avancou por centenas de aberturas internas. O encerramento
+  aconteceu com `heap=192087/14136KB`, isto e, somente cerca de 14 MB livres.
+  Na captura 0.9.9 a mesma fase com menos catalogos retidos tinha cerca de 62 MB.
+- Foi removido o aquecimento automatico de Filmes, Series, Animes e Doramas. Ele
+  reduzia o tempo da primeira troca de aba, mas mantinha cinco payloads grandes e
+  suas capas vivos justamente durante o maior pico de memoria do FFmpeg.
+- Antes de cada `player_run`, `playback_memory_enter` libera as cinco landings,
+  todas as texturas e surfaces de capa e esvazia downloads de capas ainda na fila.
+  Os tres workers ficam suspensos; uma imagem que termine durante o player e
+  descartada em vez de concorrer com playlists, demuxers e decoders.
+- Busca, detalhe da obra, serie, Historico e posicao permanecem em memoria para
+  preservar o retorno contextual. Ao voltar para uma landing, somente a aba
+  visivel e recarregada de forma assincrona.
+- O titulo do player e copiado antes da liberacao dos catalogos, evitando ponteiro
+  pendente ao tocar episodios/canais diretamente a partir de uma rail.
+- Build 0.10.1 concluido sem erros nem avisos. Pendente no Switch: confirmar que o
+  primeiro evento do novo trace mostra margem de heap substancialmente maior e
+  reproduzir um filme e um episodio por 30 s. Se ainda houver falha, usar a foto
+  do trace 0.10.1; ela mostrara se o consumo restante pertence ao demuxer HLS.

@@ -69,6 +69,10 @@ static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
 static int g_ready[MAX_COV]; static int g_rh = 0, g_rt = 0, g_rn = 0;
 static SDL_mutex *g_ready_mtx;
 static volatile int g_run = 1;
+// O player e o catalogo disputam a mesma heap do processo. Durante a abertura
+// de HLS, suspendemos capas para que workers nao decodifiquem JPEG/WebP enquanto
+// o FFmpeg cria demuxers, playlists e decoders.
+static SDL_atomic_t g_cover_suspended;
 
 static unsigned cover_hash(const char *s) {
     unsigned h = 2166136261u;
@@ -124,7 +128,7 @@ SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     int f = cover_find_locked(url, 1);
     SDL_Texture *tex = (f >= 0) ? g_cov[f].tex : NULL;
     if (tex) g_cov[f].last_used = SDL_GetTicks();
-    if (f >= 0 && g_cov[f].state == 0) {
+    if (f >= 0 && g_cov[f].state == 0 && !SDL_AtomicGet(&g_cover_suspended)) {
         int queued = 0;
         SDL_LockMutex(g_q_mtx);
         if (g_qn < MAX_COV) { g_q[g_qt] = f; g_qt = (g_qt + 1) % MAX_COV; g_qn++; queued = 1; }
@@ -144,6 +148,12 @@ static int cover_worker(void *arg) {
         if (g_qn > 0) { idx = g_q[g_qh]; g_qh = (g_qh + 1) % MAX_COV; g_qn--; }
         SDL_UnlockMutex(g_q_mtx);
         if (idx < 0) continue;
+        if (SDL_AtomicGet(&g_cover_suspended)) {
+            SDL_LockMutex(g_cov_mtx);
+            if (g_cov[idx].state == 1) g_cov[idx].state = 0;
+            SDL_UnlockMutex(g_cov_mtx);
+            continue;
+        }
         char url[900];
         SDL_LockMutex(g_cov_mtx);
         if (strncmp(g_cov[idx].url, "http", 4) == 0) snprintf(url, sizeof(url), "%s", g_cov[idx].url);
@@ -159,10 +169,18 @@ static int cover_worker(void *arg) {
             s = IMG_Load_RW(rw, 1);
         }
         membuf_free(&out);
+        int discard = 0;
         SDL_LockMutex(g_cov_mtx);
-        if (s) { g_cov[idx].surf = s; g_cov[idx].state = 2; }
-        else g_cov[idx].state = 3;
+        if (SDL_AtomicGet(&g_cover_suspended)) {
+            g_cov[idx].state = 0; discard = 1;
+        } else if (s) {
+            g_cov[idx].surf = s; g_cov[idx].state = 2;
+        } else g_cov[idx].state = 3;
         SDL_UnlockMutex(g_cov_mtx);
+        if (discard) {
+            if (s) SDL_FreeSurface(s);
+            continue;
+        }
         if (s) {
             int queued = 0;
             SDL_LockMutex(g_ready_mtx);
@@ -273,7 +291,6 @@ static cJSON *g_land_pending = NULL;
 static SDL_Thread *g_land_thread = NULL;
 static SDL_atomic_t g_land_done;
 static int g_land_fetch_tab = -1, g_land_queued_tab = -1;
-static unsigned g_land_attempted_mask = 0;
 static char g_land_error[192] = "";
 static cJSON *g_heroesArr = NULL;     // array (dentro de g_land) usado no destaque
 static int g_heroSeriesDefault = 1;   // hero abre como serie? (Filmes = 0)
@@ -356,6 +373,9 @@ void detail_capture_origin(void) {
 void detail_return_to_origin(void) {
     g_screen = g_detail_return;
     g_detail_return = SC_MAIN;
+    // A landing e liberada antes do player para reservar memoria ao FFmpeg.
+    // Ao voltar, recarrega apenas a aba realmente visivel e em segundo plano.
+    if (g_screen == SC_MAIN && g_tab <= 4 && !g_land) load_landing(g_tab);
 }
 
 // ------------------------------------------------------------- favoritos
@@ -494,6 +514,47 @@ static const char *landing_path(int tab) {
     }
 }
 
+// Chamado exclusivamente pela thread principal antes do player. Esvaziar as
+// filas e destruir texturas aqui e seguro: nenhum desenho do catalogo ocorre
+// enquanto player_run controla o renderer. Workers ja em HTTP descartam o
+// resultado ao observar g_cover_suspended.
+static void cover_suspend_and_release(void) {
+    SDL_AtomicSet(&g_cover_suspended, 1);
+
+    SDL_LockMutex(g_cov_mtx);
+    SDL_LockMutex(g_q_mtx);
+    while (g_qn > 0) {
+        int idx = g_q[g_qh];
+        g_qh = (g_qh + 1) % MAX_COV; g_qn--;
+        if (idx >= 0 && idx < g_covN && g_cov[idx].state == 1)
+            g_cov[idx].state = 0;
+    }
+    g_qh = g_qt = 0;
+    SDL_UnlockMutex(g_q_mtx);
+
+    for (int i = 0; i < g_covN; i++) {
+        if (g_cov[i].tex) {
+            SDL_DestroyTexture(g_cov[i].tex);
+            g_cov[i].tex = NULL;
+        }
+        if (g_cov[i].surf) {
+            SDL_FreeSurface(g_cov[i].surf);
+            g_cov[i].surf = NULL;
+        }
+        if (g_cov[i].state == 2 || g_cov[i].state == 3) g_cov[i].state = 0;
+    }
+    g_cov_texN = 0;
+    SDL_UnlockMutex(g_cov_mtx);
+
+    SDL_LockMutex(g_ready_mtx);
+    g_rh = g_rt = g_rn = 0;
+    SDL_UnlockMutex(g_ready_mtx);
+}
+
+static void cover_resume_after_playback(void) {
+    SDL_AtomicSet(&g_cover_suspended, 0);
+}
+
 static int landing_fetch_thread(void *unused) {
     (void)unused;
     int tab = g_land_fetch_tab;
@@ -507,7 +568,6 @@ static int landing_fetch_thread(void *unused) {
 }
 
 static void landing_start(int tab) {
-    g_land_attempted_mask |= 1u << tab;
     g_land_fetch_tab = tab;
     g_land_pending = NULL;
     SDL_AtomicSet(&g_land_done, 0);
@@ -563,18 +623,25 @@ static void pump_landing(void) {
         landing_start(queued);
         return;
     }
-    // Depois da Home, aquece catalogos em serie, nunca em paralelo. Assim a
-    // primeira entrada em Filmes/Series tende a ser instantanea sem repetir a
-    // disputa HTTPS que tornou a 0.7.0 instavel. Uma falha automatica nao entra
-    // em loop; abrir a aba continua permitindo nova tentativa manual.
-    static const int prefetch_order[] = { 1, 2, 3, 4 };
-    for (size_t i = 0; i < sizeof(prefetch_order) / sizeof(prefetch_order[0]); i++) {
-        int candidate = prefetch_order[i];
-        if (!g_land_cache[candidate] && !(g_land_attempted_mask & (1u << candidate))) {
-            landing_start(candidate);
-            break;
+}
+
+// Reserva memoria para o pico previsivel da abertura HLS. Preservamos busca,
+// detalhe e historico para manter o retorno contextual; somente landings grandes
+// e recursos visuais reconstruiveis sao descartados.
+static void playback_memory_enter(void) {
+    cover_suspend_and_release();
+    g_land = NULL; g_heroesArr = NULL; g_railsN = 0;
+    for (int i = 0; i < 5; i++) {
+        if (g_land_cache[i]) {
+            cJSON_Delete(g_land_cache[i]);
+            g_land_cache[i] = NULL;
         }
     }
+}
+
+static void playback_memory_leave(void) {
+    cover_resume_after_playback();
+    if (g_screen == SC_MAIN && g_tab <= 4 && !g_land) load_landing(g_tab);
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {
@@ -651,6 +718,8 @@ static int prompt_resume_playback(const char *title, int position_seconds) {
 // assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
 // Retorna 1 se o video terminou naturalmente (p/ auto-play do proximo).
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls) {
+    char stable_title[256];
+    snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
     double start = 0;
     int completed = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
@@ -663,7 +732,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
         cJSON_Delete(pr);
     }
     if (!completed && start > 10) {
-        int choice = prompt_resume_playback(title, (int)start);
+        int choice = prompt_resume_playback(stable_title, (int)start);
         if (choice < 0) return 0;
         if (choice == 0) start = 0;
     }
@@ -671,7 +740,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     PlayerRequest req = {0};
     req.item_id = itemId;
     req.session_id = 0; // Local ou arquivo direto
-    req.title = title;
+    req.title = stable_title;
     req.url = url;
     req.start_sec = start;
     req.progress_cb = on_player_progress;
@@ -679,10 +748,12 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     // Sem renew_cb pois nao e uma stream resolvida via API.
     req.userdata = NULL;
 
+    playback_memory_enter();
     appletSetMediaPlaybackState(true);
     PlayerResult res = {0};
     int run_rc = player_run(gRen, g_joy, &req, &res);
     appletSetMediaPlaybackState(false);
+    playback_memory_leave();
     g_download_awake = 0;
 
     if (g_tab == TAB_DOWNLOADS) load_history();
@@ -699,11 +770,13 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
 
 // Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play(int itemId, const char *title) {
+    char stable_title[256];
+    snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     ui_header("NPLAY", "Abrindo video", "");
     ui_panel(260, 210, WIN_W - 520, 250, C_ACC2);
     text_draw(gRen, "PREPARANDO", 300, 244, C_ACC2, 0);
-    text_center_at(title && title[0] ? title : "Video", 300, WIN_W - 600, 286, C_TEXT, 1);
+    text_center_at(stable_title, 300, WIN_W - 600, 286, C_TEXT, 1);
     text_center_at("Organizando tudo para comecar...", 300, WIN_W - 600, 354, C_MUT, 0);
     for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
     SDL_RenderPresent(gRen);
@@ -718,7 +791,7 @@ int resolve_and_play(int itemId, const char *title) {
     int rc = 0;
     if (src.container[0] && !strcmp(src.container, "torrent")) {
         // Para torrent, o fluxo e separado (usa accel_wait_and_play que tem I/O diferente)
-        rc = accel_wait_and_play(itemId, title);
+        rc = accel_wait_and_play(itemId, stable_title);
     } else if (src.container[0] && !strcmp(src.container, "embed")) {
         toast("Este conteudo ainda nao esta disponivel neste dispositivo");
     } else if (src.play_url[0]) {
@@ -734,7 +807,7 @@ int resolve_and_play(int itemId, const char *title) {
             cJSON_Delete(pr);
         }
         if (!completed && start > 10) {
-            int choice = prompt_resume_playback(title, (int)start);
+            int choice = prompt_resume_playback(stable_title, (int)start);
             if (choice < 0) { if (src.session_id > 0) api_stop_playback(itemId); return 0; }
             if (choice == 0) start = 0;
         }
@@ -745,7 +818,7 @@ int resolve_and_play(int itemId, const char *title) {
         req.session_id = src.session_id;
         req.source_id = src.source_id;
         req.delivery = src.delivery;
-        req.title = title;
+        req.title = stable_title;
         req.section = src.section;
         req.container = src.container;
         req.url = src.play_url;
@@ -758,10 +831,12 @@ int resolve_and_play(int itemId, const char *title) {
         req.heartbeat_cb = on_player_heartbeat;
         req.userdata = NULL;
 
+        playback_memory_enter();
         appletSetMediaPlaybackState(true);
         PlayerResult res = {0};
         int run_rc = player_run(gRen, g_joy, &req, &res);
         appletSetMediaPlaybackState(false);
+        playback_memory_leave();
         g_download_awake = 0;
 
         if (g_tab == TAB_DOWNLOADS) load_history();
