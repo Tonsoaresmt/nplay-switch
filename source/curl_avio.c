@@ -19,12 +19,17 @@
 
 #define FILE_BLOCK   (512 * 1024)
 #define FILE_RINGCAP (16 * 1024 * 1024)
-#define HLS_BLOCK    (256 * 1024)
-#define HLS_RINGCAP  (2 * 1024 * 1024)
+#define HLS_META_BLOCK   (64 * 1024)
+#define HLS_META_RINGCAP (256 * 1024)
+#define HLS_MEDIA_BLOCK  (256 * 1024)
+#define HLS_MEDIA_RINGCAP (1024 * 1024)
+
+static SDL_atomic_t g_active_contexts = {0};
+static SDL_atomic_t g_reserved_kb = {0};
 
 typedef struct {
     CURL *easy;
-    char  url[2048];
+    char *url;
     unsigned char *ring;
     size_t ring_cap;
     size_t block_size, tmp_cap;
@@ -39,11 +44,16 @@ typedef struct {
     SDL_cond  *c_data, *c_space;
     SDL_Thread *th;
     unsigned char *tmp; size_t tmp_len;
+    int write_overflow;
+    int accounted, reserved_kb;
 } CurlIO;
 
 static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
     CurlIO *c = (CurlIO *)ud; size_t n = sz * nm;
-    if (c->tmp_len + n > c->tmp_cap) return 0;
+    if (n > c->tmp_cap - c->tmp_len) {
+        c->write_overflow = 1;
+        return 0;
+    }
     memcpy(c->tmp + c->tmp_len, ptr, n); c->tmp_len += n; return n;
 }
 static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
@@ -74,6 +84,7 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
 
 static int fetch_block(CurlIO *c, int64_t start) {
     c->tmp_len = 0;
+    c->write_overflow = 0;
     c->fetch_complete = 0;
     c->response_length = -1;
     c->range_total = -1;
@@ -95,6 +106,10 @@ static int fetch_block(CurlIO *c, int64_t start) {
         c->fetch_complete = 1;
         return 0;
     }
+    // Nunca entregue um bloco truncado ao demuxer. Alguns hosts ignoram Range
+    // e devolvem o segmento inteiro; a versao anterior aceitava o prefixo ate
+    // encher tmp e podia alimentar o FFmpeg com fMP4 corrompido.
+    if (c->write_overflow) return -2;
     if (code >= 400 && code < 500 && code != 408 && code != 429) return -2;
     if (code != 200 && code != 206) return -1;
     if (start > 0 && code != 206) return -1; // servidor ignorou Range: seek inseguro
@@ -110,7 +125,11 @@ static void free_cio(CurlIO *c) {
     if (c->mtx) SDL_DestroyMutex(c->mtx);
     if (c->c_data) SDL_DestroyCond(c->c_data);
     if (c->c_space) SDL_DestroyCond(c->c_space);
-    free(c->ring); free(c->tmp); free(c);
+    if (c->accounted) {
+        SDL_AtomicAdd(&g_active_contexts, -1);
+        SDL_AtomicAdd(&g_reserved_kb, -c->reserved_kb);
+    }
+    free(c->url); free(c->ring); free(c->tmp); free(c);
 }
 static void ring_put(CurlIO *c, const unsigned char *src, size_t n) {
     size_t tail = (c->head + c->count) % c->ring_cap;
@@ -248,17 +267,21 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
 }
 
 static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
-                                           size_t block_size, size_t ring_cap) {
+                                           size_t block_size, size_t ring_cap,
+                                           int avio_buffer_size) {
     if (!url || !url[0]) return NULL;
     CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
     if (!c) return NULL;
-    snprintf(c->url, sizeof(c->url), "%s", url);
+    size_t url_len = strlen(url);
+    c->url = (char *)malloc(url_len + 1);
+    if (!c->url) { free_cio(c); return NULL; }
+    memcpy(c->url, url, url_len + 1);
     c->size = expected_size > 0 ? expected_size : -1;
     c->response_length = c->range_total = -1;
     c->seek_req = -1; c->base = 0; c->running = 1;
     c->block_size = block_size;
     c->ring_cap = ring_cap;
-    c->tmp_cap = block_size + 65536;
+    c->tmp_cap = block_size;
     c->ring = (unsigned char *)malloc(c->ring_cap);
     c->tmp  = (unsigned char *)malloc(c->tmp_cap);
     c->easy = curl_easy_init();
@@ -269,6 +292,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     curl_easy_setopt(c->easy, CURLOPT_URL, c->url);
     curl_easy_setopt(c->easy, CURLOPT_USERAGENT, "Nplay-Switch/1.0");
     curl_easy_setopt(c->easy, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c->easy, CURLOPT_MAXREDIRS, 8L);
     // Byte ranges de MP4 precisam se referir aos bytes originais. Nao permita
     // gzip/brotli nem decodificacao transparente mudar offsets e tamanho.
     curl_easy_setopt(c->easy, CURLOPT_ACCEPT_ENCODING, "identity");
@@ -299,21 +323,45 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     // o cache de conexoes entre produtores simultaneos causou crash no hardware.
     net_configure_curl_isolated(c->easy);
 
-    unsigned char *avio_buf = (unsigned char *)av_malloc(65536);
+    unsigned char *avio_buf = (unsigned char *)av_malloc((size_t)avio_buffer_size);
     if (!avio_buf) { free_cio(c); return NULL; }
+    c->reserved_kb = (int)((c->ring_cap + c->tmp_cap + (size_t)avio_buffer_size + 1023) / 1024);
+    c->accounted = 1;
+    SDL_AtomicAdd(&g_active_contexts, 1);
+    SDL_AtomicAdd(&g_reserved_kb, c->reserved_kb);
     c->th = SDL_CreateThread(producer, "cavio", c);
     if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }
-    AVIOContext *ctx = avio_alloc_context(avio_buf, 65536, 0, c, cio_read, NULL, cio_seek);
+    AVIOContext *ctx = avio_alloc_context(avio_buf, avio_buffer_size, 0, c, cio_read, NULL, cio_seek);
     if (!ctx) { av_free(avio_buf); free_cio(c); return NULL; }
     return ctx;
 }
 
 AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
-    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP);
+    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP, 65536);
+}
+
+static int hls_is_metadata_url(const char *url) {
+    if (!url) return 0;
+    const char *query = strchr(url, '?');
+    size_t path_len = query ? (size_t)(query - url) : strlen(url);
+    const char *suffixes[] = { ".m3u8", ".vtt", ".srt", ".webvtt", ".key" };
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        size_t suffix_len = strlen(suffixes[i]);
+        if (path_len >= suffix_len &&
+            !strncasecmp(url + path_len - suffix_len, suffixes[i], suffix_len)) return 1;
+    }
+    return strstr(url, "/api/play/") != NULL || strstr(url, "/api/hls") != NULL;
 }
 
 AVIOContext *nplay_curl_avio_open_hls(const char *url) {
-    return curl_avio_open_profile(url, -1, HLS_BLOCK, HLS_RINGCAP);
+    if (hls_is_metadata_url(url))
+        return curl_avio_open_profile(url, -1, HLS_META_BLOCK, HLS_META_RINGCAP, 32768);
+    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536);
+}
+
+void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {
+    if (active_contexts) *active_contexts = SDL_AtomicGet(&g_active_contexts);
+    if (reserved_kb) *reserved_kb = SDL_AtomicGet(&g_reserved_kb);
 }
 
 void nplay_curl_avio_close(AVIOContext *ctx) {

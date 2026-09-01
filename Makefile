@@ -11,7 +11,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #--------------------------------------------------------------------------------- metadados
 APP_TITLE	:=	Nplay
 APP_AUTHOR	:=	Nplay
-APP_VERSION := 0.9.6
+APP_VERSION := 0.9.7
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	nplay-switch
 
@@ -38,7 +38,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-# SDL2 + imagem/texto + curl (sem mupdf â€” nÃ£o usamos PDF)
+# SDL2 + imagem/texto + curl (sem mupdf; nao usamos PDF)
 LIBS	:= `$(PKGCONF) --libs --static $(PKGS)` \
 		-Wl,--start-group -lfreetype -lpng16 -ljpeg -lwebp -lbz2 -lz -Wl,--end-group \
 		-lstdc++ -lm -lnx

@@ -18,6 +18,9 @@ AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size);
 // abertas ao mesmo tempo, portanto este usa blocos/ring menores que um MP4.
 AVIOContext *nplay_curl_avio_open_hls(const char *url);
 
+// Diagnostico sem URLs: quantidade de recursos HLS abertos e memoria reservada.
+void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb);
+
 // Fecha e libera o AVIOContext criado acima (curl + buffers). Chame DEPOIS de
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).
 void nplay_curl_avio_close(AVIOContext *ctx);

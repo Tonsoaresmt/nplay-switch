@@ -745,3 +745,38 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - O DOCX passou auditoria estrutural, de estilos, tabelas e acessibilidade (zero
   alertas). Nao houve QA visual por PNG porque LibreOffice/`soffice` nao esta
   instalado neste host; isso deve ser feito por um agente/host que o possua.
+
+## Correcao de ciclo de vida e memoria HLS em 01/09/2026 (0.9.7)
+
+- A tentativa 0.9.6 adicionou uma segunda recuperacao dentro de
+  `player_play_internal` por `goto seamless_reopen`, embora `player_run` ja seja
+  o supervisor de sessao. Ela renovava um descritor diferente do ativo e mantinha
+  textura/estado entre pipelines desmontadas. Essa duplicidade foi removida; toda
+  reabertura volta a ser transacional e ocorre somente em `player_run`.
+- `source/curl_avio.c` nao usa mais um ring de 2 MB para todo recurso HLS.
+  Manifestos/legendas usam bloco de 64 KB + ring de 256 KB; segmentos usam bloco
+  de 256 KB + ring de 1 MB. Em uma master com varias renditions isso reduz varios
+  megabytes de heap simultanea sem reduzir o bloco de midia usado para throughput.
+- URLs aninhadas deixaram de ser truncadas silenciosamente em 2.048 bytes. O AVIO
+  agora conserva a URL completa em alocacao do tamanho exato.
+- Se um host ignora `Range` ou devolve mais dados que o bloco pedido, o callback
+  marca overflow e rejeita o recurso. A versao anterior aceitava o prefixo
+  truncado e podia entregar manifesto/fMP4 corrompido ao demuxer.
+- O diagnostico persistente registra modo `application`/`applet` e, durante HLS,
+  numero de recursos AVIO e KB reservados, sem gravar URL assinada ou credencial.
+  Se houver novo fechamento, abrir Configuracoes > X imediatamente e fotografar
+  `Ultima etapa`; exemplos esperados: `03 HLS ativo: 3 recursos, 4032 KB` ou
+  `03 HLS sem memoria`.
+- `tools/validate_release.ps1` impede regressao dos tetos HLS, aceita apenas bloco
+  completo, exige diagnostico e proibe o `goto`/renew duplicado. Build limpo 0.9.7
+  passou sem warnings: `Nplay.nro` 23.573.040 bytes, SHA-256
+  `1fe4ae6dc9c8a1b683e68b8f3baa646871295abedec3f74c462b0ab086ae1b29`.
+- O contrato integrado do backend (`scripts/player-flow-contract-test.mjs`) passou
+  com R2 gerenciado, refresh e fallback. Auditoria somente leitura do banco local
+  encontrou 3.287 assets R2 prontos, 3.272 fontes R2 ativas e 15 episodios prontos
+  sem fonte ativa correspondente (IDs 229096-229110). Nao alterar o banco pelo
+  cliente; o pipeline do servidor deve reconciliar esses 15 registros.
+- Limitacao honesta: compilacao e contrato nao executam o NRO ARM64. A confirmacao
+  final continua sendo no Switch real: filme R2, episodio R2 e anime MP4 por pelo
+  menos 30 s, depois seek e retorno. Se falhar, a nova `Ultima etapa` e obrigatoria
+  para a proxima rodada; nao reintroduzir recuperacao interna por `goto`.

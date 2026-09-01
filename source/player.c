@@ -104,7 +104,17 @@ static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
     *pb = NULL;
     if (strncmp(url, "http://", 7) && strncmp(url, "https://", 8))
         return AVERROR_PROTOCOL_NOT_FOUND;
+    int active = 0, reserved_kb = 0;
+    char stage[96];
+    nplay_curl_avio_stats(&active, &reserved_kb);
+    snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
+    player_boot_stage(stage);
     *pb = nplay_curl_avio_open_hls(url);
+    nplay_curl_avio_stats(&active, &reserved_kb);
+    snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
+                                      : "03 HLS sem memoria: %d recursos, %d KB",
+             active, reserved_kb);
+    player_boot_stage(stage);
     return *pb ? 0 : AVERROR(ENOMEM);
 }
 
@@ -465,8 +475,8 @@ static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
     *last_ac_wall = now;
     return 0;
 }
-// (re)abre SÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ o decoder de audio p/ o stream aidx (fecha o anterior). O resample
-// (swr) ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â© montado no loop a partir dos parametros REAIS do frame ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â importante pra
+// Reabre somente o decoder de audio para a faixa escolhida e fecha o anterior.
+// O resample e montado com os parametros reais de cada frame.
 // HE-AAC e fontes que nao sao 48kHz (senao o audio sai errado e o video trava).
 static int open_audio_dec(AVFormatContext *fmt, int aidx, AVCodecContext **pactx, struct SwrContext **pswr, int OCH, int ORATE) {
     (void)OCH; (void)ORATE;
@@ -578,29 +588,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 double *out_pos, double *out_dur) {
     g_player_last_error[0] = '\0';
     player_boot_stage("01 inicio do player");
+    player_boot_stage(appletGetAppletType() == AppletType_Application
+                      ? "01 memoria: modo application"
+                      : "01 memoria: modo applet");
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
-    
-    int is_recovering = 0;
-    SDL_Texture *tex = NULL;
-    Uint32 texture_format = 0;
-    int have_video_frame = 0;
-    
-    
-    
-
-seamless_reopen:
-    ;
     
     const char *url = req->url;
     int is_hls = (req->container && !strcmp(req->container, "m3u8"));
     const char *title = req->title;
     // Tela de preparacao enquanto abre a conexao e le os metadados.
-    if (!is_recovering) {
-        SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
-        draw_center_state(ren, "PREPARANDO VIDEO", "Conectando...  |  B para cancelar", 0);
-        SDL_RenderPresent(ren);
-    }
+    SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
+    draw_center_state(ren, "PREPARANDO VIDEO", "Conectando...  |  B para cancelar", 0);
+    SDL_RenderPresent(ren);
 
     // Arquivos sdmc:/ usam o protocolo local. HLS remoto delega master, filhos e
     // segmentos ao callback libcurl; MP4 remoto continua no protocolo do FFmpeg.
@@ -801,7 +801,7 @@ seamless_reopen:
     AVCodecContext *vctx = NULL, *actx = NULL;
     struct SwrContext *swr = NULL;
     SDL_AudioDeviceID adev = 0;
-    
+    SDL_Texture *tex = NULL;
     struct SwsContext *sws = NULL;
     AVFrame *yuv = NULL, *frame = NULL, *transfer = NULL;
     AVPacket *pkt = NULL;
@@ -865,7 +865,7 @@ seamless_reopen:
     if (vw <= 0 || vh <= 0) PLAYER_SETUP_FAIL(-4);
     transfer = av_frame_alloc();
     if (!transfer) PLAYER_SETUP_FAIL(-4);
-    
+    Uint32 texture_format = 0;
 
     // retangulo com letterbox (1280x720)
     int dw = PWIN_W, dh = PWIN_H;
@@ -895,7 +895,7 @@ seamless_reopen:
     Uint32 buffering_since = 0;
     Uint32 notice_until = 0;
     char notice[96] = "";
-    int hud_pinned = 0;
+    int hud_pinned = 0, have_video_frame = 0;
     int track_menu = 0, track_sel = 0;
     int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
     int seek_arm_dir = 0;
@@ -903,7 +903,7 @@ seamless_reopen:
     Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
     SDL_Event e;
 
-    // Retoma de onde parou (sÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³ se fizer sentido: > 3s e nÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â£o no finzinho).
+    // Retoma de onde parou somente quando ha margem suficiente ate o fim.
     if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
         av_seek_frame(fmt, -1, (int64_t)((start_sec + timeline_origin) * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
         audio_clock = start_sec; cur_pos = start_sec;
@@ -1179,22 +1179,6 @@ seamless_reopen:
         if (ret < 0) {  // fim real ou falha definitiva da fonte/rede
             if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) {
                 if (ret == AVERROR_EOF) reached_end = 1;
-                else if (req->renew_cb) {
-                    PlaybackSource renewed = {0};
-                    draw_center_state(ren, "RECUPERANDO SESSAO", "A fonte atual falhou. Reconectando...", 1);
-                    SDL_RenderPresent(ren);
-                    if (adev) SDL_PauseAudioDevice(adev, 1);
-                    if (req->renew_cb(&req->playback, &renewed, req->userdata) == 0 && renewed.play_url[0]) {
-                        req->playback = renewed;
-                        req->url = req->playback.play_url;
-                        start_sec = cur_pos;
-                        is_recovering = 1;
-                        playback_error = -5;
-                        running = 0;
-                        break;
-                    }
-                    playback_error = -5;
-                }
                 else playback_error = -5;
                 break;
             }
@@ -1373,14 +1357,9 @@ seamless_reopen:
     if (sctx) avcodec_free_context(&sctx);
     avcodec_free_context(&vctx);
     av_frame_free(&frame); av_packet_free(&pkt);
+    SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
-
-    if (playback_error == -5 && is_recovering) {
-        goto seamless_reopen;
-    }
-
-    if (tex) SDL_DestroyTexture(tex);
     return playback_error ? playback_error : reached_end;
 }
 
