@@ -40,12 +40,23 @@ Assert-True ($sources -match 'pipeline_ready') 'Heartbeat pode voltar a disputar
 Assert-True ($sources -match 'retry_limit = startup_failure \? 2 : 3') 'Falha inicial voltou a encerrar antes de tentar a fonte alternativa.'
 Assert-True ($sources -match 'player_boot_stage\("03 abrindo fonte"\)') 'Crash do player voltou a nao deixar diagnostico persistente.'
 Assert-True ($sources -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnostico de crash depende de uma subpasta opcional.'
+Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e iniciado para cada reproducao.'
+Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior ao primeiro frame.'
+Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
+
+$diagSource = Get-Content source/diag.c -Raw
+Assert-True ($diagSource -match 'sdmc:/switch/\.nplay-player-trace\.log') 'Trace detalhado do player nao persiste na raiz de switch.'
+Assert-True ($diagSource -match 'InfoType_UsedMemorySize') 'Trace nao registra pressao de memoria do processo.'
+Assert-True ($diagSource -match 'safe_path') 'Trace de rede pode voltar a persistir query string privada.'
+Assert-True ($diagSource -notmatch 'play_url|Authorization|Bearer') 'Trace diagnostico contem campo sensivel.'
 
 $mainSource = Get-Content source/main.c -Raw
 Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
 Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
 Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
 Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes de um crash nao aparece no diagnostico.'
+Assert-True ($mainSource -match 'diag_read_player_tail') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
+Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
@@ -53,6 +64,7 @@ Assert-True ($apiSource -match '/api/stream/session/%d/fail') 'Failover para out
 Assert-True ($apiSource -match '/api/stream/session/%d/heartbeat') 'Heartbeat da sessao nao esta implementado.'
 Assert-True ($apiSource -match '/api/sync/progress') 'Progresso periodico nao esta implementado.'
 Assert-True ($apiSource -match 'api_reresolve_playback') 'Nova resolucao curta para recuperacao nao esta implementada.'
+Assert-True ($apiSource -match 'diag_network_event') 'Chamadas da API nao registram codigo e duracao para diagnostico.'
 
 $tlsPatch = Get-Content tools/ffmpeg-libnx-tls-hostname.patch -Raw
 $ffmpegBuild = Get-Content tools/build_ffmpeg_https.sh -Raw

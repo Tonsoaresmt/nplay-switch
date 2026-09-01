@@ -780,3 +780,32 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   final continua sendo no Switch real: filme R2, episodio R2 e anime MP4 por pelo
   menos 30 s, depois seek e retorno. Se falhar, a nova `Ultima etapa` e obrigatoria
   para a proxima rodada; nao reintroduzir recuperacao interna por `goto`.
+
+## Versao diagnostica persistente em 01/09/2026 (0.9.8)
+
+- Novo relato real da 0.9.7: filmes e series ainda fecham o processo no Switch e
+  a abertura das respectivas telas continua lenta. Como o processo morre sem
+  devolver um erro C, a 0.9.8 prioriza evidencia persistente antes de outra troca
+  especulativa do transporte/decoder.
+- `source/diag.c` grava a tentativa atual em
+  `sdmc:/switch/.nplay-player-trace.log` e preserva a anterior em
+  `.nplay-player-trace.prev.log`. Cada linha inclui sequencia, ticks, memoria
+  usada/total e a fronteira concluida: format/probe, recursos HLS, streams,
+  NVTEGRA/CPU, audio, primeiro pacote/frame, textura, primeiro Present e limpeza.
+- O trace de rede em `.nplay-network-trace.log` registra endpoint sem query,
+  codigo HTTP, duracao e tamanho da resposta. URL assinada, token, senha e headers
+  nao sao persistidos. O arquivo gira automaticamente ao atingir 64 KB.
+- Configuracoes > X carrega uma copia dos ultimos seis eventos do player e das
+  duas ultimas requisicoes. A leitura ocorre somente ao abrir o modal, nao a cada
+  frame. Depois de um crash, reabrir o app nao apaga o trace; ele so gira quando
+  uma nova reproducao e iniciada.
+- Validacao limpa passou sem warnings: contrato site/Switch, simbolos HLS/TLS/
+  NVTEGRA e build ARM64. `Nplay.nro` possui 23.581.232 bytes e SHA-256
+  `07dc1be72f0bccb9f9d20dea86d8ef0f34a462033c708f34b3e715d1a085702d`.
+  O contrato integrado do backend `scripts/player-flow-contract-test.mjs` tambem
+  passou.
+- Teste obrigatorio no hardware: instalar 0.9.8, tentar um filme R2 uma unica vez;
+  se fechar, reabrir e fotografar Configuracoes > X sem iniciar outro titulo.
+  Repetir com um episodio de serie. O ultimo evento separara crash em abertura,
+  probe, decoder, audio, primeiro frame ou renderer. Registrar tambem as duas
+  linhas de rede para atacar a latencia de detalhe/catalogo na rodada seguinte.

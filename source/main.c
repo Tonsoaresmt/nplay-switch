@@ -21,6 +21,7 @@
 #include "update.h"
 #include "player.h"
 #include "api.h"
+#include "diag.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -2337,6 +2338,15 @@ static const char *SET_ITEMS[] = { "Preferencias do Switch", "Buscar atualizacao
 #define NSET 5
 static int g_setSel = 0;
 static int g_diag_open = 0;
+static char g_diag_player_lines[6][DIAG_LINE_CAP];
+static char g_diag_network_lines[2][DIAG_LINE_CAP];
+static int g_diag_player_count = 0;
+static int g_diag_network_count = 0;
+
+static void reload_player_diagnostics(void) {
+    g_diag_player_count = diag_read_player_tail(g_diag_player_lines, 6);
+    g_diag_network_count = diag_read_network_tail(g_diag_network_lines, 2);
+}
 
 static int schedule_restart(const char *path) {
     const char *target = (path && path[0]) ? path : g_self_path;
@@ -2423,45 +2433,35 @@ static void draw_player_diagnostics(void) {
     struct player_stats stats;
     char boot_stage[96];
     int has_boot_stage = load_player_boot_stage(boot_stage, sizeof(boot_stage));
-    ui_panel(252, 96, 776, 526, C_ACC2);
-    text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 292, 128, C_ACC2, 0);
-    if (!store_load_player_stats(&stats)) {
-        text_center_at("Nenhuma reproducao registrada ainda", 292, 696, 282, C_TEXT, 1);
-        text_center_at("Assista a um video e volte aqui para consultar.", 292, 696, 326, C_MUT, 0);
-        if (has_boot_stage) {
-            char line[160];
-            snprintf(line, sizeof(line), "Ultima etapa: %s", boot_stage);
-            text_center_at(line, 292, 696, 388, C_ACC, 0);
-        }
-    } else {
-        int drop_pct = stats.decoded_frames > 0 ? stats.dropped_frames * 100 / stats.decoded_frames : 0;
-        const char *state = stats.playback_error < 0 ? "REPRODUCAO INTERROMPIDA" :
-                            (stats.buffering_events >= 5 || drop_pct >= 8 ? "ATENCAO RECOMENDADA" : "REPRODUCAO ESTAVEL");
-        SDL_Color state_color = stats.playback_error < 0 ? C_ROSE :
-                                (stats.buffering_events >= 5 || drop_pct >= 8 ? C_ACC : C_GREEN);
-        text_draw(gRen, state, 292, 174, state_color, 1);
-        char line[160];
-        snprintf(line, sizeof(line), "Video  %dx%d  |  %s", stats.width, stats.height,
-                 stats.hardware_decode ? "NVTEGRA ativo" : "decodificacao por CPU");
-        text_draw(gRen, line, 292, 232, C_TEXT, 0);
-        snprintf(line, sizeof(line), "Quadros decodificados  %d", stats.decoded_frames);
-        text_draw(gRen, line, 292, 274, C_TEXT, 0);
-        snprintf(line, sizeof(line), "Quadros descartados para sincronizar  %d  (%d%%)", stats.dropped_frames, drop_pct);
-        text_draw(gRen, line, 292, 316, drop_pct >= 8 ? C_ACC : C_MUT, 0);
-        snprintf(line, sizeof(line), "Interrupcoes para carregar  %d", stats.buffering_events);
-        text_draw(gRen, line, 292, 358, stats.buffering_events >= 5 ? C_ACC : C_MUT, 0);
-        snprintf(line, sizeof(line), "Maior fila de audio  %u KB", stats.max_audio_bytes / 1024);
-        text_draw(gRen, line, 292, 400, C_MUT, 0);
-        snprintf(line, sizeof(line), "Resultado  %s", stats.playback_error < 0 ? "conexao ou fonte interrompida" : "saida normal do player");
-        text_draw(gRen, line, 292, 442, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0);
-        if (has_boot_stage) {
-            snprintf(line, sizeof(line), "Ultima etapa  %s", boot_stage);
-            text_clip(line, 292, 480, C_ACC, 0, 696);
-        }
-        text_clip("Ao relatar travamentos, fotografe esta tela junto com o titulo e o momento.",
-                  292, 522, C_MUT, 0, 696);
+    int has_stats = store_load_player_stats(&stats);
+    ui_panel(220, 66, 840, 586, C_ACC2);
+    text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 252, 92, C_ACC2, 0);
+    char summary[180];
+    if (has_stats) {
+        snprintf(summary, sizeof(summary), "Video %dx%d  |  frames %d  |  buffer %d  |  resultado %d",
+                 stats.width, stats.height, stats.decoded_frames,
+                 stats.buffering_events, stats.playback_error);
+        text_clip(summary, 252, 132, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0, 776);
+    } else text_draw(gRen, "O trace abaixo sobrevive mesmo quando o aplicativo fecha.", 252, 132, C_TEXT, 0);
+    if (has_boot_stage) {
+        snprintf(summary, sizeof(summary), "Ultima etapa simples: %s", boot_stage);
+        text_clip(summary, 252, 166, C_ACC, 0, 776);
     }
-    text_center_at("A ou B Fechar", 292, 696, 572, C_TEXT, 0);
+
+    text_draw(gRen, "RASTRO DO PLAYER", 252, 204, C_MUT, 0);
+    if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 238, C_TEXT, 0);
+    for (int i = 0; i < g_diag_player_count; i++)
+        text_clip(g_diag_player_lines[i], 252, 238 + i * 32,
+                  i == g_diag_player_count - 1 ? C_ACC : C_TEXT, 0, 776);
+
+    text_draw(gRen, "ULTIMAS REQUISICOES (codigo / tempo / tamanho)", 252, 446, C_MUT, 0);
+    if (g_diag_network_count == 0) text_draw(gRen, "Nenhuma requisicao registrada.", 252, 480, C_TEXT, 0);
+    for (int i = 0; i < g_diag_network_count; i++)
+        text_clip(g_diag_network_lines[i], 252, 480 + i * 32, C_TEXT, 0, 776);
+
+    text_clip("Fotografe esta tela apos reabrir o Nplay. Nenhuma URL assinada ou senha e gravada.",
+              252, 558, C_MUT, 0, 776);
+    text_center_at("A, B ou X Fechar", 252, 776, 606, C_TEXT, 0);
 }
 static void draw_preferences(void) {
     if (!g_prefs_open) return;
@@ -2614,7 +2614,7 @@ static void input_settings(int b) {
         return;
     }
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
-    if (b == JOY_X) { g_diag_open = 1; return; }
+    if (b == JOY_X) { reload_player_diagnostics(); g_diag_open = 1; return; }
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
@@ -2703,6 +2703,7 @@ int main(int argc, char **argv) {
     update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
     socketInitializeDefault();
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO);
+    diag_init();
     IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG | IMG_INIT_WEBP);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
     SDL_Window *win = SDL_CreateWindow("Nplay", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_W, WIN_H, SDL_WINDOW_SHOWN);
@@ -2824,6 +2825,7 @@ int main(int argc, char **argv) {
     text_exit(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
     SDL_DestroyRenderer(gRen); SDL_DestroyWindow(win);
+    diag_exit();
     IMG_Quit(); SDL_Quit(); socketExit();
     return 0;
 }

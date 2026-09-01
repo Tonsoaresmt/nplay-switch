@@ -22,6 +22,7 @@
 #include "curl_avio.h"
 #include "text.h"
 #include "store.h"
+#include "diag.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -109,17 +110,21 @@ static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
     nplay_curl_avio_stats(&active, &reserved_kb);
     snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
     player_boot_stage(stage);
+    diag_player_event("hls-io", "open-begin", "active=%d reserved=%dKB", active, reserved_kb);
     *pb = nplay_curl_avio_open_hls(url);
     nplay_curl_avio_stats(&active, &reserved_kb);
     snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
                                       : "03 HLS sem memoria: %d recursos, %d KB",
              active, reserved_kb);
     player_boot_stage(stage);
+    diag_player_event("hls-io", *pb ? "open-ok" : "open-fail",
+                      "active=%d reserved=%dKB", active, reserved_kb);
     return *pb ? 0 : AVERROR(ENOMEM);
 }
 
 static int player_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
     (void)fmt;
+    diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
     nplay_curl_avio_close(pb);
     return 0;
 }
@@ -611,8 +616,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // para MP4: ele conhece Range/seek do MOV e elimina o AVIO por blocos que no
     // hardware ainda encerrava anime com `abrir fonte: End of file`.
     AVIOContext *avio = NULL;
+    diag_player_event("format", "alloc-begin", "hls=%d remote=%d", native_hls, remote);
     AVFormatContext *fmt = avformat_alloc_context();
-    if (!fmt) { nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1; }
+    if (!fmt) {
+        diag_player_event("format", "alloc-fail", NULL);
+        nplay_curl_avio_close(avio); player_error_message("memoria insuficiente para o formato"); return -1;
+    }
+    diag_player_event("format", "alloc-ok", NULL);
     if (avio) { fmt->pb = avio; fmt->flags |= AVFMT_FLAG_CUSTOM_IO; }
     if (native_hls) {
         fmt->io_open = player_hls_io_open;
@@ -668,14 +678,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
     }
     player_boot_stage("03 abrindo fonte");
+    diag_player_event("format", "open-begin", "timeout=%ds", native_hls ? 20 : 30);
     int rc = avformat_open_input(&fmt, url, NULL, &open_opts);
     av_dict_free(&open_opts);
     if (rc != 0) {
+        diag_player_event("format", "open-fail", "rc=%d cancelled=%d", rc, open_watch.cancelled);
         if (open_watch.cancelled) player_error_message("Abertura cancelada");
         else if (rc == AVERROR_EXIT) player_error_message(native_hls ? "abrir playlist HLS: tempo esgotado" : "abrir fonte: tempo esgotado");
         else player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc);
         nplay_curl_avio_close(avio); return open_watch.cancelled ? -11 : -10;
     }
+    diag_player_event("format", "open-ok", "streams=%u", fmt->nb_streams);
     player_boot_stage("04 fonte aberta");
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
     draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
@@ -714,12 +727,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         headers_ready = header_video >= 0 && (probe_audio < 0 || header_audio >= 0);
     }
     player_boot_stage(headers_ready ? "05 headers completos" : "05 lendo faixas");
+    diag_player_event("format", headers_ready ? "probe-skip" : "probe-begin",
+                      "streams=%u", fmt->nb_streams);
     rc = headers_ready ? 0 : avformat_find_stream_info(fmt, NULL);
     if (native_hls) {
         for (unsigned i = 0; i < saved_count; i++) fmt->streams[i]->discard = saved_discard[i];
     }
     open_watch.deadline_us = 0;
     if (rc < 0) {
+        diag_player_event("format", "probe-fail", "rc=%d streams=%u", rc, fmt->nb_streams);
         if (open_watch.cancelled) player_error_message("Abertura cancelada");
         else if (rc == AVERROR_EXIT) player_error_message("ler faixas do video: tempo esgotado");
         else player_error_text("ler faixas do video", rc);
@@ -728,8 +744,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
 
     player_boot_stage("06 faixas prontas");
+    diag_player_event("format", "probe-ok", "streams=%u duration=%lld",
+                      fmt->nb_streams, (long long)fmt->duration);
     int vidx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (vidx < 0) { player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3; }
+    if (vidx < 0) {
+        diag_player_event("streams", "video-missing", "rc=%d", vidx);
+        player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3;
+    }
 
     // enumera faixas de AUDIO e de LEGENDA (so legendas de texto: SRT/ASS/mov_text)
     int aidxs[16], naud = 0, sidxs[16], nsub = 0;
@@ -789,6 +810,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     
     int aidx = naud ? aidxs[acur] : -1;
+    diag_player_event("streams", "selected", "video=%d audio=%d naud=%d nsub=%d", vidx, aidx, naud, nsub);
     AVCodecContext *sctx = NULL;
     char sub_text[512] = ""; double sub_end = 0;
     if (scur >= 0 && open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
@@ -806,6 +828,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     AVFrame *yuv = NULL, *frame = NULL, *transfer = NULL;
     AVPacket *pkt = NULL;
 #define PLAYER_SETUP_FAIL(code) do { \
+    diag_player_event("setup", "fail", "rc=%d", (code)); \
     if (adev) SDL_CloseAudioDevice(adev); \
     if (sws) sws_freeContext(sws); \
     if (yuv) av_frame_free(&yuv); \
@@ -823,6 +846,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     // ---- decoder de video ----
     AVCodecParameters *vpar = fmt->streams[vidx]->codecpar;
+    diag_player_event("video", "decoder-begin", "codec=%d size=%dx%d", vpar->codec_id, vpar->width, vpar->height);
     const AVCodec *vdec = avcodec_find_decoder(vpar->codec_id);
     if (!vdec) PLAYER_SETUP_FAIL(-4);
     vctx = avcodec_alloc_context3(vdec);
@@ -831,14 +855,20 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int tried_hw = 0;
     if (vpar->codec_id == AV_CODEC_ID_H264 || vpar->codec_id == AV_CODEC_ID_HEVC) {
         AVBufferRef *device = NULL;
-        if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, NULL, NULL, 0) >= 0) {
+        diag_player_event("video", "hw-device-begin", NULL);
+        int hw_rc = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_NVTEGRA, NULL, NULL, 0);
+        diag_player_event("video", hw_rc >= 0 ? "hw-device-ok" : "hw-device-fail", "rc=%d", hw_rc);
+        if (hw_rc >= 0) {
             vctx->hw_device_ctx = av_buffer_ref(device);
             av_buffer_unref(&device);
             tried_hw = vctx->hw_device_ctx != NULL;
             if (tried_hw) vctx->get_format = player_select_video_format;
         }
     }
-    if (avcodec_open2(vctx, vdec, NULL) < 0) {
+    int video_open_rc = avcodec_open2(vctx, vdec, NULL);
+    diag_player_event("video", video_open_rc >= 0 ? "decoder-open-ok" : "decoder-open-fail",
+                      "rc=%d hw=%d", video_open_rc, tried_hw);
+    if (video_open_rc < 0) {
         // Um perfil nao suportado pelo NVDEC nao pode impedir a reproducao.
         // Reabre o mesmo decoder sem dispositivo e preserva o caminho por CPU.
         if (!tried_hw) PLAYER_SETUP_FAIL(-4);
@@ -846,7 +876,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         vctx = avcodec_alloc_context3(vdec);
         if (!vctx || avcodec_parameters_to_context(vctx, vpar) < 0) PLAYER_SETUP_FAIL(-4);
         vctx->thread_count = 4;
-        if (avcodec_open2(vctx, vdec, NULL) < 0) PLAYER_SETUP_FAIL(-4);
+        video_open_rc = avcodec_open2(vctx, vdec, NULL);
+        diag_player_event("video", video_open_rc >= 0 ? "cpu-fallback-ok" : "cpu-fallback-fail",
+                          "rc=%d", video_open_rc);
+        if (video_open_rc < 0) PLAYER_SETUP_FAIL(-4);
     }
     player_boot_stage("07 decoder de video pronto");
 
@@ -856,9 +889,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         SDL_AudioSpec want; SDL_zero(want);
         want.freq = ORATE; want.format = AUDIO_S16SYS; want.channels = OCH; want.samples = 2048;
         adev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+        diag_player_event("audio", adev ? "device-ok" : "device-fail",
+                          "stream=%d status=%s", aidx, adev ? "ok" : SDL_GetError());
         if (adev) SDL_PauseAudioDevice(adev, 0);
         else { if (swr) swr_free(&swr); avcodec_free_context(&actx); }
-    }
+    } else diag_player_event("audio", "decoder-unavailable", "stream=%d", aidx);
     player_boot_stage("08 audio pronto");
 
     int vw = vctx->width, vh = vctx->height;
@@ -896,6 +931,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 notice_until = 0;
     char notice[96] = "";
     int hud_pinned = 0, have_video_frame = 0;
+    int logged_first_read = 0, logged_first_video_packet = 0;
+    int logged_first_video_frame = 0, logged_first_present = 0;
     int track_menu = 0, track_sel = 0;
     int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
     int seek_arm_dir = 0;
@@ -1153,6 +1190,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
 
         int ret = av_read_frame(fmt, pkt);
+        if (!logged_first_read) {
+            diag_player_event("demux", ret >= 0 ? "first-read-ok" : "first-read-fail",
+                              "rc=%d stream=%d", ret, ret >= 0 ? pkt->stream_index : -1);
+            logged_first_read = 1;
+        }
         if (ret == AVERROR(EAGAIN)) {
             // Buffer vazio e/ou timeout de rede, thread de download ainda esta trabalhando.
             Uint32 now_ticks = SDL_GetTicks();
@@ -1180,6 +1222,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) {
                 if (ret == AVERROR_EOF) reached_end = 1;
                 else playback_error = -5;
+                diag_player_event("demux", "read-terminal", "rc=%d eof=%d", ret, reached_end);
                 break;
             }
             SDL_Delay(40); continue;
@@ -1224,8 +1267,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 }
             }
         } else if (pkt->stream_index == vidx) {
+            if (!logged_first_video_packet) {
+                diag_player_event("video", "first-packet", "size=%d pts=%lld",
+                                  pkt->size, (long long)pkt->pts);
+                logged_first_video_packet = 1;
+            }
             if (avcodec_send_packet(vctx, pkt) == 0) {
                 while (avcodec_receive_frame(vctx, frame) == 0) {
+                    if (!logged_first_video_frame) {
+                        diag_player_event("video", "first-frame", "fmt=%d size=%dx%d",
+                                          frame->format, frame->width, frame->height);
+                        logged_first_video_frame = 1;
+                    }
                     decoded_video++;
                     int64_t vts = frame->best_effort_timestamp != AV_NOPTS_VALUE
                         ? frame->best_effort_timestamp : frame->pts;
@@ -1303,6 +1356,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (tex) SDL_DestroyTexture(tex);
                         tex = next;
                         texture_format = wanted_format;
+                        diag_player_event("render", "texture-ok", "format=%u size=%dx%d",
+                                          wanted_format, vw, vh);
                     }
                     int upload_rc = direct_nv12
                         ? SDL_UpdateNVTexture(tex, NULL, u->data[0], u->linesize[0], u->data[1], u->linesize[1])
@@ -1318,6 +1373,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                  acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
                     if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
                     SDL_RenderPresent(ren);
+                    if (!logged_first_present) {
+                        diag_player_event("render", "first-present", "position=%.2f", cur_pos);
+                        logged_first_present = 1;
+                    }
                 }
             }
         } else if (scur >= 0 && sctx && pkt->stream_index == sidxs[scur]) {   // legenda
@@ -1346,6 +1405,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     store_save_player_stats(vw, vh, decoded_video, dropped_video,
                             buffering_events, max_audio_queue, playback_error,
                             hardware_decode);
+    diag_player_event("player", "cleanup-begin", "pos=%.1f frames=%d drop=%d err=%d",
+                      cur_pos, decoded_video, dropped_video, playback_error);
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);
@@ -1360,6 +1421,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
+    diag_player_event("player", "cleanup-end", NULL);
     return playback_error ? playback_error : reached_end;
 }
 
@@ -1429,6 +1491,13 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     if (!active.container[0] && request->container) snprintf(active.container, sizeof(active.container), "%s", request->container);
     if (!active.play_url[0] && request->url) snprintf(active.play_url, sizeof(active.play_url), "%s", request->url);
 
+    const char *delivery = active.delivery_str[0] ? active.delivery_str :
+                           active.delivery == DELIVERY_R2 ? "r2" :
+                           active.delivery == DELIVERY_UPSTREAM ? "upstream" : "unknown";
+    diag_player_begin(active.item_id, active.session_id, active.source_id,
+                      active.container, delivery);
+    diag_player_event("player", "run-begin", "start=%.1f", current_pos);
+
     while (1) {
         SDL_AtomicSet(&hb.pipeline_ready, 0);
         double out_pos = 0, out_dur = 0;
@@ -1440,7 +1509,11 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.section = active.section;
         attempt.container = active.container;
         attempt.url = active.play_url;
+        diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
+                          retry_count + 1, current_pos, active.session_id, active.source_id);
         int rc = player_play_internal(ren, joy, &attempt, &hb, current_pos, &out_pos, &out_dur);
+        diag_player_event("player", "attempt-end", "attempt=%d rc=%d pos=%.1f dur=%.1f",
+                          retry_count + 1, rc, out_pos, out_dur);
         if (out_pos > 0) current_pos = out_pos;
         if (out_dur > 0) dur = out_dur;
 
@@ -1475,6 +1548,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             int use_fallback = retry_count == 1 && request->fallback_cb;
             int max_renew_tries = use_fallback ? 1 : 4;
             PlayerRenewCallback recovery_cb = use_fallback ? request->fallback_cb : request->renew_cb;
+            diag_player_event("recover", use_fallback ? "fallback-begin" : "renew-begin",
+                              "retry=%d max=%d", retry_count, max_renew_tries);
             for (int renew_try = 0; renew_try < max_renew_tries && !renewed_ok; renew_try++) {
                 SDL_SetRenderDrawColor(ren, 15, 15, 15, 255);
                 SDL_RenderClear(ren);
@@ -1485,6 +1560,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                 SDL_RenderPresent(ren);
 
                 if (recovery_cb(&active, &renewed, request->userdata) == 0 && renewed.play_url[0]) {
+                    diag_player_event("recover", "resolve-ok", "try=%d session=%d source=%d",
+                                      renew_try + 1, renewed.session_id, renewed.source_id);
                     renewed_ok = 1;
                     break;
                 }
@@ -1513,6 +1590,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                 break;
             }
             if (!renewed_ok) {
+                diag_player_event("recover", "resolve-fail", "rc=%d", rc);
                 result->reason = EXIT_REASON_ERROR;
                 result->final_state = PLAYER_ERROR;
                 final_rc = rc;
@@ -1538,6 +1616,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     if (request->progress_cb) {
         request->progress_cb(request->item_id, (int)current_pos, (int)dur, request->userdata);
     }
+
+    diag_player_finish(final_rc);
 
     return final_rc;
 }

@@ -8,6 +8,7 @@
 // a thread. Usa a interface EASY do curl (a MULTI falhava no Switch).
 #include "curl_avio.h"
 #include "net.h"
+#include "diag.h"
 #include <curl/curl.h>
 #include <SDL.h>
 #include <libavutil/mem.h>
@@ -26,6 +27,7 @@
 
 static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
+static SDL_atomic_t g_resource_sequence = {0};
 
 typedef struct {
     CURL *easy;
@@ -46,6 +48,8 @@ typedef struct {
     unsigned char *tmp; size_t tmp_len;
     int write_overflow;
     int accounted, reserved_kb;
+    int resource_id, first_http_logged;
+    char profile[8];
 } CurlIO;
 
 static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
@@ -94,6 +98,13 @@ static int fetch_block(CurlIO *c, int64_t start) {
     curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
     CURLcode r = curl_easy_perform(c->easy);
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    if (!c->first_http_logged || r != CURLE_OK || code < 200 || code >= 400 || c->write_overflow) {
+        diag_player_event("avio", "http",
+                          "id=%d %s code=%ld curl=%d off=%lld got=%u ov=%d",
+                          c->resource_id, c->profile, code, (int)r,
+                          (long long)start, (unsigned)c->tmp_len, c->write_overflow);
+        c->first_http_logged = 1;
+    }
     if (c->range_total > 0) c->size = c->range_total;
     else if (code == 200 && start == 0 && c->response_length > 0) c->size = c->response_length;
     // Em uma queda depois de receber parte do range, preserve esses bytes e
@@ -120,6 +131,10 @@ static int fetch_block(CurlIO *c, int64_t start) {
 // Encerra a thread e libera tudo do CurlIO.
 static void free_cio(CurlIO *c) {
     if (!c) return;
+    if (c->accounted)
+        diag_player_event("avio", "close", "id=%d %s active=%d reserved=%dKB",
+                          c->resource_id, c->profile,
+                          SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     if (c->th) { SDL_LockMutex(c->mtx); c->running = 0; SDL_CondSignal(c->c_space); SDL_CondSignal(c->c_data); SDL_UnlockMutex(c->mtx); SDL_WaitThread(c->th, NULL); }
     if (c->easy) curl_easy_cleanup(c->easy);
     if (c->mtx) SDL_DestroyMutex(c->mtx);
@@ -268,7 +283,7 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
 
 static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
                                            size_t block_size, size_t ring_cap,
-                                           int avio_buffer_size) {
+                                           int avio_buffer_size, const char *profile) {
     if (!url || !url[0]) return NULL;
     CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
     if (!c) return NULL;
@@ -277,6 +292,8 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     if (!c->url) { free_cio(c); return NULL; }
     memcpy(c->url, url, url_len + 1);
     c->size = expected_size > 0 ? expected_size : -1;
+    c->resource_id = SDL_AtomicAdd(&g_resource_sequence, 1) + 1;
+    snprintf(c->profile, sizeof(c->profile), "%s", profile ? profile : "file");
     c->response_length = c->range_total = -1;
     c->seek_req = -1; c->base = 0; c->running = 1;
     c->block_size = block_size;
@@ -329,6 +346,9 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->accounted = 1;
     SDL_AtomicAdd(&g_active_contexts, 1);
     SDL_AtomicAdd(&g_reserved_kb, c->reserved_kb);
+    diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
+                      c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
+                      SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     c->th = SDL_CreateThread(producer, "cavio", c);
     if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }
     AVIOContext *ctx = avio_alloc_context(avio_buf, avio_buffer_size, 0, c, cio_read, NULL, cio_seek);
@@ -337,7 +357,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
 }
 
 AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size) {
-    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP, 65536);
+    return curl_avio_open_profile(url, expected_size, FILE_BLOCK, FILE_RINGCAP, 65536, "file");
 }
 
 static int hls_is_metadata_url(const char *url) {
@@ -355,8 +375,8 @@ static int hls_is_metadata_url(const char *url) {
 
 AVIOContext *nplay_curl_avio_open_hls(const char *url) {
     if (hls_is_metadata_url(url))
-        return curl_avio_open_profile(url, -1, HLS_META_BLOCK, HLS_META_RINGCAP, 32768);
-    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536);
+        return curl_avio_open_profile(url, -1, HLS_META_BLOCK, HLS_META_RINGCAP, 32768, "meta");
+    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536, "media");
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

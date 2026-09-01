@@ -1,5 +1,6 @@
 #include "api.h"
 #include "net.h"
+#include "diag.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -69,8 +70,10 @@ cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeou
     struct membuf out = { 0 };
     const char *err = NULL;
     g_api_last_error[0] = '\0';
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
                                     &out, &err, connect_timeout, total_timeout);
+    diag_network_event("GET", path, code, SDL_GetTicks() - started, out.len);
     cJSON *j = NULL;
     if (code == 200 && out.data) j = cJSON_Parse(out.data);
     if (!j) {
@@ -90,8 +93,10 @@ long api_send(const char *path, const char *method, const char *body) {
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, method, body ? body : "{}",
                                     g_token[0] ? g_token : NULL, &out, &err, 5L, 20L);
+    diag_network_event(method, path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code;
 }
@@ -139,8 +144,11 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
 
     struct membuf resp = { 0 };
     const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
                                     &resp, &err, connect_timeout, total_timeout);
+    char trace_path[96]; snprintf(trace_path, sizeof(trace_path), "/api/stream/%d", item_id);
+    diag_network_event("POST", trace_path, code, SDL_GetTicks() - started, resp.len);
     cJSON_free(body);
     cJSON *j = resp.data ? cJSON_Parse(resp.data) : NULL;
     if (code != 200 || !j) {
@@ -175,8 +183,10 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     char url[1024]; snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf resp = {0};
     const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
                                     &resp, &err, 4L, 8L);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
     cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
     if (code != 200 || !json) {
         api_set_error(code, err, json);
@@ -200,8 +210,10 @@ int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf resp = {0};
     const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
                                     &resp, &err, 4L, 8L);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
     cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
     if (code != 200 || !json) {
         api_set_error(code, err, json);
@@ -233,8 +245,10 @@ int api_playback_heartbeat(int session_id) {
     snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", session_id);
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = {0}; const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
                                     &out, &err, 3L, 6L);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
 }
@@ -246,8 +260,10 @@ int api_playback_progress(int item_id, int position_sec, int duration_sec) {
              item_id, position_sec, duration_sec);
     snprintf(url, sizeof(url), "%s/api/sync/progress", BASE);
     struct membuf out = {0}; const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
                                     &out, &err, 3L, 6L);
+    diag_network_event("POST", "/api/sync/progress", code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
 }
@@ -256,8 +272,11 @@ int api_stop_playback(int item_id) {
     if (item_id <= 0) return 0;
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d/stop", BASE, item_id);
     struct membuf out = {0}; const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
     long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
                                     &out, &err, 3L, 6L);
+    char path[96]; snprintf(path, sizeof(path), "/api/stream/%d/stop", item_id);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
 }
