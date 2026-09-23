@@ -1,0 +1,2 @@
+# Keep the embedded Mozilla CA bundle byte-for-byte identical on Windows clones.
+data/cacert.bin -text

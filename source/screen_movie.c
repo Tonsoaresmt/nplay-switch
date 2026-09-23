@@ -59,18 +59,6 @@ static int wrap_text(const char *text, char lines[][PLOT_LINE_CAP], int max_line
     return count;
 }
 
-static cJSON *fetch_movie_details(int movie_id) {
-    char path[128];
-    snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", movie_id);
-    cJSON *resp = api_get(path);
-    if (!resp) return NULL;
-    cJSON *next_movie = cJSON_GetObjectItemCaseSensitive(resp, "item");
-    if (!next_movie) { cJSON_Delete(resp); return NULL; }
-    cJSON_DetachItemViaPointer(resp, next_movie);
-    cJSON_Delete(resp);
-    return next_movie;
-}
-
 static void rebuild_movie_plot(void) {
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
     const char *plot = jstr(g_movie, "plot");
@@ -88,17 +76,19 @@ static void activate_movie(cJSON *movie) {
     rebuild_movie_plot();
 }
 
-int open_movie_details(int movie_id) {
-    cJSON *next_movie = fetch_movie_details(movie_id);
-    if (!next_movie) return -1;
+int open_movie_details_response(cJSON *response) {
+    cJSON *next_movie = response ? cJSON_GetObjectItemCaseSensitive(response, "item") : NULL;
+    if (!cJSON_IsObject(next_movie)) return -1;
+    cJSON_DetachItemViaPointer(response, next_movie);
     close_movie_details();
     activate_movie(next_movie);
     return 0;
 }
 
-static int open_related_details(int movie_id) {
-    cJSON *next_movie = fetch_movie_details(movie_id);
-    if (!next_movie) return -1;
+int open_related_details_response(cJSON *response) {
+    cJSON *next_movie = response ? cJSON_GetObjectItemCaseSensitive(response, "item") : NULL;
+    if (!cJSON_IsObject(next_movie)) return -1;
+    cJSON_DetachItemViaPointer(response, next_movie);
     if (g_movie_back_n == MOVIE_BACK_MAX) {
         cJSON_Delete(g_movie_back[0].movie);
         memmove(&g_movie_back[0], &g_movie_back[1], sizeof(g_movie_back[0]) * (MOVIE_BACK_MAX - 1));
@@ -306,7 +296,7 @@ void input_movie(int b) {
         if (g_movie_zone == 1 && g_related_sel < related_n) {
             cJSON *item = cJSON_GetArrayItem(related, g_related_sel);
             int id = jint(item, "id");
-            if (id > 0 && open_related_details(id) != 0) toast("Nao foi possivel abrir este titulo");
+            if (id > 0) request_related_movie_details(id);
         } else {
             int id = jint(g_movie, "id");
             if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));

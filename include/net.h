@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 #include <curl/curl.h>
+#include <SDL.h>
 
 struct membuf {
     char  *data;   // sempre terminado em '\0' (ou NULL se vazio)
@@ -36,6 +37,11 @@ long net_request_timeout(const char *url, const char *method,
                          const char *body, const char *bearer,
                          struct membuf *out, const char **err,
                          long connect_timeout, long total_timeout);
+long net_request_timeout_cancel(const char *url, const char *method,
+                                const char *body, const char *bearer,
+                                struct membuf *out, const char **err,
+                                long connect_timeout, long total_timeout,
+                                SDL_atomic_t *cancel);
 
 // Baixa uma resposta HTTP direto para um arquivo no SD.
 // Retorna codigo HTTP (>= 100) ou negativo em falha de transporte.

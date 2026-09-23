@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <switch.h>
 
 #include "cJSON.h"
 #include "net.h"
@@ -46,6 +47,74 @@ static int ends_with_nro(const char *name) {
         if (tolower((unsigned char)name[i]) != tolower((unsigned char)suffix[i])) return 0;
     }
     return 1;
+}
+
+static long long file_size(const char *path);
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int decode_digest(const char *text, unsigned char bytes[SHA256_HASH_SIZE]) {
+    if (!text || strncmp(text, "sha256:", 7) != 0 || strlen(text) != 7 + SHA256_HASH_SIZE * 2) return -1;
+    for (size_t i = 0; i < SHA256_HASH_SIZE; i++) {
+        int high = hex_digit(text[7 + i * 2]);
+        int low = hex_digit(text[8 + i * 2]);
+        if (high < 0 || low < 0) return -1;
+        bytes[i] = (unsigned char)((high << 4) | low);
+    }
+    return 0;
+}
+
+static int verify_download(const char *path, const struct update_info *info,
+                           char *err, size_t errcap) {
+    unsigned char expected[SHA256_HASH_SIZE], actual[SHA256_HASH_SIZE];
+    unsigned char buffer[32 * 1024];
+    NroStart start;
+    NroHeader header;
+    Sha256Context hash;
+    FILE *file = NULL;
+    size_t count;
+    long long size = file_size(path);
+    if (info->asset_size <= 0 || size != info->asset_size) {
+        if (err && errcap) copy_text(err, errcap, "Tamanho do NRO nao confere com a release.");
+        return -1;
+    }
+    if (decode_digest(info->digest, expected) != 0) {
+        if (err && errcap) copy_text(err, errcap, "Release sem hash SHA-256 valido.");
+        return -1;
+    }
+    file = fopen(path, "rb");
+    if (!file) {
+        if (err && errcap) copy_text(err, errcap, "Nao abri o NRO baixado para verificar.");
+        return -1;
+    }
+    if (fread(&start, 1, sizeof(start), file) != sizeof(start) ||
+        fread(&header, 1, sizeof(header), file) != sizeof(header) ||
+        header.magic != NROHEADER_MAGIC || header.size == 0 || header.size > size) {
+        if (err && errcap) copy_text(err, errcap, "Arquivo baixado nao e um NRO valido.");
+        fclose(file);
+        return -1;
+    }
+    rewind(file);
+    sha256ContextCreate(&hash);
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0)
+        sha256ContextUpdate(&hash, buffer, count);
+    if (ferror(file)) {
+        if (err && errcap) copy_text(err, errcap, "Falha lendo o NRO baixado.");
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    sha256ContextGetHash(&hash, actual);
+    if (memcmp(expected, actual, sizeof(actual)) != 0) {
+        if (err && errcap) copy_text(err, errcap, "SHA-256 do NRO nao confere com a release.");
+        return -1;
+    }
+    return 0;
 }
 
 static int read_version_part(const char **pp) {
@@ -352,12 +421,23 @@ int update_check(struct update_info *info) {
     cJSON_ArrayForEach(asset, assets) {
         cJSON *name = cJSON_GetObjectItemCaseSensitive(asset, "name");
         cJSON *dl = cJSON_GetObjectItemCaseSensitive(asset, "browser_download_url");
+        cJSON *digest = cJSON_GetObjectItemCaseSensitive(asset, "digest");
+        cJSON *size = cJSON_GetObjectItemCaseSensitive(asset, "size");
         if (!cJSON_IsString(name) || !name->valuestring) continue;
         if (!cJSON_IsString(dl) || !dl->valuestring) continue;
         if (!ends_with_nro(name->valuestring)) continue;
+        unsigned char hash[SHA256_HASH_SIZE];
+        if (!cJSON_IsString(digest) || decode_digest(digest->valuestring, hash) != 0 ||
+            !cJSON_IsNumber(size) || size->valuedouble <= 0 || size->valuedouble > 128 * 1024 * 1024) {
+            if (info) copy_text(info->message, sizeof(info->message), "Release sem tamanho ou SHA-256 valido.");
+            result = UPDATE_CHECK_ERROR;
+            goto done;
+        }
         if (info) {
             copy_text(info->asset_name, sizeof(info->asset_name), name->valuestring);
             copy_text(info->download_url, sizeof(info->download_url), dl->valuestring);
+            copy_text(info->digest, sizeof(info->digest), digest->valuestring);
+            info->asset_size = (long long)size->valuedouble;
         }
         result = UPDATE_CHECK_AVAILABLE;
         goto done;
@@ -408,6 +488,10 @@ int update_apply(const struct update_info *info, const char *target_path,
                 snprintf(err, errcap, "Download falhou: %.170s (%ld).", download_err, code);
             else snprintf(err, errcap, "Download falhou (HTTP %ld).", code);
         }
+        remove(tmp);
+        return -1;
+    }
+    if (verify_download(tmp, info, err, errcap) != 0) {
         remove(tmp);
         return -1;
     }

@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #ifndef APP_VERSION_STR
-#define APP_VERSION_STR "0.10.1"
+#define APP_VERSION_STR "0.11.0"
 #endif
 
 #ifndef UPDATE_REPO_OWNER
@@ -25,6 +25,8 @@ struct update_info {
     char latest_version[32];
     char asset_name[128];
     char download_url[512];
+    char digest[72];
+    long long asset_size;
     char release_notes[512];
     char message[256];
     long http_code;

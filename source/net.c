@@ -146,11 +146,19 @@ void net_configure_curl(CURL *curl) {
     net_configure_curl_isolated(curl);
 }
 
-long net_request_timeout(const char *url, const char *method,
-                         const char *body, const char *bearer,
-                         struct membuf *out, const char **err,
-                         long connect_timeout, long total_timeout) {
+static int request_cancel_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
+                             curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    return SDL_AtomicGet((SDL_atomic_t *)userdata) ? 1 : 0;
+}
+
+long net_request_timeout_cancel(const char *url, const char *method,
+                                const char *body, const char *bearer,
+                                struct membuf *out, const char **err,
+                                long connect_timeout, long total_timeout,
+                                SDL_atomic_t *cancel) {
     if (err) *err = NULL;
+    if (cancel && SDL_AtomicGet(cancel)) return -(long)CURLE_ABORTED_BY_CALLBACK;
 
     CURL *curl = curl_easy_init();
     if (!curl) { if (err) *err = "curl_easy_init falhou"; return -1; }
@@ -176,6 +184,11 @@ long net_request_timeout(const char *url, const char *method,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
+    if (cancel) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, request_cancel_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel);
+    }
     net_configure_curl(curl);
 
     if (method && strcmp(method, "POST") == 0) {
@@ -200,6 +213,14 @@ long net_request_timeout(const char *url, const char *method,
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);   // conexao volta pro cache compartilhado (nao fecha)
     return code;
+}
+
+long net_request_timeout(const char *url, const char *method,
+                         const char *body, const char *bearer,
+                         struct membuf *out, const char **err,
+                         long connect_timeout, long total_timeout) {
+    return net_request_timeout_cancel(url, method, body, bearer, out, err,
+                                      connect_timeout, total_timeout, NULL);
 }
 
 long net_request(const char *url, const char *method,

@@ -891,3 +891,16 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   primeiro evento do novo trace mostra margem de heap substancialmente maior e
   reproduzir um filme e um episodio por 30 s. Se ainda houver falha, usar a foto
   do trace 0.10.1; ela mostrara se o consumo restante pertence ao demuxer HLS.
+
+## Inicio da reconstrucao 0.11.0 em 23/09/2026
+
+- Plano e criterios de aceite em `docs/SWITCH_REBUILD_PLAN.md`.
+- `catalog_fetch` tira busca e detalhes de filme/serie (inclusive relacionados)
+  da thread SDL. Uma requisicao ativa e no maximo uma intencao pendente evitam
+  tempestade de chamadas ao trocar de tela; B volta sem esperar a rede.
+- O atualizador agora exige tamanho, SHA-256 publicado no GitHub Release e
+  cabecalho NRO valido antes de substituir o arquivo instalado.
+- `.gitattributes` preserva os bytes de `data/cacert.bin` no checkout Windows;
+  converter suas quebras de linha impedia a verificacao da release.
+- A 0.11.0 ainda NAO foi publicada. Proximo passo: validar no hardware os estados
+  de rede lenta/cancelamento, memoria e player, depois seguir com o shell nativo.

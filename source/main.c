@@ -22,6 +22,7 @@
 #include "player.h"
 #include "api.h"
 #include "diag.h"
+#include "catalog_fetch.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -304,6 +305,16 @@ static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n
 static cJSON *g_search = NULL;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
+typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH } FetchKind;
+typedef struct {
+    FetchKind kind;
+    Screen origin;
+    char path[512];
+    char query[128];
+} FetchIntent;
+static CatalogFetch g_fetch = {0};
+static FetchIntent g_fetch_current = {0}, g_fetch_queued = {0};
+static int g_fetch_discard = 0;
 
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
@@ -899,13 +910,89 @@ static void select_series_resume_target(cJSON *detail) {
     g_epScroll = 0;
 }
 
+static void begin_catalog_fetch(FetchKind kind, const char *path, const char *query) {
+    FetchIntent intent = {0};
+    intent.kind = kind;
+    intent.origin = g_screen == SC_LOADING ? g_fetch_current.origin : g_screen;
+    snprintf(intent.path, sizeof(intent.path), "%s", path);
+    if (query) snprintf(intent.query, sizeof(intent.query), "%s", query);
+    if (g_fetch.thread) {
+        // A newer selection wins. Keep at most one request in flight and one
+        // pending intent so repeated button presses cannot flood the server.
+        g_fetch_queued = intent;
+        g_fetch_discard = 1;
+        catalog_fetch_cancel(&g_fetch);
+    } else {
+        g_fetch_current = intent;
+        g_fetch_discard = 0;
+        if (catalog_fetch_start(&g_fetch, intent.path, g_token) != 0) {
+            g_fetch_current.kind = FETCH_NONE;
+            toast("Nao foi possivel iniciar a consulta");
+            return;
+        }
+    }
+    g_screen = SC_LOADING;
+}
+
+static void pump_catalog_fetch(void) {
+    cJSON *result = NULL;
+    char error[192] = {0};
+    if (!catalog_fetch_take(&g_fetch, &result, error, sizeof(error))) return;
+    if (g_fetch_queued.kind != FETCH_NONE) {
+        if (result) cJSON_Delete(result);
+        g_fetch_current = g_fetch_queued;
+        g_fetch_queued.kind = FETCH_NONE;
+        g_fetch_discard = 0;
+        if (catalog_fetch_start(&g_fetch, g_fetch_current.path, g_token) == 0) return;
+        error[0] = '\0';
+        snprintf(error, sizeof(error), "Nao foi possivel iniciar a consulta");
+        result = NULL;
+    }
+    if (g_fetch_discard || g_screen != SC_LOADING) {
+        if (result) cJSON_Delete(result);
+        g_fetch_current.kind = FETCH_NONE;
+        g_fetch_discard = 0;
+        return;
+    }
+    int applied = 0;
+    if (result && (g_fetch_current.kind == FETCH_MOVIE || g_fetch_current.kind == FETCH_RELATED)) {
+        applied = (g_fetch_current.kind == FETCH_RELATED ? open_related_details_response(result) :
+                   open_movie_details_response(result)) == 0;
+        if (applied) g_screen = SC_MOVIE;
+    } else if (result && g_fetch_current.kind == FETCH_SERIES &&
+               cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(result, "series"))) {
+        if (g_ser) cJSON_Delete(g_ser);
+        g_ser = result;
+        result = NULL;
+        select_series_resume_target(g_ser);
+        g_screen = SC_SERIES;
+        applied = 1;
+    } else if (result && g_fetch_current.kind == FETCH_SEARCH && cJSON_IsObject(result)) {
+        if (g_search) cJSON_Delete(g_search);
+        g_search = result;
+        result = NULL;
+        snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", g_fetch_current.query);
+        g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
+        g_screen = SC_SEARCH;
+        applied = 1;
+    }
+    if (result) cJSON_Delete(result);
+    if (!applied) {
+        g_screen = g_fetch_current.origin;
+        toast(error[0] ? error : "Resposta invalida do catalogo");
+    }
+    g_fetch_current.kind = FETCH_NONE;
+}
+
 static void open_series(int id) {
-    if (g_ser) { cJSON_Delete(g_ser); g_ser = NULL; }
-    char p[96]; snprintf(p, sizeof(p), "/api/catalog/series/%d", id);
-    g_ser = api_get(p);
-    g_seasonIdx = 0; g_epSel = 0; g_epScroll = 0;
-    if (g_ser) { select_series_resume_target(g_ser); g_screen = SC_SERIES; }
-    else toast("Nao consegui abrir a serie");
+    if (id <= 0) return;
+    char path[96]; snprintf(path, sizeof(path), "/api/catalog/series/%d", id);
+    begin_catalog_fetch(FETCH_SERIES, path, NULL);
+}
+void request_related_movie_details(int id) {
+    if (id <= 0) return;
+    char path[96]; snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", id);
+    begin_catalog_fetch(FETCH_RELATED, path, NULL);
 }
 static void open_item(cJSON *item, int is_series) {
     if (!item) return;
@@ -920,8 +1007,9 @@ static void open_item(cJSON *item, int is_series) {
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
     if ((kind && !strcmp(kind, "series")) || is_series) open_series(id);
     else {
-        if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
-        else toast("Falha ao carregar info do filme");
+        if (id <= 0) return;
+        char path[96]; snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", id);
+        begin_catalog_fetch(FETCH_MOVIE, path, NULL);
     }
 }
 
@@ -1406,13 +1494,9 @@ static void url_encode_utf8(const char *input, char *output, size_t capacity) {
 static void do_search(void) {
     char q[128];
     if (prompt_text("Buscar filme, serie, anime, dorama...", q, sizeof(q), 0) != 0) return;
-    if (g_search) { cJSON_Delete(g_search); g_search = NULL; }
     char enc[400]; url_encode_utf8(q, enc, sizeof(enc));
     char path[460]; snprintf(path, sizeof(path), "/api/catalog/search-v2?q=%s", enc);
-    g_search = api_get(path);
-    g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
-    snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", q);
-    g_screen = SC_SEARCH;
+    begin_catalog_fetch(FETCH_SEARCH, path, q);
 }
 
 // ------------------------------------------------------------- render: barra
@@ -2353,8 +2437,10 @@ static void input_downloads(int b) {
             if (store_media_list_get(g_open_list, g_list_item_sel, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) {
                 detail_capture_origin();
                 if (is_series) open_series(id);
-                else if (open_movie_details(id) == 0) g_screen = SC_MOVIE;
-                else toast("Nao foi possivel abrir este titulo");
+                else if (id > 0) {
+                    char path[96]; snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", id);
+                    begin_catalog_fetch(FETCH_MOVIE, path, NULL);
+                }
             }
         } else if (b == JOY_X && g_list_item_sel < n) {
             int id = 0, is_series = 0; char title[128], logo[720];
@@ -2741,6 +2827,16 @@ static void run_update(void) {
     }
 }
 
+static void draw_catalog_loading(void) {
+    const char *label = g_fetch_current.kind == FETCH_SEARCH ? "Buscando titulos" :
+                        g_fetch_current.kind == FETCH_SERIES ? "Abrindo serie" : "Abrindo filme";
+    ui_header("NPLAY", label, "B Voltar");
+    ui_panel(220, 210, 840, 250, C_ACC2);
+    text_center_at(label, 260, 760, 260, C_TEXT, 1);
+    text_center_at("Consultando o catalogo sem interromper os controles...", 260, 760, 338, C_MUT, 0);
+    ui_footer("B Cancelar    L/R Trocar categoria depois da consulta");
+}
+
 // Roteia um botao para a tela atual. Usado pelos eventos E pela navegacao
 // continua (segurar D-pad OU empurrar o analogico). g_running/g_dir/g_dir_next
 // controlam o loop e a repeticao.
@@ -2787,6 +2883,14 @@ static void handle_button(int b) {
         input_settings(b);
     } else if (g_screen == SC_MOVIE) {
         input_movie(b);
+    } else if (g_screen == SC_LOADING) {
+        if (b == JOY_B || b == JOY_MINUS) {
+            Screen origin = g_fetch_queued.kind != FETCH_NONE ? g_fetch_queued.origin : g_fetch_current.origin;
+            g_fetch_queued.kind = FETCH_NONE;
+            g_fetch_discard = 1;
+            catalog_fetch_cancel(&g_fetch);
+            g_screen = origin;
+        }
     }
 }
 
@@ -2854,6 +2958,7 @@ int main(int argc, char **argv) {
         pump_history();
         pump_settings_status();
         pump_landing();
+        pump_catalog_fetch();
         update_download_awake();
         // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.
         // Assim nenhuma textura usada neste frame e destruida antes do Present.
@@ -2866,6 +2971,7 @@ int main(int argc, char **argv) {
         else if (g_screen == SC_MOVIE) draw_movie();
         else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
         else if (g_screen == SC_SEARCH) draw_search();
+        else if (g_screen == SC_LOADING) draw_catalog_loading();
         else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
 
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
@@ -2896,6 +3002,7 @@ int main(int argc, char **argv) {
     if (g_download_awake) { appletSetMediaPlaybackState(false); g_download_awake = 0; }
     if (g_land_thread) { SDL_WaitThread(g_land_thread, NULL); g_land_thread = NULL; }
     if (g_land_pending) { cJSON_Delete(g_land_pending); g_land_pending = NULL; }
+    catalog_fetch_dispose(&g_fetch);
     for (int i = 0; i < 5; i++) {
         if (g_land_cache[i]) { cJSON_Delete(g_land_cache[i]); g_land_cache[i] = NULL; }
     }
