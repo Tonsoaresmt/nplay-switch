@@ -16,6 +16,8 @@ continua 0.10.1; o menu de atualização ainda não oferece 0.11.0.
 4. Reproduza um filme e um episódio HLS/R2 por pelo menos 30 minutos cada.
    Durante cada reprodução, pause, avance/retroceda, troque áudio/legenda quando
    disponíveis e suspenda/retome o console. Confirme o progresso ao voltar.
+   Abra também um episódio de anime: o backend deve resolver a fonte para MP4
+   direto; se aparecer "indisponível neste dispositivo", registre o título.
 5. Depois da navegação e da reprodução, abra **Configurações > X** e anote
    quadros acima de 20/33 ms, pior quadro e as últimas linhas do trace. Se o
    app fechar, reabra e fotografe essa tela antes de iniciar outro título.
