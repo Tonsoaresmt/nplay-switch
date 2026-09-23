@@ -44,6 +44,9 @@ offline e os controles próprios do console.
   vez de recontar todos os filtros a cada quadro. O desenho percorre as duas
   listas de resultados uma vez por quadro e ignora cards fora da tela, sem criar
   outra cópia do JSON. Falta verificar a rolagem e a troca de filtros no console.
+- Home e busca recortam o conteúdo entre a barra superior e o rodapé. Os helpers
+  de texto agora restauram o recorte anterior, evitando que cards parcialmente
+  visíveis invadam a navegação ao rolar. Conferir visualmente no Switch.
 3. **Paridade de conta e catálogo.** Perfil ativo por dispositivo e header
    `X-Profile-Id` nas chamadas autenticadas; conexão por código/QR, sagas,
    favoritos, Minha lista, histórico e pedidos preparados. Migrar os dados

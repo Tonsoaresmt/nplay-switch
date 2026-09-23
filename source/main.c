@@ -1565,6 +1565,8 @@ static void draw_landing(void) {
         ui_footer("Y Buscar    L/R Trocar categoria    - Configuracoes");
         return;
     }
+    SDL_Rect content_clip = { 0, 72, WIN_W, WIN_H - 72 - 52 };
+    SDL_RenderSetClipRect(gRen, &content_clip);
     char hi[180]; snprintf(hi, sizeof(hi), "Bem-vindo de volta%s%s", g_user[0] ? ", " : "", g_user[0] ? g_user : "");
     if (g_tab == 0) text_draw(gRen, hi, 40, 76 - g_homeScroll, C_MUT, 0);
     else text_draw(gRen, TAB_NAME[g_tab], 40, 76 - g_homeScroll, C_MUT, 0);
@@ -1650,6 +1652,7 @@ static void draw_landing(void) {
         text_draw(gRen, "Busque pelo nome ou por parte do titulo.", 68, search_y + 80, C_MUT, 0);
         ui_badge(selected ? "A  BUSCAR" : "Y  BUSCAR", WIN_W - 190, search_y + 42, selected ? C_ACC : C_ACC2);
     }
+    SDL_RenderSetClipRect(gRen, NULL);
     ui_footer(g_railSel == g_railsN ?
         "A ou Y Abrir busca    Cima Voltar ao catalogo    L/R Trocar categoria" :
         "A Abrir    X Minha lista    Y Buscar    L/R Trocar categoria");
@@ -1665,6 +1668,8 @@ static void draw_landing(void) {
 #define GCH 268
 static void draw_search(void) {
     draw_topbar();
+    SDL_Rect content_clip = { 0, 72, WIN_W, WIN_H - 72 - 52 };
+    SDL_RenderSetClipRect(gRen, &content_clip);
     int n = srch_count_for(g_srchFilter);
     char hd[200]; snprintf(hd, sizeof(hd), "Resultados para \"%s\"", g_srchQuery);
     text_clip(hd, 40, 88, C_TEXT, 1, 850);
@@ -1683,6 +1688,7 @@ static void draw_search(void) {
     }
     if (n == 0) {
         ui_empty_state("Nada neste filtro", "Use ZL/ZR para trocar o tipo ou Y para fazer outra busca.");
+        SDL_RenderSetClipRect(gRen, NULL);
         ui_footer("ZL/ZR Filtrar    Y Nova busca    B Voltar");
         return;
     }
@@ -1704,6 +1710,7 @@ static void draw_search(void) {
             index++;
         }
     }
+    SDL_RenderSetClipRect(gRen, NULL);
     ui_footer("A Abrir    X Minha lista    ZL/ZR Filtrar    Y Nova busca    B Voltar");
 }
 

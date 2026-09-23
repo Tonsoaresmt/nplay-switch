@@ -55,9 +55,15 @@ void short_title(const char *title, char *out, int cap) {
 void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw) {
     if (!gRen) return;
     SDL_Rect clip = { x, y - 3, maxw, big ? 40 : 30 };
+    SDL_bool had_clip = SDL_RenderIsClipEnabled(gRen);
+    SDL_Rect previous;
+    if (had_clip) {
+        SDL_RenderGetClipRect(gRen, &previous);
+        SDL_IntersectRect(&clip, &previous, &clip);
+    }
     SDL_RenderSetClipRect(gRen, &clip);
     text_draw(gRen, s, x, y, c, big);
-    SDL_RenderSetClipRect(gRen, NULL);
+    SDL_RenderSetClipRect(gRen, had_clip ? &previous : NULL);
 }
 
 int text_center(const char *s, int y, SDL_Color c, int big) {
@@ -72,10 +78,16 @@ int text_center_at(const char *s, int x, int area_w, int y, SDL_Color c, int big
     SDL_Texture *t = text_cached(gRen, s, c, big, &w, &h);
     if (t) {
         SDL_Rect clip = { x, y - 3, area_w, big ? 42 : 32 };
+        SDL_bool had_clip = SDL_RenderIsClipEnabled(gRen);
+        SDL_Rect previous;
+        if (had_clip) {
+            SDL_RenderGetClipRect(gRen, &previous);
+            SDL_IntersectRect(&clip, &previous, &clip);
+        }
         SDL_RenderSetClipRect(gRen, &clip);
         SDL_Rect d = { x + (area_w - w) / 2, y, w, h };
         SDL_RenderCopy(gRen, t, NULL, &d);
-        SDL_RenderSetClipRect(gRen, NULL);
+        SDL_RenderSetClipRect(gRen, had_clip ? &previous : NULL);
     }
     return w;
 }

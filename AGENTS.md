@@ -930,3 +930,6 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - A busca reutiliza contagens por filtro do resultado atual e desenha os
   resultados em uma passagem. Evitar indices duplicados de cJSON em memoria:
   o player ja teve fechamento real por pressao de heap.
+- Home e busca usam clip de conteudo entre topbar e rodape. `text_clip` e
+  `text_center_at` preservam o clip anterior; manter isso se refatorar UI,
+  senao cards voltam a cobrir a navegacao durante a rolagem.
