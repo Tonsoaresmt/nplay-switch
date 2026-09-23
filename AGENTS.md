@@ -933,3 +933,8 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Home e busca usam clip de conteudo entre topbar e rodape. `text_clip` e
   `text_center_at` preservam o clip anterior; manter isso se refatorar UI,
   senao cards voltam a cobrir a navegacao durante a rolagem.
+- O limite vertical das fileiras inclui os 40 px de titulo/foco abaixo da capa.
+  Favoritos sao carregados por `CatalogFetch` apos selecionar perfil, com
+  cancelamento no fechamento; nao voltar a chamar `api_get` na thread SDL.
+- Antes de publicar a 0.11.x como latest, executar no console o roteiro em
+  `docs/SWITCH_0_11_HARDWARE_CHECK.md`.

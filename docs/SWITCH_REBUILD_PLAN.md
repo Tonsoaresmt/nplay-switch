@@ -47,6 +47,12 @@ offline e os controles próprios do console.
 - Home e busca recortam o conteúdo entre a barra superior e o rodapé. Os helpers
   de texto agora restauram o recorte anterior, evitando que cards parcialmente
   visíveis invadam a navegação ao rolar. Conferir visualmente no Switch.
+- Revisão posterior corrigiu o limite vertical da fileira para incluir o texto
+  abaixo da capa; a checagem anterior podia ocultá-lo cedo demais. A consulta
+  de favoritos após escolher o perfil usa agora o fetch cancelável em segundo
+  plano, evitando até 15 s de bloqueio da UI em falha de rede. Enquanto ela
+  termina, o atalho de favoritar informa que está sincronizando.
+- Roteiro de confirmação no hardware: `docs/SWITCH_0_11_HARDWARE_CHECK.md`.
 3. **Paridade de conta e catálogo.** Perfil ativo por dispositivo e header
    `X-Profile-Id` nas chamadas autenticadas; conexão por código/QR, sagas,
    favoritos, Minha lista, histórico e pedidos preparados. Migrar os dados

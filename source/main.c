@@ -361,6 +361,8 @@ static char g_epChk[512]; static int g_epChkN = 0;
 // --- favoritos (set local p/ togglar rapido) ---
 static int g_favItem[512]; static int g_favItemN = 0;
 static int g_favSeries[512]; static int g_favSeriesN = 0;
+static CatalogFetch g_favs_fetch = {0};
+static int g_favs_profile_id = 0;
 
 // --- serie (detalhe) ---
 static cJSON *g_ser = NULL;
@@ -408,9 +410,17 @@ static int catalog_favorite_id(cJSON *item, int is_series) {
 
 static int is_fav_series(int id) { return idx_of(g_favSeries, g_favSeriesN, id) >= 0; }
 static void load_favs(void) {
+    if (g_favs_fetch.thread) return;
     g_favItemN = g_favSeriesN = 0;
-    cJSON *j = api_get("/api/sync/favorites");
+    g_favs_profile_id = net_get_profile_id();
+    if (catalog_fetch_start(&g_favs_fetch, "/api/sync/favorites", g_token) != 0)
+        toast("Nao foi possivel sincronizar Minha lista");
+}
+static void pump_favs(void) {
+    cJSON *j = NULL;
+    if (!catalog_fetch_take(&g_favs_fetch, &j, NULL, 0)) return;
     if (!j) return;
+    if (g_favs_profile_id != net_get_profile_id()) { cJSON_Delete(j); return; }
     cJSON *items = cJSON_GetObjectItem(j, "items"), *e;
     cJSON_ArrayForEach(e, items) {
         cJSON *it = cJSON_GetObjectItem(e, "item_id");
@@ -422,12 +432,14 @@ static void load_favs(void) {
 }
 int is_fav_item(int id) { return idx_of(g_favItem, g_favItemN, id) >= 0; }
 void toggle_fav_item(int id) {
+    if (g_favs_fetch.thread) { toast("Sincronizando Minha lista..."); return; }
     char body[48]; snprintf(body, sizeof(body), "{\"item_id\":%d}", id);
     int i = idx_of(g_favItem, g_favItemN, id);
     if (i >= 0) { api_send("/api/sync/favorites", "DELETE", body); g_favItem[i] = g_favItem[--g_favItemN]; toast("Removido da Minha lista"); }
     else { long c = api_send("/api/sync/favorites", "POST", body); if (c == 200) { if (g_favItemN < 512) g_favItem[g_favItemN++] = id; toast("Adicionado a Minha lista"); } else toast("Nao foi possivel favoritar"); }
 }
 static void toggle_fav_series(int id) {
+    if (g_favs_fetch.thread) { toast("Sincronizando Minha lista..."); return; }
     char body[48]; snprintf(body, sizeof(body), "{\"series_id\":%d}", id);
     int i = idx_of(g_favSeries, g_favSeriesN, id);
     if (i >= 0) { api_send("/api/sync/favorites", "DELETE", body); g_favSeries[i] = g_favSeries[--g_favSeriesN]; toast("Removido da Minha lista"); }
@@ -1612,7 +1624,8 @@ static void draw_landing(void) {
     for (int r = 0; r < g_railsN; r++) {
         int items = g_rails[r].count;
         int ry = y + 30;
-        if (ry + RCH < 72) { y += 30 + RCH + 44; continue; }
+        // O titulo e o indicador de foco ficam abaixo da capa.
+        if (ry + RCH + 40 < 72) { y += 30 + RCH + 44; continue; }
         if (y >= WIN_H) break;
         text_draw(gRen, g_rails[r].label, 40, y, (r == g_railSel) ? C_TEXT : C_MUT, 0);
         int rowScroll = 0;
@@ -3106,6 +3119,7 @@ int main(int argc, char **argv) {
             load_downloads(); g_dl_next = SDL_GetTicks() + 2000;
         }
         pump_downloads();
+        pump_favs();
         pump_history();
         pump_settings_status();
         pump_landing();
@@ -3147,6 +3161,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 3; i++) SDL_SemPost(g_q_sem);
     for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
     if (g_dl_thread) { SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL; }
+    catalog_fetch_dispose(&g_favs_fetch);
     if (g_dl_pending) { cJSON_Delete(g_dl_pending); g_dl_pending = NULL; }
     if (g_history_thread) { SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL; }
     if (g_watchlater_thread) { SDL_WaitThread(g_watchlater_thread, NULL); g_watchlater_thread = NULL; }
