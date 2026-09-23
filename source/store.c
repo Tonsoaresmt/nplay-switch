@@ -12,6 +12,9 @@
 #define DIR_BASE "sdmc:/switch"
 #define DIR_APP  "sdmc:/switch/Meruem"
 #define TOKEN_F  DIR_APP "/token.txt"
+#define PROFILE_F DIR_APP "/profile_id.txt"
+#define MEDIA_LISTS_OWNER_F DIR_APP "/media_lists_owner.txt"
+#define MEDIA_LISTS_USER_F DIR_APP "/media_lists_user.txt"
 #define SERVER_F DIR_APP "/server.txt"
 #define USER_F   DIR_APP "/user.txt"
 #define DEVICE_F DIR_APP "/device_id.txt"
@@ -36,6 +39,64 @@ static cJSON *g_prog = NULL;
 static cJSON *g_offser = NULL;   // { seriesId: estado offline 0/1/2 }
 static cJSON *g_fitm = NULL;     // { seriesId: modo de ajuste 0=Auto 1=Conter 2=Largura }
 static cJSON *g_media_lists = NULL; // { lists: [{ name, items: [{id,series,title,logo}] }] }
+static int g_media_profile_id = 0;
+static int g_media_legacy_owner = 0;
+static char g_media_legacy_user[128] = {0};
+
+static int read_positive_id(const char *path) {
+    char buf[32] = {0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    char *end = NULL;
+    long id = strtol(buf, &end, 10);
+    if (end == buf || id <= 0 || id > 2147483647L) return 0;
+    while (*end == ' ' || *end == '\r' || *end == '\n' || *end == '\t') end++;
+    return *end ? 0 : (int)id;
+}
+
+static int write_positive_id(const char *path, int id) {
+    if (id <= 0) return 0;
+    char tmp[128], bak[128];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp) ||
+        snprintf(bak, sizeof(bak), "%s.bak", path) >= (int)sizeof(bak)) return 0;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return 0;
+    int written = fprintf(f, "%d\n", id) > 0;
+    if (fclose(f) != 0) written = 0;
+    if (!written) { remove(tmp); return 0; }
+    remove(bak);
+    int backed_up = rename(path, bak) == 0;
+    if (rename(tmp, path) == 0) {
+        if (backed_up) remove(bak);
+        return 1;
+    }
+    remove(tmp);
+    if (backed_up) rename(bak, path);
+    return 0;
+}
+
+int store_load_profile_id(int *profile_id) {
+    int id = read_positive_id(PROFILE_F);
+    if (profile_id) *profile_id = id;
+    return id > 0;
+}
+int store_save_profile_id(int profile_id) { return write_positive_id(PROFILE_F, profile_id); }
+void store_clear_profile_id(void) { remove(PROFILE_F); }
+
+static void media_lists_paths(char *path, char *tmp, char *bak, size_t cap) {
+    if (g_media_profile_id <= 0 || g_media_profile_id == g_media_legacy_owner) {
+        snprintf(path, cap, "%s", MEDIA_LISTS_F);
+        snprintf(tmp, cap, "%s", MEDIA_LISTS_TMP);
+        snprintf(bak, cap, "%s", MEDIA_LISTS_BAK);
+    } else {
+        snprintf(path, cap, DIR_APP "/media_lists_%d.json", g_media_profile_id);
+        snprintf(tmp, cap, DIR_APP "/media_lists_%d.json.tmp", g_media_profile_id);
+        snprintf(bak, cap, DIR_APP "/media_lists_%d.json.bak", g_media_profile_id);
+    }
+}
 
 static cJSON *load_json_file(const char *path, long max_size) {
     FILE *f = fopen(path, "rb");
@@ -54,25 +115,43 @@ static void save_media_lists(void) {
     if (!g_media_lists) return;
     char *text = cJSON_PrintUnformatted(g_media_lists);
     if (!text) return;
-    FILE *f = fopen(MEDIA_LISTS_TMP, "wb");
+    char path[128], tmp[128], bak[128];
+    media_lists_paths(path, tmp, bak, sizeof(path));
+    FILE *f = fopen(tmp, "wb");
     size_t len = strlen(text); int written = 0;
     if (f) { written = fwrite(text, 1, len, f) == len; fclose(f); }
     if (written) {
-        remove(MEDIA_LISTS_BAK);
-        int backed_up = rename(MEDIA_LISTS_F, MEDIA_LISTS_BAK) == 0;
-        if (rename(MEDIA_LISTS_TMP, MEDIA_LISTS_F) == 0) {
-            if (backed_up) remove(MEDIA_LISTS_BAK);
+        remove(bak);
+        int backed_up = rename(path, bak) == 0;
+        if (rename(tmp, path) == 0) {
+            if (backed_up) remove(bak);
         } else {
-            remove(MEDIA_LISTS_TMP);
-            if (backed_up) rename(MEDIA_LISTS_BAK, MEDIA_LISTS_F);
+            remove(tmp);
+            if (backed_up) rename(bak, path);
         }
-    } else remove(MEDIA_LISTS_TMP);
+    } else remove(tmp);
     free(text);
 }
 
 void store_init(void) {
     mkdir(DIR_BASE, 0777);
     mkdir(DIR_APP, 0777);
+    g_media_legacy_owner = read_positive_id(MEDIA_LISTS_OWNER_F);
+    FILE *owner = fopen(MEDIA_LISTS_USER_F, "rb");
+    if (owner) {
+        size_t n = fread(g_media_legacy_user, 1, sizeof(g_media_legacy_user) - 1, owner);
+        fclose(owner);
+        g_media_legacy_user[n] = '\0';
+        g_media_legacy_user[strcspn(g_media_legacy_user, "\r\n")] = '\0';
+    } else {
+        // user.txt da versao anterior identifica quem ja possuia media_lists.json.
+        // Registra antes que um novo login possa sobrescrever aquele usuario.
+        store_load_user(g_media_legacy_user, sizeof(g_media_legacy_user));
+        if (g_media_legacy_user[0]) {
+            owner = fopen(MEDIA_LISTS_USER_F, "wb");
+            if (owner) { fwrite(g_media_legacy_user, 1, strlen(g_media_legacy_user), owner); fclose(owner); }
+        }
+    }
     FILE *f = fopen(PROG_F, "rb");
     if (f) {
         fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -106,7 +185,42 @@ void store_init(void) {
     }
     if (!g_fitm) g_fitm = cJSON_CreateObject();
 
-    g_media_lists = load_json_file(MEDIA_LISTS_F, 4 * 1024 * 1024);
+    char media_path[128], media_tmp[128], media_bak[128];
+    media_lists_paths(media_path, media_tmp, media_bak, sizeof(media_path));
+    g_media_lists = load_json_file(media_path, 4 * 1024 * 1024);
+    if (!g_media_lists || !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(g_media_lists, "lists"))) {
+        if (g_media_lists) cJSON_Delete(g_media_lists);
+        g_media_lists = cJSON_CreateObject();
+        cJSON *lists = cJSON_AddArrayToObject(g_media_lists, "lists");
+        cJSON *later = cJSON_CreateObject();
+        cJSON_AddStringToObject(later, "name", "Assistir mais tarde");
+        cJSON_AddItemToObject(later, "items", cJSON_CreateArray());
+        cJSON_AddItemToArray(lists, later);
+        save_media_lists();
+    }
+}
+
+void store_select_profile(int profile_id, const char *username) {
+    if (profile_id <= 0 || profile_id == g_media_profile_id) return;
+    int may_claim_legacy = !g_media_legacy_user[0] ||
+                           (username && !strcmp(g_media_legacy_user, username));
+    if (!g_media_legacy_owner && may_claim_legacy) {
+        // A lista anterior a perfis pertence ao primeiro perfil escolhido neste
+        // usuario. Uma conta diferente nao recebe suas listas privadas.
+        if (write_positive_id(MEDIA_LISTS_OWNER_F, profile_id)) {
+            g_media_legacy_owner = profile_id;
+            if (!g_media_legacy_user[0] && username && username[0]) {
+                snprintf(g_media_legacy_user, sizeof(g_media_legacy_user), "%s", username);
+                FILE *f = fopen(MEDIA_LISTS_USER_F, "wb");
+                if (f) { fwrite(g_media_legacy_user, 1, strlen(g_media_legacy_user), f); fclose(f); }
+            }
+        }
+    }
+    g_media_profile_id = profile_id;
+    if (g_media_lists) { cJSON_Delete(g_media_lists); g_media_lists = NULL; }
+    char path[128], tmp[128], bak[128];
+    media_lists_paths(path, tmp, bak, sizeof(path));
+    g_media_lists = load_json_file(path, 4 * 1024 * 1024);
     if (!g_media_lists || !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(g_media_lists, "lists"))) {
         if (g_media_lists) cJSON_Delete(g_media_lists);
         g_media_lists = cJSON_CreateObject();

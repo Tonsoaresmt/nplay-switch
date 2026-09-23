@@ -7,6 +7,11 @@ void store_init(void);
 int  store_load_token(char *out, size_t cap);
 void store_save_token(const char *token);
 void store_clear_token(void);
+int  store_load_profile_id(int *profile_id);
+int  store_save_profile_id(int profile_id);
+void store_clear_profile_id(void);
+// Troca apenas a lista local ativa; chamar antes de mostrar dados do novo perfil.
+void store_select_profile(int profile_id, const char *username);
 
 int  store_load_pref_audio(char *out, size_t cap);
 void store_save_pref_audio(const char *lang);

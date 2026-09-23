@@ -904,3 +904,17 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   converter suas quebras de linha impedia a verificacao da release.
 - A 0.11.0 ainda NAO foi publicada. Proximo passo: validar no hardware os estados
   de rede lenta/cancelamento, memoria e player, depois seguir com o shell nativo.
+
+## Perfis nativos na branch 0.11.0 em 23/09/2026
+
+- `Trocar perfil` consulta `/api/account/profiles` fora da thread SDL. A escolha
+  persiste na microSD e `net.c` envia `X-Profile-Id` apenas para chamadas
+  autenticadas `/api/` do Nplay.
+- Troca durante uma sessao reinicia o NRO para descartar respostas, cache e
+  threads do perfil anterior. O primeiro login seleciona o perfil sem reinicio.
+- Listas locais ficam em arquivos por perfil; o arquivo legado e associado ao
+  primeiro perfil escolhido pela conta anterior, identificada por `user.txt`.
+  O perfil salvo e validado contra a conta em cada boot. Nao apagar
+  `media_lists.json` na migracao.
+- Build ARM64 e contratos estaticos passaram; teste de isolamento e reinicio no
+  Switch real ainda e obrigatorio antes de uma GitHub Release `latest`.

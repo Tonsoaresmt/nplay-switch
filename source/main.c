@@ -305,7 +305,7 @@ static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n
 static cJSON *g_search = NULL;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
-typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH } FetchKind;
+typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES } FetchKind;
 typedef struct {
     FetchKind kind;
     Screen origin;
@@ -315,6 +315,8 @@ typedef struct {
 static CatalogFetch g_fetch = {0};
 static FetchIntent g_fetch_current = {0}, g_fetch_queued = {0};
 static int g_fetch_discard = 0;
+static cJSON *g_profiles = NULL;
+static int g_profile_sel = 0, g_profile_id = 0, g_profile_required = 0;
 
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
@@ -916,6 +918,7 @@ static void begin_catalog_fetch(FetchKind kind, const char *path, const char *qu
     intent.origin = g_screen == SC_LOADING ? g_fetch_current.origin : g_screen;
     snprintf(intent.path, sizeof(intent.path), "%s", path);
     if (query) snprintf(intent.query, sizeof(intent.query), "%s", query);
+    if (kind == FETCH_PROFILES && g_profiles) { cJSON_Delete(g_profiles); g_profiles = NULL; }
     if (g_fetch.thread) {
         // A newer selection wins. Keep at most one request in flight and one
         // pending intent so repeated button presses cannot flood the server.
@@ -928,6 +931,7 @@ static void begin_catalog_fetch(FetchKind kind, const char *path, const char *qu
         if (catalog_fetch_start(&g_fetch, intent.path, g_token) != 0) {
             g_fetch_current.kind = FETCH_NONE;
             toast("Nao foi possivel iniciar a consulta");
+            if (kind == FETCH_PROFILES) g_screen = SC_PROFILES;
             return;
         }
     }
@@ -975,11 +979,30 @@ static void pump_catalog_fetch(void) {
         g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
         g_screen = SC_SEARCH;
         applied = 1;
+    } else if (result && g_fetch_current.kind == FETCH_PROFILES &&
+               cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(result, "profiles"))) {
+        if (g_profiles) cJSON_Delete(g_profiles);
+        g_profiles = result;
+        result = NULL;
+        g_profile_sel = 0;
+        cJSON *profiles = cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles");
+        for (int i = 0; i < arr_len(profiles); i++) {
+            if (jint(cJSON_GetArrayItem(profiles, i), "id") == g_profile_id) g_profile_sel = i;
+        }
+        if (g_profile_required && g_profile_id > 0 && arr_len(profiles) > 0 &&
+            jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id") == g_profile_id) {
+            // O backend usa o primeiro perfil como fallback para um ID apagado.
+            // So carrega dados pessoais depois de confirmar o ID salvo.
+            g_profile_required = 0;
+            store_select_profile(g_profile_id, g_user);
+            load_favs(); g_screen = SC_MAIN; enter_tab(0);
+        } else g_screen = SC_PROFILES;
+        applied = 1;
     }
     if (result) cJSON_Delete(result);
     if (!applied) {
-        g_screen = g_fetch_current.origin;
-        toast(error[0] ? error : "Resposta invalida do catalogo");
+        g_screen = g_fetch_current.kind == FETCH_PROFILES ? SC_PROFILES : g_fetch_current.origin;
+        toast(error[0] ? error : "Resposta invalida do servidor");
     }
     g_fetch_current.kind = FETCH_NONE;
 }
@@ -2164,7 +2187,9 @@ static int do_login(void) {
             const char *tk = jstr(j, "token");
             if (code == 200 && tk) {
                 strncpy(g_token, tk, sizeof(g_token) - 1);
-                store_save_token(g_token); store_save_user(user); ok = 0;
+                store_save_token(g_token); store_save_user(user);
+                snprintf(g_user, sizeof(g_user), "%s", user);
+                ok = 0;
             } else {
                 const char *e = jstr(j, "error");
                 snprintf(g_status, sizeof(g_status), "%s", e ? e : "Falha no login");
@@ -2512,8 +2537,8 @@ static void input_downloads(int b) {
 }
 
 // ------------------------------------------------------------- config
-static const char *SET_ITEMS[] = { "Preferencias do Switch", "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
-#define NSET 5
+static const char *SET_ITEMS[] = { "Preferencias do Switch", "Trocar perfil", "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
+#define NSET 6
 static int g_setSel = 0;
 static int g_diag_open = 0;
 static char g_diag_player_lines[6][DIAG_LINE_CAP];
@@ -2546,6 +2571,14 @@ static int schedule_restart(const char *path) {
     snprintf(g_status, sizeof(g_status), "Tudo pronto. Reiniciando o Nplay...");
     g_restart_at = SDL_GetTicks() + 1400;
     return 0;
+}
+static void logout_and_restart(void) {
+    store_clear_token();
+    store_clear_profile_id();
+    g_screen = SC_LOGIN;
+    snprintf(g_status, sizeof(g_status), "Saindo da conta...");
+    // Encerrar o processo tambem descarta consultas e caches de outro usuario.
+    if (schedule_restart(NULL) != 0) g_restart_at = SDL_GetTicks() + 1400;
 }
 static int settings_fetch_thread(void *unused) {
     (void)unused;
@@ -2766,11 +2799,11 @@ static void draw_settings(void) {
 
     text_draw(gRen, "ACOES", 40, 366, C_ACC2, 0);
     for (int i = 0; i < NSET; i++) {
-        int y = 390 + i * 48;
-        fill_rect(260, y, 760, 44, C_CARD);
-        if (i == g_setSel) { ui_focus(256, y - 4, 768, 52); fill_rect(260, y, 4, 44, C_ACC2); }
-        text_draw(gRen, SET_ITEMS[i], 286, y + 7, (i == g_setSel) ? C_TEXT : C_MUT, 0);
-        text_right(i == 0 ? "A Abrir" : i == 1 ? "A Verificar" : "A Confirmar", 994, y + 7, C_MUT, 0);
+        int y = 382 + i * 40;
+        fill_rect(260, y, 760, 37, C_CARD);
+        if (i == g_setSel) { ui_focus(256, y - 3, 768, 43); fill_rect(260, y, 4, 37, C_ACC2); }
+        text_draw(gRen, SET_ITEMS[i], 286, y + 4, (i == g_setSel) ? C_TEXT : C_MUT, 0);
+        text_right(i == 2 ? "A Verificar" : "A Confirmar", 994, y + 4, C_MUT, 0);
     }
     if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 632, C_ACC, 0);
     ui_footer("Cima/baixo Navegar    A Confirmar    X Diagnostico do player    B Voltar");
@@ -2797,10 +2830,11 @@ static void input_settings(int b) {
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {
         if (g_setSel == 0) { g_prefs_sel = 0; g_prefs_open = 1; }
-        else if (g_setSel == 1) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
-        else if (g_setSel == 2) schedule_restart(NULL);
-        else if (g_setSel == 3) g_running = 0;
-        else { store_clear_token(); g_token[0] = '\0'; g_screen = SC_LOGIN; g_status[0] = '\0'; }
+        else if (g_setSel == 1) begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
+        else if (g_setSel == 2) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
+        else if (g_setSel == 3) schedule_restart(NULL);
+        else if (g_setSel == 4) g_running = 0;
+        else logout_and_restart();
     }
 }
 static void run_update(void) {
@@ -2828,13 +2862,77 @@ static void run_update(void) {
 }
 
 static void draw_catalog_loading(void) {
-    const char *label = g_fetch_current.kind == FETCH_SEARCH ? "Buscando titulos" :
+    const char *label = g_fetch_current.kind == FETCH_PROFILES ? "Carregando perfis" :
+                        g_fetch_current.kind == FETCH_SEARCH ? "Buscando titulos" :
                         g_fetch_current.kind == FETCH_SERIES ? "Abrindo serie" : "Abrindo filme";
     ui_header("NPLAY", label, "B Voltar");
     ui_panel(220, 210, 840, 250, C_ACC2);
     text_center_at(label, 260, 760, 260, C_TEXT, 1);
-    text_center_at("Consultando o catalogo sem interromper os controles...", 260, 760, 338, C_MUT, 0);
-    ui_footer("B Cancelar    L/R Trocar categoria depois da consulta");
+    text_center_at(g_fetch_current.kind == FETCH_PROFILES ?
+                   "Confirmando sua identidade no aparelho..." :
+                   "Consultando o catalogo sem interromper os controles...",
+                   260, 760, 338, C_MUT, 0);
+    ui_footer(g_fetch_current.kind == FETCH_PROFILES ? "B Cancelar" :
+                                                    "B Cancelar    L/R Trocar categoria depois da consulta");
+}
+
+static void draw_profiles(void) {
+    ui_header("NPLAY", "Escolha seu perfil", g_profile_required ? "B Sair da conta" : "B Voltar");
+    cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+    int count = arr_len(profiles);
+    if (count <= 0) {
+        ui_empty_state("Perfis indisponiveis", "A Tentar novamente   B Sair da conta");
+    } else {
+        int width = count * 240 - 20;
+        int left = (WIN_W - width) / 2;
+        for (int i = 0; i < count && i < 4; i++) {
+            cJSON *profile = cJSON_GetArrayItem(profiles, i);
+            int x = left + i * 240;
+            const char *name = jstr(profile, "name");
+            ui_panel(x, 227, 220, 240, i == g_profile_sel ? C_ACC2 : C_ACC);
+            if (i == g_profile_sel) ui_focus(x - 5, 222, 230, 250);
+            char initial[2] = { name && name[0] ? name[0] : '?', 0 };
+            fill_rect(x + 76, 263, 68, 68, i == g_profile_sel ? C_ACC2 : C_CARD);
+            text_center_at(initial, x + 76, 68, 276, C_TEXT, 1);
+            text_clip(name && name[0] ? name : "Perfil", x + 20, 365, C_TEXT, 0, 180);
+            if (jint(profile, "id") == g_profile_id) text_center_at("Atual", x + 20, 180, 411, C_GREEN, 0);
+        }
+    }
+    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 608, C_ACC, 0);
+    ui_footer(g_profile_required ? "Esquerda/direita Escolher    A Entrar    B Sair da conta" :
+                                 "Esquerda/direita Escolher    A Entrar    B Voltar");
+}
+
+static void input_profiles(int b) {
+    cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+    int count = arr_len(profiles);
+    if (b == JOY_DLEFT && g_profile_sel > 0) g_profile_sel--;
+    else if (b == JOY_DRIGHT && g_profile_sel + 1 < count && g_profile_sel < 3) g_profile_sel++;
+    else if (b == JOY_B || b == JOY_MINUS) {
+        if (g_profile_required) logout_and_restart();
+        else g_screen = SC_CONFIG;
+    } else if (b == JOY_PLUS) {
+        g_running = 0;
+    } else if (b == JOY_A) {
+        if (count <= 0) { begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); return; }
+        int selected = jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id");
+        if (selected <= 0) return;
+        if (selected == g_profile_id && !g_profile_required) { g_screen = SC_CONFIG; return; }
+        if (!store_save_profile_id(selected)) { toast("Nao foi possivel salvar o perfil na microSD"); return; }
+        if (g_profile_required) {
+            g_profile_required = 0; g_profile_id = selected;
+            net_set_profile_id(selected);
+            store_select_profile(selected, g_user);
+            load_favs(); g_screen = SC_MAIN; enter_tab(0);
+        } else {
+            // Finaliza as requisicoes do perfil antigo no encerramento. O novo
+            // header e os caches locais entram apenas no processo reiniciado.
+            if (schedule_restart(NULL) != 0) {
+                snprintf(g_status, sizeof(g_status), "Perfil salvo. Abra o Nplay novamente.");
+                g_restart_at = SDL_GetTicks() + 2600;
+            }
+        }
+    }
 }
 
 // Roteia um botao para a tela atual. Usado pelos eventos E pela navegacao
@@ -2865,7 +2963,11 @@ static int stick_dir(SDL_Joystick *j) {
 }
 static void handle_button(int b) {
     if (g_screen == SC_LOGIN) {
-        if (b == JOY_A) { if (do_login() == 0) { load_favs(); g_screen = SC_MAIN; enter_tab(0); } }
+        if (b == JOY_A) { if (do_login() == 0) {
+            store_clear_profile_id(); g_profile_id = 0; net_set_profile_id(0);
+            g_profile_required = 1;
+            begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
+        } }
         else if (b == JOY_PLUS) g_running = 0;
     } else if (g_screen == SC_MAIN) {
         if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
@@ -2883,9 +2985,13 @@ static void handle_button(int b) {
         input_settings(b);
     } else if (g_screen == SC_MOVIE) {
         input_movie(b);
+    } else if (g_screen == SC_PROFILES) {
+        input_profiles(b);
     } else if (g_screen == SC_LOADING) {
         if (b == JOY_B || b == JOY_MINUS) {
             Screen origin = g_fetch_queued.kind != FETCH_NONE ? g_fetch_queued.origin : g_fetch_current.origin;
+            if (g_fetch_current.kind == FETCH_PROFILES || g_fetch_queued.kind == FETCH_PROFILES)
+                origin = SC_PROFILES;
             g_fetch_queued.kind = FETCH_NONE;
             g_fetch_discard = 1;
             catalog_fetch_cancel(&g_fetch);
@@ -2917,10 +3023,12 @@ int main(int argc, char **argv) {
 
     store_load_token(g_token, sizeof(g_token));
     store_load_user(g_user, sizeof(g_user));
+    store_load_profile_id(&g_profile_id);
+    net_set_profile_id(g_profile_id);
     // Catalogo primeiro: a consulta de conta/configuracoes so e iniciada quando
     // o usuario abre Config. Isso evita duas requisicoes HTTPS concorrentes no
     // boot, um ponto especialmente caro no limite de memoria/rede do Switch.
-    if (g_token[0]) { load_favs(); g_screen = SC_MAIN; enter_tab(0); }
+    if (g_token[0]) { g_profile_required = 1; begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); }
 
     while (appletMainLoop() && g_running) {
         SDL_Event e;
@@ -2971,6 +3079,7 @@ int main(int argc, char **argv) {
         else if (g_screen == SC_MOVIE) draw_movie();
         else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
         else if (g_screen == SC_SEARCH) draw_search();
+        else if (g_screen == SC_PROFILES) draw_profiles();
         else if (g_screen == SC_LOADING) draw_catalog_loading();
         else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
 
@@ -3008,6 +3117,7 @@ int main(int argc, char **argv) {
     }
     g_land = NULL;
     if (g_search) cJSON_Delete(g_search);
+    if (g_profiles) cJSON_Delete(g_profiles);
     if (g_dl) cJSON_Delete(g_dl);
     if (g_history) cJSON_Delete(g_history);
     if (g_ser) cJSON_Delete(g_ser);

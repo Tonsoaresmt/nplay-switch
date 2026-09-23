@@ -15,6 +15,9 @@ void membuf_free(struct membuf *m);
 // Chamar uma vez no inicio / fim do programa.
 int  net_init(void);
 void net_exit(void);
+// Perfil ativo nas chamadas autenticadas da API Nplay (0 usa o padrao da conta).
+void net_set_profile_id(int profile_id);
+int net_get_profile_id(void);
 
 // Aplica cache compartilhado e a cadeia CA embutida a qualquer easy handle.
 // Deve ser chamado antes de curl_easy_perform, inclusive no AVIO do player.

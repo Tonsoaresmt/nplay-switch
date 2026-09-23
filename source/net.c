@@ -13,6 +13,22 @@
 #define USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " \
                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+static SDL_atomic_t g_profile_id;
+void net_set_profile_id(int profile_id) { SDL_AtomicSet(&g_profile_id, profile_id > 0 ? profile_id : 0); }
+int net_get_profile_id(void) { return SDL_AtomicGet(&g_profile_id); }
+
+static struct curl_slist *append_profile_header(struct curl_slist *headers,
+                                                const char *url, const char *bearer) {
+    extern const char *BASE;
+    int profile_id = net_get_profile_id();
+    size_t base_len = strlen(BASE);
+    if (profile_id <= 0 || !bearer || !bearer[0] || !url ||
+        strncmp(url, BASE, base_len) || strncmp(url + base_len, "/api/", 5)) return headers;
+    char header[64];
+    snprintf(header, sizeof(header), "X-Profile-Id: %d", profile_id);
+    return curl_slist_append(headers, header);
+}
+
 void membuf_free(struct membuf *m) {
     if (!m) return;
     free(m->data);
@@ -172,6 +188,7 @@ long net_request_timeout_cancel(const char *url, const char *method,
         snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
         headers = curl_slist_append(headers, authbuf);
     }
+    headers = append_profile_header(headers, url, bearer);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
@@ -264,6 +281,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
         snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
         headers = curl_slist_append(headers, authbuf);
     }
+    headers = append_profile_header(headers, url, bearer);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
@@ -315,6 +333,7 @@ long net_download_file_progress(const char *url, const char *bearer,
         snprintf(authbuf, sizeof(authbuf), "Authorization: Bearer %s", bearer);
         headers = curl_slist_append(headers, authbuf);
     }
+    headers = append_profile_header(headers, url, bearer);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

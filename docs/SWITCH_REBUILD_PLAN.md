@@ -31,6 +31,24 @@ offline e os controles próprios do console.
    `X-Profile-Id` nas chamadas autenticadas; conexão por código/QR, sagas,
    favoritos, Minha lista, histórico e pedidos preparados. Migrar os dados
    locais atuais sem apagar token, preferências ou downloads offline.
+
+### Marco de perfis na branch de desenvolvimento
+
+- O seletor nativo usa `/api/account/profiles`; login novo exige escolher um
+  perfil. No boot, o ID salvo é validado contra a lista da conta antes de
+  carregar dados pessoais. O ID fica na microSD e as chamadas autenticadas da API
+  carregam `X-Profile-Id`. Requisições externas, capas e GitHub não recebem o
+  header.
+- A troca de perfil na sessão salva o ID e reinicia o app, descartando consultas
+  e caches em voo antes de usar a nova identidade. Se o carregador não oferece
+  reinício automático, o app encerra após avisar para abrir novamente.
+- As listas pessoais locais são separadas por ID. A lista anterior a perfis é
+  atribuída ao primeiro perfil escolhido pela conta que a possuía; as demais
+  começam vazias. O nome da conta anterior é preservado antes de novo login.
+  Token, downloads offline e preferências do player continuam preservados.
+- Falta verificar no Switch real: primeiro login, retorno com token salvo,
+  troca entre dois perfis, persistência após reinício, falha de rede no seletor
+  e encerramento sem suporte a `envSetNextLoad`.
 4. **Reprodução.** Matriz de fontes por tipo de obra: R2 HLS/MP4, origem direta
    compatível e preparação já gerenciada para torrent. Tratar embed como
    indisponível no Switch sem iniciar um player vazio. Validar áudio, legenda,
