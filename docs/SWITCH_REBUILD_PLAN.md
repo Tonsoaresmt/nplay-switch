@@ -40,6 +40,10 @@ offline e os controles próprios do console.
 - A seleção das janelas horizontais foi comparada com o desenho anterior em
   6.714 combinações de tamanho e foco; sem diferenças de cards visíveis. Falta
   medir o ganho e testar rolagem longa em hardware portátil e dock.
+- A busca mantém apenas cinco contagens escalares por resultado recebido, em
+  vez de recontar todos os filtros a cada quadro. O desenho percorre as duas
+  listas de resultados uma vez por quadro e ignora cards fora da tela, sem criar
+  outra cópia do JSON. Falta verificar a rolagem e a troca de filtros no console.
 3. **Paridade de conta e catálogo.** Perfil ativo por dispositivo e header
    `X-Profile-Id` nas chamadas autenticadas; conexão por código/QR, sagas,
    favoritos, Minha lista, histórico e pedidos preparados. Migrar os dados

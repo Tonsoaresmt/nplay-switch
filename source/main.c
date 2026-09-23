@@ -303,6 +303,8 @@ static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n
 
 // --- busca ---
 static cJSON *g_search = NULL;
+static int g_search_counts[5] = {0};
+static int g_search_counts_valid = 0;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
 typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES } FetchKind;
@@ -976,6 +978,7 @@ static void pump_catalog_fetch(void) {
     } else if (result && g_fetch_current.kind == FETCH_SEARCH && cJSON_IsObject(result)) {
         if (g_search) cJSON_Delete(g_search);
         g_search = result;
+        g_search_counts_valid = 0;
         result = NULL;
         snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", g_fetch_current.query);
         g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
@@ -1480,11 +1483,21 @@ static int srch_matches(cJSON *item, int is_series, int filter) {
     return !is_series && (!scope || !strcmp(scope, "movie"));
 }
 static int srch_count_for(int filter) {
-    if (!g_search) return 0;
-    int n = 0; cJSON *it;
-    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "series")) if (srch_matches(it, 1, filter)) n++;
-    cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "items")) if (srch_matches(it, 0, filter)) n++;
-    return n;
+    if (!g_search || filter < 0 || filter >= 5) return 0;
+    if (!g_search_counts_valid) {
+        memset(g_search_counts, 0, sizeof(g_search_counts));
+        for (int group = 0; group < 2; group++) {
+            int is_series = group == 0;
+            cJSON *array = cJSON_GetObjectItem(g_search, is_series ? "series" : "items");
+            cJSON *it;
+            cJSON_ArrayForEach(it, array) {
+                for (int f = 0; f < 5; f++)
+                    if (srch_matches(it, is_series, f)) g_search_counts[f]++;
+            }
+        }
+        g_search_counts_valid = 1;
+    }
+    return g_search_counts[filter];
 }
 static cJSON *srch_at(int wanted, int *is_series) {
     cJSON *it;
@@ -1674,14 +1687,22 @@ static void draw_search(void) {
         return;
     }
     int top = 184;
-    for (int i = 0; i < n; i++) {
-        int col = i % GCOLS, row = i / GCOLS;
-        int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
-        int yy = top + row * (GCH + GGAP) - g_srchScroll;
-        if (yy + GCH < 66 || yy > WIN_H) continue;
-        int is; cJSON *it = srch_at(i, &is);
-        int fav = is ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
-        draw_card(x, yy, GCOVERW, GCOVERH, it, i == g_srchSel, fav);
+    int index = 0;
+    for (int group = 0; group < 2; group++) {
+        int is_series = group == 0;
+        cJSON *array = cJSON_GetObjectItem(g_search, is_series ? "series" : "items");
+        cJSON *it;
+        cJSON_ArrayForEach(it, array) {
+            if (!srch_matches(it, is_series, g_srchFilter)) continue;
+            int col = index % GCOLS, row = index / GCOLS;
+            int yy = top + row * (GCH + GGAP) - g_srchScroll;
+            if (yy + GCH >= 66 && yy <= WIN_H) {
+                int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
+                int fav = is_series ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
+                draw_card(x, yy, GCOVERW, GCOVERH, it, index == g_srchSel, fav);
+            }
+            index++;
+        }
     }
     ui_footer("A Abrir    X Minha lista    ZL/ZR Filtrar    Y Nova busca    B Voltar");
 }

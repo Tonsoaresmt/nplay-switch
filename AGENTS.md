@@ -927,3 +927,6 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Configuracoes > X mostra quadros da UI acima de 20 e 33 ms e pior tempo desta
   sessao. Medir no Switch real com navegacao longa; o contador nao inclui o
   tempo dentro do player e nao persiste apos fechar o app.
+- A busca reutiliza contagens por filtro do resultado atual e desenha os
+  resultados em uma passagem. Evitar indices duplicados de cJSON em memoria:
+  o player ja teve fechamento real por pressao de heap.
