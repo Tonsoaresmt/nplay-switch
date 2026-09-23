@@ -27,6 +27,19 @@ offline e os controles próprios do console.
    detalhes com componentes SDL reutilizáveis. Manter densidades adequadas a
    portátil (1280×720) e dock; carregar/desenhar só itens visíveis. Preservar
    navegação A/B, D-pad, analógico, L/R e acessibilidade de foco.
+
+### Primeiro passo do shell na branch de desenvolvimento
+
+- A Home guarda a quantidade de itens por fileira ao receber o catálogo. A cada
+  quadro desenha apenas o destaque e as fileiras dentro da tela, percorrendo
+  diretamente os cards horizontais visíveis. Navegação, posição dos cards e
+  comportamento de busca permanecem iguais.
+- Configurações > X mostra contagem de quadros de interface acima de 20/33 ms e
+  o pior tempo da sessão. A medição cobre atualização e desenho até o Present,
+  mas exclui a chamada bloqueante do player. Não grava esses números na microSD.
+- A seleção das janelas horizontais foi comparada com o desenho anterior em
+  6.714 combinações de tamanho e foco; sem diferenças de cards visíveis. Falta
+  medir o ganho e testar rolagem longa em hardware portátil e dock.
 3. **Paridade de conta e catálogo.** Perfil ativo por dispositivo e header
    `X-Profile-Id` nas chamadas autenticadas; conexão por código/QR, sagas,
    favoritos, Minha lista, histórico e pedidos preparados. Migrar os dados

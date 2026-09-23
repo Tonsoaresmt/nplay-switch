@@ -918,3 +918,12 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   `media_lists.json` na migracao.
 - Build ARM64 e contratos estaticos passaram; teste de isolamento e reinicio no
   Switch real ainda e obrigatorio antes de uma GitHub Release `latest`.
+
+## Fileiras e medicao de quadros na branch 0.11.0 em 23/09/2026
+
+- A Home agora calcula o tamanho das fileiras quando aplica o catalogo e so
+  desenha linhas/cards visiveis. Isso reduz varreduras de cJSON por quadro sem
+  ampliar o cache de catalogo ou mudar a navegacao.
+- Configuracoes > X mostra quadros da UI acima de 20 e 33 ms e pior tempo desta
+  sessao. Medir no Switch real com navegacao longa; o contador nao inclui o
+  tempo dentro do player e nao persiste apos fechar o app.

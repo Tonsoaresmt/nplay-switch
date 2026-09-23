@@ -295,7 +295,7 @@ static int g_land_fetch_tab = -1, g_land_queued_tab = -1;
 static char g_land_error[192] = "";
 static cJSON *g_heroesArr = NULL;     // array (dentro de g_land) usado no destaque
 static int g_heroSeriesDefault = 1;   // hero abre como serie? (Filmes = 0)
-typedef struct { char label[48]; cJSON *arr; int is_series; } Rail;
+typedef struct { char label[48]; cJSON *arr; int count; int is_series; } Rail;
 static Rail g_rails[48]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
 static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
@@ -434,9 +434,11 @@ static void toggle_fav_series(int id) {
 
 // ------------------------------------------------------------- landing (rails)
 static void add_rail(const char *label, cJSON *arr, int is_series) {
-    if (arr_len(arr) == 0 || g_railsN >= 48) return;
+    int count = arr_len(arr);
+    if (count == 0 || g_railsN >= 48) return;
     strncpy(g_rails[g_railsN].label, label ? label : "Categoria", 47); g_rails[g_railsN].label[47] = '\0';
-    g_rails[g_railsN].arr = arr; g_rails[g_railsN].is_series = is_series;
+    g_rails[g_railsN].arr = arr; g_rails[g_railsN].count = count;
+    g_rails[g_railsN].is_series = is_series;
     g_railsN++;
 }
 
@@ -1556,7 +1558,7 @@ static void draw_landing(void) {
 
     int nh = hero_count();
     int hy = 108 - g_homeScroll;
-    if (nh > 0) {
+    if (nh > 0 && hy + HERO_H >= 72 && hy < WIN_H) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
         const char *backdrop = jstr(h, "backdrop");
         SDL_Texture *bg = cover_get(backdrop);
@@ -1593,26 +1595,32 @@ static void draw_landing(void) {
 
     int y = (nh > 0 ? RAILS_TOP : 120) - g_homeScroll;
     for (int r = 0; r < g_railsN; r++) {
-        int items = arr_len(g_rails[r].arr);
+        int items = g_rails[r].count;
+        int ry = y + 30;
+        if (ry + RCH < 72) { y += 30 + RCH + 44; continue; }
+        if (y >= WIN_H) break;
         text_draw(gRen, g_rails[r].label, 40, y, (r == g_railSel) ? C_TEXT : C_MUT, 0);
-        int ry = y + 30, rowScroll = 0;
+        int rowScroll = 0;
         if (r == g_railSel) {
             int selX = 40 + g_railItem * (RCW + RGAP);
             if (selX + RCW - rowScroll > WIN_W - 40) rowScroll = selX + RCW - (WIN_W - 40);
             if (selX - rowScroll < 40) rowScroll = selX - 40;
             if (rowScroll < 0) rowScroll = 0;
         }
-        for (int i = 0; i < items; i++) {
+        const int step = RCW + RGAP;
+        int first = rowScroll > 40 + RCW ? (rowScroll - 40 - RCW) / step : 0;
+        int last = (WIN_W + rowScroll - 40) / step + 1;
+        if (last > items) last = items;
+        cJSON *it = cJSON_GetArrayItem(g_rails[r].arr, first);
+        for (int i = first; i < last && it; i++, it = it->next) {
             int x = 40 + i * (RCW + RGAP) - rowScroll;
             if (x + RCW < 0 || x > WIN_W) continue;
-            cJSON *it = cJSON_GetArrayItem(g_rails[r].arr, i);
             int series_item = catalog_item_is_series(it, g_rails[r].is_series);
             int fav_id = catalog_favorite_id(it, series_item);
             int fav = series_item ? is_fav_series(fav_id) : is_fav_item(fav_id);
             draw_card(x, ry, RCW, RCH, it, (r == g_railSel && i == g_railItem), fav);
         }
         y += 30 + RCH + 44;
-        if (y > WIN_H + 240) break;
     }
     int search_y = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 44) - g_homeScroll;
     if (search_y + 116 >= 72 && search_y < WIN_H) {
@@ -2243,7 +2251,7 @@ static void input_landing(int b) {
         if (b == JOY_UP) {
             if (g_railsN > 0) {
                 g_railSel = g_railsN - 1;
-                int n = arr_len(g_rails[g_railSel].arr);
+                int n = g_rails[g_railSel].count;
                 if (g_railItem >= n) g_railItem = n ? n - 1 : 0;
             } else if (nh > 0) g_railSel = -1;
         } else if (b == JOY_A) do_search();
@@ -2253,9 +2261,9 @@ static void input_landing(int b) {
         } else if (g_railSel < 0) g_homeScroll = 0;
         return;
     }
-    int items = arr_len(g_rails[g_railSel].arr);
-    if (b == JOY_UP) { if (g_railSel == 0) { g_railSel = (nh > 0) ? -1 : 0; g_homeScroll = 0; if (nh > 0) return; } else { g_railSel--; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
-    else if (b == JOY_DOWN) { if (g_railSel < g_railsN - 1) { g_railSel++; int n = arr_len(g_rails[g_railSel].arr); if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } else g_railSel = g_railsN; }
+    int items = g_rails[g_railSel].count;
+    if (b == JOY_UP) { if (g_railSel == 0) { g_railSel = (nh > 0) ? -1 : 0; g_homeScroll = 0; if (nh > 0) return; } else { g_railSel--; int n = g_rails[g_railSel].count; if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } }
+    else if (b == JOY_DOWN) { if (g_railSel < g_railsN - 1) { g_railSel++; int n = g_rails[g_railSel].count; if (g_railItem >= n) g_railItem = n ? n - 1 : 0; } else g_railSel = g_railsN; }
     else if (b == JOY_DLEFT) { if (g_railItem > 0) g_railItem--; }
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
@@ -2545,6 +2553,7 @@ static char g_diag_player_lines[6][DIAG_LINE_CAP];
 static char g_diag_network_lines[2][DIAG_LINE_CAP];
 static int g_diag_player_count = 0;
 static int g_diag_network_count = 0;
+static unsigned g_ui_frames = 0, g_ui_over_20ms = 0, g_ui_over_33ms = 0, g_ui_max_ms = 0;
 
 static void reload_player_diagnostics(void) {
     g_diag_player_count = diag_read_player_tail(g_diag_player_lines, 6);
@@ -2670,9 +2679,12 @@ static void draw_player_diagnostics(void) {
     for (int i = 0; i < g_diag_network_count; i++)
         text_clip(g_diag_network_lines[i], 252, 480 + i * 32, C_TEXT, 0, 776);
 
+    snprintf(summary, sizeof(summary), "UI nesta sessao: %u quadros  |  >20 ms: %u  |  >33 ms: %u  |  pior: %u ms",
+             g_ui_frames, g_ui_over_20ms, g_ui_over_33ms, g_ui_max_ms);
+    text_clip(summary, 252, 558, C_ACC2, 0, 776);
     text_clip("Fotografe esta tela apos reabrir o Nplay. Nenhuma URL assinada ou senha e gravada.",
-              252, 558, C_MUT, 0, 776);
-    text_center_at("A, B ou X Fechar", 252, 776, 606, C_TEXT, 0);
+              252, 584, C_MUT, 0, 776);
+    text_center_at("A, B ou X Fechar", 252, 776, 614, C_TEXT, 0);
 }
 static void draw_preferences(void) {
     if (!g_prefs_open) return;
@@ -3051,6 +3063,9 @@ int main(int argc, char **argv) {
             else if (dir != g_dir) { handle_button(dir); g_dir = dir; g_dir_next = now + 380; }
             else if (now >= g_dir_next) { handle_button(dir); g_dir_next = now + 55; }
         }
+        // Mede apenas trabalho da UI: a reproducao e seus waits ocorrem no
+        // tratamento de entrada acima e nao contaminam a contagem de quadros.
+        Uint32 ui_frame_start = SDL_GetTicks();
 
         // destaque rotativo nas abas 0..4 (a cada ~6s)
         if (!g_pref_reduce_motion && g_screen == SC_MAIN && g_tab <= 4 && g_land && SDL_GetTicks() > g_hero_next) {
@@ -3091,6 +3106,11 @@ int main(int argc, char **argv) {
             if (tx) { SDL_Rect d = { WIN_W / 2 - w / 2, WIN_H - 110, w, h }; SDL_RenderCopy(gRen, tx, NULL, &d); }
         }
         SDL_RenderPresent(gRen);
+        unsigned ui_frame_ms = SDL_GetTicks() - ui_frame_start;
+        g_ui_frames++;
+        if (ui_frame_ms > 20) g_ui_over_20ms++;
+        if (ui_frame_ms > 33) g_ui_over_33ms++;
+        if (ui_frame_ms > g_ui_max_ms) g_ui_max_ms = ui_frame_ms;
         if (g_do_update) { g_do_update = 0; run_update(); }
         if (g_restart_at && SDL_GetTicks() >= g_restart_at) g_running = 0;
     }
