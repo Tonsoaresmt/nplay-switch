@@ -1,24 +1,30 @@
-# Nplay Switch 0.12.2: teste de reprodução no console
+# Nplay Switch 0.12.3: interface e reprodução no console
 
 O teste da 0.12.1 reproduziu pausas a cada poucos segundos em vários títulos,
 apesar de o diagnóstico mostrar `buffer 0`: esse contador não media o tempo
 bloqueado dentro de `av_read_frame`. A 0.12.2 reutiliza conexões HLS ociosas e
-mostra a duração dessas esperas. Atualize pelo menu do Nplay e confirme a versão.
+mostra a duração dessas esperas. A 0.12.3 também corrige a apresentação das
+capas e acrescenta Sagas, sinopse do episódio selecionado e navegação por toque.
+Atualize pelo menu do Nplay e confirme a versão.
 
-1. Em Configurações, confirme **Versão 0.12.2**. Compare a Home com a TV:
-   cabeçalho de 95 px, logo nova, destaque panorâmico, cinco cards por fileira
-   e contorno branco no foco. Navegue com D-pad e analógico; segure a direção
+1. Em Configurações, confirme **Versão 0.12.3**. Compare a Home com a TV:
+   cabeçalho de 95 px, logo nova, destaque panorâmico, cinco capas verticais
+   por fileira e contorno branco no foco. Confira se a arte inteira e os títulos
+   da capa estão visíveis. Navegue com D-pad e analógico; segure a direção
    por alguns segundos em uma fileira longa.
 2. Abra um filme e uma série. O filme deve ter capa à esquerda e informações
    em painel horizontal. A série deve mostrar chips de temporada e cinco
    episódios com miniaturas. Teste esquerda/direita para mudar episódio e L/R
-   para mudar temporada. Confira se o título e a sinopse não são cortados em
-   uma obra de nome longo.
+   para mudar temporada. A sinopse grande deve acompanhar o episódio selecionado;
+   use cima/baixo para ler as demais linhas. Confira isso em um anime e em uma série.
 3. Busque uma obra, troque os filtros com ZL/ZR, abra e volte com B. Confira o
    Histórico e a Biblioteca, inclusive ao rolar além da primeira linha.
 4. Na Home e nas abas Filmes/Séries, confira se um destaque de filme abre
    detalhe de filme e se um destaque de série abre detalhe de série. A vitrine
    das abas deve usar os destaques editoriais prontos que aparecem no site.
+   Abra Sagas, troque uma variante com ZL/ZR quando disponível, escolha uma obra
+   e volte com B. No modo portátil, toque nas abas, em uma capa e em um episódio;
+   deslize para percorrer Sagas, busca e Home.
 5. Reproduza por pelo menos 10 minutos um filme e um episódio R2 que funcionem
    no site. Conte pausas perceptíveis e observe se o vídeo pula trechos após
    uma pausa. Teste também Continuar assistindo, pausa, busca para o meio do

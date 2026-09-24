@@ -198,7 +198,7 @@ void draw_movie(void) {
                       (SDL_Color){38, 34, 61, 255} : C_CARD);
             if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 4, 486, 224, 173);
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
-            if (cover) { SDL_Rect rr = {x, 490, 216, 124}; ui_cover(cover, &rr); }
+            if (cover) { SDL_Rect rr = {x, 490, 216, 124}; ui_contain(cover, &rr); }
             text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x + 8, 624, C_TEXT, 2, 200);
         }
     }
@@ -254,4 +254,11 @@ void input_movie(int b) {
             else toggle_fav_item(id);
         }
     }
+}
+
+void movie_touch_action(int favorite) {
+    if (!g_movie) return;
+    g_movie_zone = 0;
+    g_movie_sel = favorite ? 1 : 0;
+    input_movie(JOY_A);
 }

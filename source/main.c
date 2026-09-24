@@ -243,7 +243,8 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     fill_rect(x, y, cw, coverH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
     if (selected) ui_focus(x - 4, y - 4, cw + 8, coverH + 60);
     SDL_Rect cr = { x, y, cw, coverH };
-    if (tex) ui_cover(tex, &cr);
+    // Poster vertical precisa permanecer inteiro, inclusive o texto da arte.
+    if (tex) ui_contain(tex, &cr);
     else {
         fill_rect(x, y, cw, coverH, C_CARD);
         char ini[2] = { title[0] ? title[0] : '?', 0 };
@@ -282,14 +283,15 @@ static Screen g_detail_return = SC_MAIN;
 // Config saiu da barra de abas -> abre pelo botao (-). Assim L a partir do
 // Inicio ja cai em Baixados (ultima aba).
 #define TAB_HOME 0
-#define TAB_DOWNLOADS 5
-#define NTABS 6
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Historico" };
+#define TAB_SAGAS 5
+#define TAB_DOWNLOADS 6
+#define NTABS 7
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Sagas", "Historico" };
 static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
 static cJSON *g_land = NULL;          // root JSON da aba atual (home / tab-home / anime-home)
-static cJSON *g_land_cache[5] = {0};  // troca de aba instantanea depois do 1o carregamento
+static cJSON *g_land_cache[6] = {0};  // troca de aba instantanea depois do 1o carregamento
 static cJSON *g_land_pending = NULL;
 static SDL_Thread *g_land_thread = NULL;
 static SDL_atomic_t g_land_done;
@@ -302,6 +304,9 @@ static Rail g_rails[48]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
 static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
 static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n; }
+static int g_saga_sel = 0, g_saga_variant_sel = 0, g_saga_scroll = 0;
+static cJSON *g_saga_detail = NULL;
+static int g_saga_item_sel = 0;
 
 // --- busca ---
 static cJSON *g_search = NULL;
@@ -309,7 +314,7 @@ static int g_search_counts[5] = {0};
 static int g_search_counts_valid = 0;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
-typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES } FetchKind;
+typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES, FETCH_SAGA } FetchKind;
 typedef struct {
     FetchKind kind;
     Screen origin;
@@ -371,6 +376,8 @@ static cJSON *g_ser = NULL;
 static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
 static char g_ser_plot_lines[3][220];
 static int g_ser_plot_count = 0;
+static char g_ep_plot_lines[24][220];
+static int g_ep_plot_count = 0, g_ep_plot_scroll = 0, g_ep_plot_id = -1;
 static void rebuild_series_plot(void);
 
 // --- prototipos (funcoes que se chamam entre si) ---
@@ -389,7 +396,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
 // Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
 // permanecem em memoria; voltar apenas restaura a tela anterior e sua selecao.
 void detail_capture_origin(void) {
-    if (g_screen == SC_SEARCH || g_screen == SC_MAIN) g_detail_return = g_screen;
+    if (g_screen == SC_SEARCH || g_screen == SC_MAIN || g_screen == SC_SAGA) g_detail_return = g_screen;
     else g_detail_return = SC_MAIN;
 }
 void detail_return_to_origin(void) {
@@ -397,7 +404,7 @@ void detail_return_to_origin(void) {
     g_detail_return = SC_MAIN;
     // A landing e liberada antes do player para reservar memoria ao FFmpeg.
     // Ao voltar, recarrega apenas a aba realmente visivel e em segundo plano.
-    if (g_screen == SC_MAIN && g_tab <= 4 && !g_land) load_landing(g_tab);
+    if (g_screen == SC_MAIN && g_tab <= TAB_SAGAS && !g_land) load_landing(g_tab);
 }
 
 // ------------------------------------------------------------- favoritos
@@ -498,6 +505,11 @@ static void landing_apply(int tab, cJSON *land) {
 
     if (!g_land) { snprintf(g_status, sizeof(g_status), "Falha ao carregar %s", TAB_NAME[tab]); g_railSel = 0; return; }
     g_status[0] = '\0';
+    if (tab == TAB_SAGAS) {
+        int groups = arr_len(cJSON_GetObjectItem(g_land, "sagas"));
+        if (g_saga_sel >= groups) g_saga_sel = groups > 0 ? groups - 1 : 0;
+        return;
+    }
 
     if (tab == 0) {
         g_heroesArr = cJSON_GetObjectItem(g_land, "heroes");
@@ -559,6 +571,7 @@ static const char *landing_path(int tab) {
         case 2: return "/api/catalog/tab-home?tab=series";
         case 3: return "/api/catalog/anime-home";
         case 4: return "/api/catalog/tab-home?tab=dorama";
+        case TAB_SAGAS: return "/api/catalog/sagas";
         default: return "/api/catalog/home";
     }
 }
@@ -628,7 +641,7 @@ static void landing_start(int tab) {
 }
 
 static void load_landing(int tab) {
-    if (tab < 0 || tab > 4) return;
+    if (tab < 0 || tab > TAB_SAGAS) return;
     if (g_land_cache[tab]) {
         landing_apply(tab, g_land_cache[tab]);
         return;
@@ -643,7 +656,7 @@ static void load_landing(int tab) {
 }
 
 static void landing_invalidate(int tab) {
-    if (tab < 0 || tab > 4) return;
+    if (tab < 0 || tab > TAB_SAGAS) return;
     if (g_land == g_land_cache[tab]) g_land = NULL;
     if (g_land_cache[tab]) { cJSON_Delete(g_land_cache[tab]); g_land_cache[tab] = NULL; }
     load_landing(tab);
@@ -657,7 +670,7 @@ static void pump_landing(void) {
     g_land_fetch_tab = -1;
     cJSON *received = g_land_pending;
     g_land_pending = NULL;
-    if (received && tab >= 0 && tab <= 4) {
+    if (received && tab >= 0 && tab <= TAB_SAGAS) {
         if (g_land_cache[tab]) cJSON_Delete(g_land_cache[tab]);
         g_land_cache[tab] = received;
         if (g_screen == SC_MAIN && g_tab == tab) landing_apply(tab, received);
@@ -668,7 +681,7 @@ static void pump_landing(void) {
     }
     int queued = g_land_queued_tab;
     g_land_queued_tab = -1;
-    if (queued >= 0 && queued <= 4 && !g_land_cache[queued]) {
+    if (queued >= 0 && queued <= TAB_SAGAS && !g_land_cache[queued]) {
         landing_start(queued);
         return;
     }
@@ -680,7 +693,7 @@ static void pump_landing(void) {
 static void playback_memory_enter(void) {
     cover_suspend_and_release();
     g_land = NULL; g_heroesArr = NULL; g_railsN = 0;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i <= TAB_SAGAS; i++) {
         if (g_land_cache[i]) {
             cJSON_Delete(g_land_cache[i]);
             g_land_cache[i] = NULL;
@@ -690,7 +703,7 @@ static void playback_memory_enter(void) {
 
 static void playback_memory_leave(void) {
     cover_resume_after_playback();
-    if (g_screen == SC_MAIN && g_tab <= 4 && !g_land) load_landing(g_tab);
+    if (g_screen == SC_MAIN && g_tab <= TAB_SAGAS && !g_land) load_landing(g_tab);
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {
@@ -1016,6 +1029,14 @@ static void pump_catalog_fetch(void) {
         snprintf(g_srchQuery, sizeof(g_srchQuery), "%s", g_fetch_current.query);
         g_srchSel = 0; g_srchScroll = 0; g_srchFilter = 0;
         g_screen = SC_SEARCH;
+        applied = 1;
+    } else if (result && g_fetch_current.kind == FETCH_SAGA &&
+               cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(result, "items"))) {
+        if (g_saga_detail) cJSON_Delete(g_saga_detail);
+        g_saga_detail = result;
+        result = NULL;
+        g_saga_item_sel = 0;
+        g_screen = SC_SAGA;
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_PROFILES &&
                cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(result, "profiles"))) {
@@ -1585,16 +1606,17 @@ static void draw_topbar(void) {
         }
         tx += w + 33;
     }
-    text_right("Y  Buscar", WIN_W - 50, 33, C_TEXT, 0);
+    text_draw(gRen, "Y Buscar", 1068, 33, C_TEXT, 0);
+    text_draw(gRen, "- Config", 1172, 33, C_MUT, 2);
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 
 // ------------------------------------------------------------- render: landing
-#define RCW 216
-#define RCH 184
+#define RCW 210
+#define RCH 270
 #define RGAP 18
-#define HERO_H 158
-#define RAILS_TOP 290
+#define HERO_H 190
+#define RAILS_TOP 308
 #define RAIL_STEP (30 + RCH + 70)
 static void draw_landing(void) {
     draw_topbar();
@@ -1611,21 +1633,18 @@ static void draw_landing(void) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
         const char *backdrop = jstr(h, "backdrop");
         SDL_Texture *bg = cover_get(backdrop);
-        if (bg) {
-            SDL_Rect br = { 56, hy, WIN_W - 112, HERO_H };
-            ui_backdrop(bg, &br);
-            fill_rect(56, hy, 5, HERO_H, C_ACC);
-        } else ui_panel(40, hy, WIN_W - 80, HERO_H, C_ACC);
-        if (g_railSel == -1) ui_focus(52, hy - 4, WIN_W - 104, HERO_H + 8);
-        int content_x = bg ? 85 : 225;
-        if (!bg) {
-            SDL_Texture *tex = cover_get(jstr(h, "logo"));
-            SDL_Rect pr = { 66, hy + 12, 132, HERO_H - 24 };
-            if (tex) ui_cover(tex, &pr); else fill_rect(66, hy + 12, 132, HERO_H - 24, C_CARD);
+        fill_rect(52, hy, WIN_W - 104, HERO_H, C_CARD);
+        SDL_Texture *visual = bg ? bg : cover_get(jstr(h, "logo"));
+        if (visual) {
+            SDL_Rect br = { 750, hy + 7, 466, HERO_H - 14 };
+            ui_contain(visual, &br);
         }
+        fill_rect(52, hy, 5, HERO_H, C_ACC);
+        if (g_railSel == -1) ui_focus(52, hy - 4, WIN_W - 104, HERO_H + 8);
+        int content_x = 78;
         text_draw(gRen, "DESTAQUE NPLAY", content_x, hy + 14, C_ACC, 2);
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
-        text_clip(ht, content_x, hy + 39, C_TEXT, 1, bg ? 690 : WIN_W - 228 - 180);
+        text_clip(ht, content_x, hy + 39, C_TEXT, 1, 650);
         const char *hk = jstr(h, "kind");
         if (!hk) hk = jstr(h, "hero_type");
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
@@ -1633,11 +1652,11 @@ static void draw_landing(void) {
         char meta[96]; const char *year = jstr(h, "year");
         snprintf(meta, sizeof(meta), "%s%s%s%s", kl, year && year[0] ? "  |  " : "", year && year[0] ? year : "",
                  (cJSON_IsTrue(cJSON_GetObjectItem(h, "r2_ready")) || jint(h, "r2_ready")) ? "  |  Pronto pra tocar" : "");
-        text_draw(gRen, meta, content_x, hy + 78, C_MUT, 2);
+        text_clip(meta, content_x, hy + 83, C_MUT, 2, 650);
         const char *plot = jstr(h, "plot");
-        if (plot && plot[0]) text_clip(plot, content_x, hy + 104, C_MUT, 2, bg ? 700 : 700);
+        if (plot && plot[0]) text_clip(plot, content_x, hy + 111, C_MUT, 0, 650);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
-        text_draw(gRen, cnt, WIN_W - 126, hy + HERO_H - 31, C_MUT, 2);
+        text_draw(gRen, cnt, WIN_W - 126, hy + HERO_H - 29, C_MUT, 2);
     }
 
     int y = (nh > 0 ? RAILS_TOP : 125) - g_homeScroll;
@@ -1697,10 +1716,10 @@ static void draw_landing(void) {
 #define GCOLS 5
 #define GMX 54
 #define GGAP 18
-#define GCW 216
-#define GCOVERW 216
-#define GCOVERH 246
-#define GCH 298
+#define GCW 210
+#define GCOVERW 210
+#define GCOVERH 270
+#define GCH 322
 static void draw_search(void) {
     draw_topbar();
     SDL_Rect content_clip = { 0, 95, WIN_W, WIN_H - 95 - 52 };
@@ -1792,6 +1811,117 @@ static const char *ep_display_title(cJSON *episode) {
     if (!title || !title[0]) title = jstr(episode, "title");
     return ep_clean(title);
 }
+
+// A aba Sagas usa a curadoria ja publicada em /api/catalog/sagas. Variantes
+// (por exemplo, ordem/edicao diferentes) permanecem dentro do mesmo grupo.
+static cJSON *saga_groups(void) { return cJSON_GetObjectItem(g_land, "sagas"); }
+static cJSON *saga_group_at(int index) { return cJSON_GetArrayItem(saga_groups(), index); }
+static cJSON *saga_variant_at(cJSON *group, int index) {
+    cJSON *variants = cJSON_GetObjectItem(group, "variants");
+    int count = arr_len(variants);
+    return cJSON_GetArrayItem(variants, index >= 0 && index < count ? index : 0);
+}
+static void draw_sagas(void) {
+    draw_topbar();
+    if (!g_land) {
+        ui_empty_state(g_status[0] ? g_status : "Carregando sagas", "Verifique a conexao caso esta tela demore.");
+        ui_footer("L/R Trocar categoria    B Voltar");
+        return;
+    }
+    int count = arr_len(saga_groups());
+    text_draw(gRen, "Sagas", 54, 112, C_TEXT, 1);
+    text_draw(gRen, "Filmes reunidos na ordem da historia ou do lancamento", 55, 152, C_MUT, 0);
+    if (!count) {
+        ui_empty_state("Nenhuma saga disponivel", "As sagas publicadas no site aparecerao aqui.");
+        ui_footer("L/R Trocar categoria");
+        return;
+    }
+    SDL_Rect clip = {0, 178, WIN_W, WIN_H - 178 - 52};
+    SDL_RenderSetClipRect(gRen, &clip);
+    for (int i = 0; i < count; i++) {
+        int col = i % 3, row = i / 3;
+        int x = 54 + col * 390, y = 185 + row * 231 - g_saga_scroll;
+        if (y + 212 < 178 || y > WIN_H - 52) continue;
+        cJSON *group = saga_group_at(i);
+        cJSON *variant = saga_variant_at(group, i == g_saga_sel ? g_saga_variant_sel : 0);
+        fill_rect(x, y, 366, 211, i == g_saga_sel ? (SDL_Color){38, 34, 61, 255} : C_CARD);
+        if (i == g_saga_sel) ui_focus(x - 3, y - 3, 372, 217);
+        const char *poster = jstr(variant, "poster");
+        SDL_Texture *art = cover_get(poster);
+        if (art) { SDL_Rect r = {x + 10, y + 10, 125, 184}; ui_contain(art, &r); }
+        text_clip(jstr(group, "title") ? jstr(group, "title") : "Saga", x + 145, y + 19, C_TEXT, 0, 208);
+        const char *label = jstr(variant, "variant_label");
+        if (label && label[0]) text_clip(label, x + 145, y + 54, C_ACC2, 2, 208);
+        char info[72];
+        snprintf(info, sizeof(info), "%d filmes  |  %d vistos", jint(variant, "count"), jint(variant, "watched"));
+        text_clip(info, x + 145, y + 87, C_MUT, 2, 208);
+        if (i == g_saga_sel && arr_len(cJSON_GetObjectItem(group, "variants")) > 1)
+            text_clip("ZL/ZR Trocar versao", x + 145, y + 159, C_ACC, 2, 208);
+    }
+    SDL_RenderSetClipRect(gRen, NULL);
+    ui_footer("A Abrir saga    Direcoes Navegar    ZL/ZR Versao    L/R Categoria");
+}
+static void draw_saga_detail(void) {
+    cJSON *saga = cJSON_GetObjectItem(g_saga_detail, "saga");
+    cJSON *items = cJSON_GetObjectItem(g_saga_detail, "items");
+    int count = arr_len(items);
+    cJSON *selected = cJSON_GetArrayItem(items, g_saga_item_sel);
+    ui_header("NPLAY / SAGA", NULL, "B Voltar");
+    fill_rect(52, 110, WIN_W - 104, 250, C_CARD);
+    fill_rect(52, 110, 5, 250, C_ACC);
+    text_clip(jstr(saga, "title") ? jstr(saga, "title") : "Saga", 72, 133, C_TEXT, 1, 715);
+    const char *subtitle = jstr(saga, "subtitle");
+    if (subtitle) text_clip(subtitle, 72, 182, C_MUT, 0, 715);
+    char order[72]; snprintf(order, sizeof(order), "OBRA %d DE %d", count ? g_saga_item_sel + 1 : 0, count);
+    text_draw(gRen, order, 72, 234, C_ACC2, 2);
+    if (selected) text_clip(jstr(selected, "title") ? jstr(selected, "title") : "Titulo", 72, 263, C_TEXT, 1, 715);
+    const char *art_url = jstr(selected, "backdrop");
+    if (!art_url) art_url = jstr(selected, "logo");
+    SDL_Texture *art = cover_get(art_url);
+    if (art) { SDL_Rect r = {813, 123, 391, 225}; ui_contain(art, &r); }
+    text_draw(gRen, "Assista na sequencia", 54, 373, C_TEXT, 0);
+    int start = g_saga_item_sel - 2;
+    if (start < 0) start = 0;
+    if (start > count - 5) start = count > 5 ? count - 5 : 0;
+    for (int i = start; i < count && i < start + 5; i++) {
+        int x = 54 + (i - start) * (RCW + RGAP);
+        draw_card(x, 411, RCW, 205, cJSON_GetArrayItem(items, i), i == g_saga_item_sel, 0);
+    }
+    if (!count) text_draw(gRen, "Esta saga ainda nao possui titulos disponiveis.", 54, 442, C_MUT, 0);
+    ui_footer("A Abrir titulo    Esquerda/direita Escolher    B Voltar");
+}
+static void rebuild_episode_plot(cJSON *ep) {
+    g_ep_plot_count = g_ep_plot_scroll = 0;
+    g_ep_plot_id = jint(ep, "id");
+    const char *p = jstr(ep, "ep_overview");
+    if (!p || !p[0]) p = jstr(ep, "plot");
+    if (!p || !p[0]) return;
+    while (*p && g_ep_plot_count < 24) {
+        while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        char *line = g_ep_plot_lines[g_ep_plot_count];
+        line[0] = '\0';
+        while (*p && *p != '\n' && *p != '\r') {
+            while (*p == ' ') p++;
+            const char *end = p;
+            while (*end && *end != ' ' && *end != '\n' && *end != '\r') end++;
+            if (end == p) break;
+            int word_len = (int)(end - p);
+            if (word_len > 190) word_len = 190;
+            char candidate[220];
+            snprintf(candidate, sizeof(candidate), "%s%s%.*s", line, line[0] ? " " : "", word_len, p);
+            int width = 0, height = 0;
+            text_cached(gRen, candidate, C_TEXT, 0, &width, &height);
+            if (line[0] && width > 730) break;
+            snprintf(line, 220, "%s", candidate);
+            p = end;
+            if (width > 730) break;
+        }
+        if (line[0]) g_ep_plot_count++;
+        else if (*p) p++;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+}
 static void rebuild_series_plot(void) {
     g_ser_plot_count = 0;
     const char *plot = jstr(ser_obj(), "plot");
@@ -1833,31 +1963,49 @@ static void draw_series(void) {
                        section && !strcmp(section, "dorama") ? "NPLAY / DORAMA" : "NPLAY / SERIE";
     ui_header(area, NULL, "B Voltar");
 
-    SDL_Rect hero = { 52, 110, WIN_W - 104, 276 };
+    SDL_Rect hero = { 52, 110, WIN_W - 104, 306 };
     fill_rect(hero.x, hero.y, hero.w, hero.h, C_CARD);
-    SDL_Texture *backdrop = cover_get(jstr(s, "backdrop"));
-    if (backdrop) ui_backdrop(backdrop, &hero);
-    SDL_Texture *tex = cover_get(jstr(s, "logo"));
-    SDL_Rect cr = { 65, 120, 175, 255 };
-    fill_rect(cr.x, cr.y, cr.w, cr.h, C_BAR);
-    if (tex) ui_contain(tex, &cr);
-    fill_rect(52, 110, 5, 276, C_ACC);
+    fill_rect(52, 110, 5, hero.h, C_ACC);
 
-    text_clip(title, 270, 133, C_TEXT, 1, 940);
+    text_clip(title, 72, 125, C_TEXT, 1, 750);
     const char *year = jstr(s, "year");
     double rating = 0; cJSON *jr = cJSON_GetObjectItem(s, "rating"); if (jr && cJSON_IsNumber(jr)) rating = jr->valuedouble;
     char meta[128];
     if (rating > 0) snprintf(meta, sizeof(meta), "★ %.1f    %s    %d episodios", rating, year ? year : "", jint(s, "episode_count"));
     else snprintf(meta, sizeof(meta), "%s    %d episodios", year ? year : "", jint(s, "episode_count"));
-    text_clip(meta, 270, 178, C_ACC2, 0, 900);
+    text_clip(meta, 72, 169, C_ACC2, 0, 730);
     const char *genre = jstr(s, "genre");
-    if (genre) text_clip(genre, 270, 209, C_MUT, 2, 890);
-    for (int i = 0; i < g_ser_plot_count; i++)
-        text_clip(g_ser_plot_lines[i], 270, 242 + i * 27, C_MUT, 0, 890);
-    fill_rect(270, 334, 177, 48, C_ACC);
-    text_center_at("A  Assistir", 270, 177, 343, C_BG, 0);
-    fill_rect(461, 334, 220, 48, C_CARD);
-    text_center_at(fav ? "X  Favoritado" : "X  Favoritar", 461, 220, 343, C_TEXT, 0);
+    if (genre) text_clip(genre, 72, 200, C_MUT, 2, 730);
+
+    cJSON *focused = ser_ep_at(g_epSel);
+    if (jint(focused, "id") != g_ep_plot_id) rebuild_episode_plot(focused);
+    fill_rect(72, 231, 730, 1, C_MUT);
+    int current_season = ser_grouped() ? ser_group_idx() : g_seasonIdx;
+    int ep_no = jint(focused, "episode");
+    char episode_label[70];
+    snprintf(episode_label, sizeof(episode_label), "TEMPORADA %d  /  EPISODIO %d",
+             current_season + 1, ep_no > 0 ? ep_no : g_epSel + 1);
+    text_draw(gRen, episode_label, 72, 244, C_ACC2, 2);
+    text_clip(focused ? ep_display_title(focused) : "Escolha um episodio", 72, 270, C_TEXT, 1, 730);
+    if (g_ep_plot_count == 0) text_draw(gRen, "Sinopse deste episodio ainda nao disponivel.", 72, 310, C_MUT, 0);
+    for (int i = 0; i < 4 && i + g_ep_plot_scroll < g_ep_plot_count; i++)
+        text_clip(g_ep_plot_lines[i + g_ep_plot_scroll], 72, 308 + i * 23, C_TEXT, 0, 730);
+    if (g_ep_plot_count > 4) {
+        char page[68]; snprintf(page, sizeof(page), "Sinopse %d/%d  |  cima/baixo",
+                                g_ep_plot_scroll + 1, g_ep_plot_count - 3);
+        text_clip(page, 72, 399, C_MUT, 2, 730);
+    }
+    const char *still = jstr(focused, "ep_still");
+    if (!still) still = jstr(focused, "logo");
+    SDL_Texture *visual = cover_get(still ? still : jstr(s, "backdrop"));
+    if (visual) {
+        SDL_Rect er = { 835, 164, 365, 208 };
+        ui_contain(visual, &er);
+    }
+    fill_rect(52, 424, 177, 44, C_ACC);
+    text_center_at("A  Assistir", 52, 177, 433, C_BG, 0);
+    fill_rect(243, 424, 206, 44, C_CARD);
+    text_center_at(fav ? "X  Favoritado" : "X  Favoritar", 243, 206, 433, C_TEXT, 0);
 
     cJSON *au = ser_audio();
     if (arr_len(au) > 1) {
@@ -1865,52 +2013,48 @@ static void draw_series(void) {
         cJSON_ArrayForEach(av, au) if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) {
             const char *current = jstr(av, "label"); if (current) label = current;
         }
-        fill_rect(695, 334, 228, 48, C_CARD);
+        fill_rect(463, 424, 228, 44, C_CARD);
         char audio_label[100]; snprintf(audio_label, sizeof(audio_label), "ZL/ZR  %s", label);
-        text_center_at(audio_label, 695, 228, 343, C_TEXT, 0);
+        text_center_at(audio_label, 463, 228, 433, C_TEXT, 0);
     }
-    int grouped = ser_grouped();
     int nsea = ser_nseasons(), nep = ser_nep();
-    text_draw(gRen, "Temporadas", 54, 397, C_TEXT, 0);
-    if (nsea > 1) text_right("L/R trocar temporada", WIN_W - 54, 400, C_MUT, 2);
-    int current_season = grouped ? ser_group_idx() : g_seasonIdx;
+    text_draw(gRen, "Temporadas", 54, 480, C_TEXT, 0);
+    if (nsea > 1) text_right("L/R trocar temporada", WIN_W - 54, 483, C_MUT, 2);
     int first_season = current_season > 5 ? current_season - 5 : 0;
     for (int i = first_season; i < nsea && i < first_season + 7; i++) {
         int x = 54 + (i - first_season) * 160;
-        fill_rect(x, 432, 150, 35, i == current_season ? C_ACC : C_CARD);
+        fill_rect(x, 511, 150, 34, i == current_season ? C_ACC : C_CARD);
         char chip[48]; snprintf(chip, sizeof(chip), "Temporada %d", i + 1);
-        text_center_at(chip, x, 150, 437, i == current_season ? C_BG : C_TEXT, 2);
+        text_center_at(chip, x, 150, 516, i == current_season ? C_BG : C_TEXT, 2);
     }
-    char sh[64]; snprintf(sh, sizeof(sh), "Temporada %d", current_season + 1);
-    text_draw(gRen, sh, 54, 478, C_TEXT, 0);
     char count[50]; snprintf(count, sizeof(count), "%d episodios", nep);
-    text_draw(gRen, count, 250, 484, C_MUT, 2);
+    text_right(count, WIN_W - 54, 518, C_MUT, 2);
     int start = g_epSel - 2;
     if (start < 0) start = 0;
     if (start > nep - 5) start = nep > 5 ? nep - 5 : 0;
     for (int i = start; i < nep && i < start + 5; i++) {
         cJSON *ep = ser_ep_at(i);
         int x = 54 + (i - start) * (RCW + RGAP);
-        fill_rect(x, 514, RCW, 142, i == g_epSel ? (SDL_Color){38, 34, 61, 255} : C_CARD);
-        if (i == g_epSel) ui_focus(x - 4, 510, RCW + 8, 150);
-        const char *still = jstr(ep, "ep_still");
-        if (!still) still = jstr(ep, "logo");
-        SDL_Texture *thumb = cover_get(still ? still : jstr(s, "logo"));
-        if (thumb) { SDL_Rect er = {x, 514, RCW, 87}; ui_cover(thumb, &er); }
+        fill_rect(x, 551, RCW, 105, i == g_epSel ? (SDL_Color){38, 34, 61, 255} : C_CARD);
+        if (i == g_epSel) ui_focus(x - 4, 547, RCW + 8, 113);
+        const char *card_still = jstr(ep, "ep_still");
+        if (!card_still) card_still = jstr(ep, "logo");
+        SDL_Texture *thumb = cover_get(card_still ? card_still : jstr(s, "logo"));
+        if (thumb) { SDL_Rect er = {x, 551, RCW, 74}; ui_contain(thumb, &er); }
         int en = jint(ep, "episode"); char nb[32]; snprintf(nb, sizeof(nb), "T%d · E%d", current_season + 1, en > 0 ? en : i + 1);
         int done = episode_completed(ep);
         int pos = jint(ep, "position_seconds"), duration = jint(ep, "duration_seconds");
         int progress = (!done && pos > 10 && duration > 0) ? pos * 100 / duration : 0;
         if (progress > 99) progress = 99;
-        text_clip(nb, x + 8, 605, C_ACC2, 2, RCW - 16);
-        text_clip(ep_display_title(ep), x + 8, 626, C_TEXT, 2, RCW - 16);
+        text_clip(nb, x + 8, 631, C_ACC2, 2, 57);
+        text_clip(ep_display_title(ep), x + 68, 631, C_TEXT, 2, RCW - 76);
         if (done || progress > 0) {
-            fill_rect(x, 597, RCW, 4, C_MUT);
-            fill_rect(x, 597, RCW * (done ? 100 : progress) / 100, 4, C_ROSE);
+            fill_rect(x, 622, RCW, 3, C_MUT);
+            fill_rect(x, 622, RCW * (done ? 100 : progress) / 100, 3, C_ROSE);
         }
     }
-    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", 54, 535, C_MUT, 0);
-    ui_footer("A Assistir    Esquerda/direita Episodio    L/R Temporada    X Favoritar    ZL/ZR Audio");
+    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", 54, 568, C_MUT, 0);
+    ui_footer("A Assistir    Esquerda/direita Episodio    Cima/baixo Sinopse    L/R Temporada");
 }
 
 // Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
@@ -2017,7 +2161,7 @@ static void draw_history_card(int x, int y, cJSON *item, int selected) {
     fill_rect(x, y, HIST_CW, HIST_CH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
     if (selected) ui_focus(x - 4, y - 4, HIST_CW + 8, HIST_CH + 60);
     SDL_Texture *cover = cover_get(jstr(item, "logo"));
-    if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; ui_cover(cover, &r); }
+    if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; ui_contain(cover, &r); }
     else fill_rect(x, y, HIST_CW, HIST_CH, C_CARD);
     int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
     int pct = dur > 0 ? pos * 100 / dur : 0;
@@ -2146,7 +2290,7 @@ static void draw_dl_grid(void) {
         }
         SDL_Texture *cov = cover_get(jstr(j0, "cover"));
         SDL_Rect cr = { x, yy, GCOVERW, GCOVERH };
-        if (cov) ui_cover(cov, &cr); else fill_rect(x, yy, GCOVERW, GCOVERH, C_CARD);
+        if (cov) ui_contain(cov, &cr); else fill_rect(x, yy, GCOVERW, GCOVERH, C_CARD);
         int nJobs = g_dlg[i].nJobs, baixando = 0;
         for (int k = 0; k < nJobs; k++) if (!cJSON_IsTrue(cJSON_GetObjectItem(dlg_job(i, k), "ready"))) baixando++;
         char badge[32];
@@ -2235,7 +2379,7 @@ static void draw_custom_list(void) {
             ui_focus(x - 4, y - 4, GCOVERW + 8, GCH + 8);
         }
         SDL_Texture *cover = cover_get(logo);
-        if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; ui_cover(cover, &r); }
+        if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; ui_contain(cover, &r); }
         else fill_rect(x, y, GCOVERW, GCOVERH, C_CARD);
         text_clip(title, x, y + GCOVERH + 8, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
         if (i == g_list_item_sel) fill_rect(x, y + GCOVERH + 37, GCOVERW, 2, C_ACC2);
@@ -2367,6 +2511,48 @@ static void input_landing(int b) {
     if (ry - g_homeScroll < 105) g_homeScroll = ry - 105;
     if (g_homeScroll < 0) g_homeScroll = 0;
 }
+static void input_sagas(int b) {
+    int count = arr_len(saga_groups());
+    int next = g_saga_sel;
+    if (b == JOY_DLEFT && next > 0) next--;
+    else if (b == JOY_DRIGHT && next + 1 < count) next++;
+    else if (b == JOY_UP && next >= 3) next -= 3;
+    else if (b == JOY_DOWN && next + 3 < count) next += 3;
+    else if (b == JOY_ZL || b == JOY_ZR) {
+        cJSON *group = saga_group_at(g_saga_sel);
+        int variants = arr_len(cJSON_GetObjectItem(group, "variants"));
+        if (variants > 1) g_saga_variant_sel = (g_saga_variant_sel + (b == JOY_ZR ? 1 : variants - 1)) % variants;
+    } else if (b == JOY_A && count > 0) {
+        cJSON *variant = saga_variant_at(saga_group_at(g_saga_sel), g_saga_variant_sel);
+        const char *slug = jstr(variant, "slug");
+        if (slug && slug[0]) {
+            char path[256]; snprintf(path, sizeof(path), "/api/catalog/sagas/%.200s", slug);
+            begin_catalog_fetch(FETCH_SAGA, path, NULL);
+        }
+    }
+    if (next != g_saga_sel) { g_saga_sel = next; g_saga_variant_sel = 0; }
+    int row_top = 185 + (g_saga_sel / 3) * 231;
+    if (row_top - g_saga_scroll < 183) g_saga_scroll = row_top - 183;
+    if (row_top + 211 - g_saga_scroll > WIN_H - 54)
+        g_saga_scroll = row_top + 211 - (WIN_H - 54);
+    if (g_saga_scroll < 0) g_saga_scroll = 0;
+}
+static void input_saga_detail(int b) {
+    cJSON *items = cJSON_GetObjectItem(g_saga_detail, "items");
+    int count = arr_len(items);
+    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; enter_tab(TAB_SAGAS); }
+    else if ((b == JOY_DLEFT || b == JOY_UP) && g_saga_item_sel > 0) g_saga_item_sel--;
+    else if ((b == JOY_DRIGHT || b == JOY_DOWN) && g_saga_item_sel + 1 < count) g_saga_item_sel++;
+    else if (b == JOY_A && count > 0) {
+        cJSON *item = cJSON_GetArrayItem(items, g_saga_item_sel);
+        if (cJSON_IsFalse(cJSON_GetObjectItem(item, "available")) ||
+            (cJSON_IsNumber(cJSON_GetObjectItem(item, "available")) && !jint(item, "available"))) {
+            toast("Este titulo ainda nao esta disponivel");
+            return;
+        }
+        open_item(item, catalog_item_is_series(item, 0));
+    }
+}
 static void input_search(int b) {
     int n = srch_count_for(g_srchFilter);
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
@@ -2442,8 +2628,10 @@ static void input_series(int b) {
         cJSON *au = ser_audio();
         if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
     }
-    else if (b == JOY_DLEFT || b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
-    else if (b == JOY_DRIGHT || b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
+    else if (b == JOY_DLEFT) { if (g_epSel > 0) g_epSel--; }
+    else if (b == JOY_DRIGHT) { if (g_epSel < nep - 1) g_epSel++; }
+    else if (b == JOY_UP) { if (g_ep_plot_scroll > 0) g_ep_plot_scroll--; }
+    else if (b == JOY_DOWN) { if (g_ep_plot_scroll + 4 < g_ep_plot_count) g_ep_plot_scroll++; }
     else if (b == JOY_L) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
@@ -2824,7 +3012,7 @@ static void save_selected_preference(int direction) {
         g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
         toast("Nao foi possivel salvar a preferencia");
     } else {
-        if (g_prefs_sel == 0 && g_tab <= 4) landing_invalidate(g_tab);
+        if (g_prefs_sel == 0 && g_tab <= TAB_SAGAS) landing_invalidate(g_tab);
         g_hero_next = SDL_GetTicks() + 8000;
         toast("Preferencia sincronizada");
     }
@@ -2973,6 +3161,7 @@ static void run_update(void) {
 static void draw_catalog_loading(void) {
     const char *label = g_fetch_current.kind == FETCH_PROFILES ? "Carregando perfis" :
                         g_fetch_current.kind == FETCH_SEARCH ? "Buscando titulos" :
+                        g_fetch_current.kind == FETCH_SAGA ? "Abrindo saga" :
                         g_fetch_current.kind == FETCH_SERIES ? "Abrindo serie" : "Abrindo filme";
     ui_header("NPLAY", label, "B Voltar");
     ui_panel(220, 210, 840, 250, C_ACC2);
@@ -3079,12 +3268,14 @@ static void handle_button(int b) {
         } }
         else if (b == JOY_PLUS) g_running = 0;
     } else if (g_screen == SC_MAIN) {
-        if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
+        if (g_tab == TAB_SAGAS && (b == JOY_ZL || b == JOY_ZR)) input_sagas(b);
+        else if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
         else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
         else if (b == JOY_PLUS) g_running = 0;
         else if (b == JOY_MINUS) { g_setSel = 0; load_settings_status(); g_screen = SC_CONFIG; }
         else if (b == JOY_Y) do_search();
         else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
+        else if (g_tab == TAB_SAGAS) input_sagas(b);
         else input_landing(b);
     } else if (g_screen == SC_SERIES) {
         input_series(b);
@@ -3106,6 +3297,200 @@ static void handle_button(int b) {
             catalog_fetch_cancel(&g_fetch);
             g_screen = origin;
         }
+    } else if (g_screen == SC_SAGA) {
+        input_saga_detail(b);
+    }
+}
+
+static void handle_touch_tap(int x, int y) {
+    if (g_screen == SC_LOGIN) { if (y >= 300 && y < 395) handle_button(JOY_A); return; }
+    if (g_screen == SC_LOADING) { if (y < 92) handle_button(JOY_B); return; }
+    if (g_screen == SC_MAIN || g_screen == SC_SEARCH) {
+        if (y < 95) {
+            int tx = 255;
+            for (int t = 0; t < NTABS; t++) {
+                int w = 0, h = 0;
+                text_cached(gRen, TAB_NAME[t], t == g_tab ? C_ACC : C_TEXT, 0, &w, &h);
+                if (x >= tx && x <= tx + w + 22) { g_screen = SC_MAIN; enter_tab(t); return; }
+                tx += w + 33;
+            }
+            if (x >= 1160) { g_setSel = 0; load_settings_status(); g_screen = SC_CONFIG; }
+            else if (x >= 1050) do_search();
+            return;
+        }
+        if (g_screen == SC_SEARCH) {
+            if (y >= 161 && y < 197) {
+                static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes", "Doramas" };
+                int chip_x = 54;
+                for (int i = 0; i < 5; i++) {
+                    char label[48];
+                    snprintf(label, sizeof(label), "%s  %d", filters[i], srch_count_for(i));
+                    int tw = 0, th = 0;
+                    text_cached(gRen, label, C_TEXT, 0, &tw, &th);
+                    int chip_w = tw + 28;
+                    if (x >= chip_x && x < chip_x + chip_w) {
+                        g_srchFilter = i; g_srchSel = 0; g_srchScroll = 0;
+                        return;
+                    }
+                    chip_x += chip_w + 12;
+                }
+            }
+            if (x >= GMX && y >= 221 && y < WIN_H - 52) {
+                int col = (x - GMX) / (GCW + GGAP);
+                int row = (y + g_srchScroll - 221) / (GCH + GGAP);
+                if (col >= 0 && col < GCOLS && row >= 0 &&
+                    (x - GMX) % (GCW + GGAP) < GCW &&
+                    (y + g_srchScroll - 221) % (GCH + GGAP) < GCH) {
+                    int index = row * GCOLS + col;
+                    if (index < srch_count_for(g_srchFilter)) {
+                        g_srchSel = index;
+                        input_search(JOY_A);
+                    }
+                }
+            }
+            return;
+        }
+        if (g_tab == TAB_SAGAS) {
+            if (x < 54 || y < 178 || y >= WIN_H - 52 || y < 185 - g_saga_scroll) return;
+            int col = (x - 54) / 390, row = (y + g_saga_scroll - 185) / 231;
+            if (col >= 0 && col < 3 && row >= 0 &&
+                x < 54 + col * 390 + 366 && y + g_saga_scroll < 185 + row * 231 + 211) {
+                int index = row * 3 + col;
+                if (index < arr_len(saga_groups())) {
+                    if (index != g_saga_sel) { g_saga_sel = index; g_saga_variant_sel = 0; }
+                    input_sagas(JOY_A);
+                }
+            }
+            return;
+        }
+        if (g_tab == TAB_DOWNLOADS) { input_downloads(JOY_A); return; }
+        int nh = hero_count(), hy = 110 - g_homeScroll;
+        if (nh > 0 && y >= hy && y < hy + HERO_H && x >= 52 && x < WIN_W - 52) {
+            g_railSel = -1; input_landing(JOY_A); return;
+        }
+        int first_y = (nh > 0 ? RAILS_TOP : 125);
+        for (int r = 0; r < g_railsN; r++) {
+            int ry = first_y + r * RAIL_STEP + 30 - g_homeScroll;
+            if (y < ry || y >= ry + RCH + 52) continue;
+            int row_scroll = 0;
+            if (r == g_railSel) {
+                int sel_x = 54 + g_railItem * (RCW + RGAP);
+                if (sel_x + RCW > WIN_W - 54) row_scroll = sel_x + RCW - (WIN_W - 54);
+                if (sel_x - row_scroll < 54) row_scroll = sel_x - 54;
+                if (row_scroll < 0) row_scroll = 0;
+            }
+            int relative = x - 54 + row_scroll;
+            if (relative < 0) return;
+            int index = relative / (RCW + RGAP);
+            if (relative % (RCW + RGAP) >= RCW || index >= g_rails[r].count) return;
+            g_railSel = r; g_railItem = index;
+            cJSON *item = cJSON_GetArrayItem(g_rails[r].arr, index);
+            open_item(item, catalog_item_is_series(item, g_rails[r].is_series));
+            return;
+        }
+        int search_y = first_y + g_railsN * RAIL_STEP - g_homeScroll;
+        if (y >= search_y && y < search_y + 112) do_search();
+        return;
+    }
+    if (y < 95 && x < 260) { handle_button(JOY_B); return; }
+    if (g_screen == SC_SERIES && !g_dlmenu) {
+        if (y >= 424 && y < 468) {
+            if (x >= 52 && x < 229) input_series(JOY_A);
+            else if (x >= 243 && x < 449) input_series(JOY_X);
+            else if (x >= 463 && x < 691) input_series(JOY_ZR);
+            return;
+        }
+        if (y >= 511 && y < 545) {
+            int index = (x - 54) / 160;
+            int current = ser_grouped() ? ser_group_idx() : g_seasonIdx;
+            int first = current > 5 ? current - 5 : 0;
+            int target = first + index;
+            if (x >= 54 && index >= 0 && target < ser_nseasons()) {
+                if (ser_grouped()) open_series(jint(cJSON_GetArrayItem(ser_group(), target), "id"));
+                else { g_seasonIdx = target; g_epSel = 0; g_ep_plot_id = -1; }
+            }
+            return;
+        }
+        if (y >= 551 && y < 656) {
+            int count = ser_nep();
+            int start = g_epSel - 2;
+            if (start < 0) start = 0;
+            if (start > count - 5) start = count > 5 ? count - 5 : 0;
+            int col = (x - 54) / (RCW + RGAP);
+            int index = start + col;
+            if (x >= 54 && col >= 0 && col < 5 && index < count &&
+                (x - 54) % (RCW + RGAP) < RCW) g_epSel = index;
+            return;
+        }
+        return;
+    }
+    if (g_screen == SC_SAGA && y >= 411 && y < 668) {
+        int count = arr_len(cJSON_GetObjectItem(g_saga_detail, "items"));
+        int start = g_saga_item_sel - 2;
+        if (start < 0) start = 0;
+        if (start > count - 5) start = count > 5 ? count - 5 : 0;
+        int col = (x - 54) / (RCW + RGAP), index = start + col;
+        if (x >= 54 && col >= 0 && col < 5 && index < count &&
+            (x - 54) % (RCW + RGAP) < RCW) {
+            g_saga_item_sel = index;
+            input_saga_detail(JOY_A);
+        }
+        return;
+    }
+    if (g_screen == SC_MOVIE && y >= 350 && y < 398) {
+        if (x >= 280 && x < 452) movie_touch_action(0);
+        else if (x >= 468 && x < 698) movie_touch_action(1);
+    }
+}
+static void handle_touch_swipe(int x, int y, int dx, int dy) {
+    if (g_screen == SC_SEARCH && y >= 205) {
+        int rows = (srch_count_for(g_srchFilter) + GCOLS - 1) / GCOLS;
+        int max_scroll = 221 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
+        if (max_scroll < 0) max_scroll = 0;
+        g_srchScroll -= dy;
+        if (g_srchScroll < 0) g_srchScroll = 0;
+        if (g_srchScroll > max_scroll) g_srchScroll = max_scroll;
+        return;
+    }
+    if (g_screen == SC_MAIN && y < 105 && dx > 90) { enter_tab((g_tab - 1 + NTABS) % NTABS); return; }
+    if (g_screen == SC_MAIN && y < 105 && dx < -90) { enter_tab((g_tab + 1) % NTABS); return; }
+    if (g_screen == SC_SERIES && !g_dlmenu) {
+        if (y >= 235 && y < 416 && (dy > 45 || dy < -45)) {
+            input_series(dy < 0 ? JOY_DOWN : JOY_UP); return;
+        }
+        if (dx > 55 || dx < -55) input_series(dx < 0 ? JOY_DRIGHT : JOY_DLEFT);
+        return;
+    }
+    if (g_screen != SC_MAIN) return;
+    if (g_tab == TAB_SAGAS) {
+        g_saga_scroll -= dy;
+        int rows = (arr_len(saga_groups()) + 2) / 3;
+        int max_scroll = 185 + rows * 231 - (WIN_H - 52);
+        if (max_scroll < 0) max_scroll = 0;
+        if (g_saga_scroll < 0) g_saga_scroll = 0;
+        if (g_saga_scroll > max_scroll) g_saga_scroll = max_scroll;
+        return;
+    }
+    if (g_tab == TAB_DOWNLOADS) return;
+    if ((dx > 65 || dx < -65) && y < 110 + HERO_H) {
+        input_landing(dx < 0 ? JOY_DRIGHT : JOY_DLEFT); return;
+    }
+    if (dx > 65 || dx < -65) {
+        int first_y = hero_count() > 0 ? RAILS_TOP : 125;
+        for (int r = 0; r < g_railsN; r++) {
+            int row_y = first_y + r * RAIL_STEP + 30 - g_homeScroll;
+            if (y < row_y || y >= row_y + RCH + 52) continue;
+            if (g_railSel != r) { g_railSel = r; g_railItem = 0; }
+            input_landing(dx < 0 ? JOY_DRIGHT : JOY_DLEFT);
+            return;
+        }
+    }
+    if (dy > 35 || dy < -35) {
+        int nh = hero_count();
+        int max_scroll = (nh > 0 ? RAILS_TOP : 125) + g_railsN * RAIL_STEP + 112 - (WIN_H - 52);
+        g_homeScroll -= dy;
+        if (g_homeScroll < 0) g_homeScroll = 0;
+        if (g_homeScroll > max_scroll && max_scroll > 0) g_homeScroll = max_scroll;
     }
 }
 
@@ -3146,8 +3531,26 @@ int main(int argc, char **argv) {
 
     while (appletMainLoop() && g_running) {
         SDL_Event e;
+        static SDL_FingerID touch_id = 0;
+        static int touch_active = 0, touch_x = 0, touch_y = 0;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { g_running = 0; break; }
+            if (e.type == SDL_FINGERDOWN) {
+                touch_id = e.tfinger.fingerId;
+                touch_x = (int)(e.tfinger.x * WIN_W);
+                touch_y = (int)(e.tfinger.y * WIN_H);
+                touch_active = 1;
+                continue;
+            }
+            if (e.type == SDL_FINGERUP && touch_active && e.tfinger.fingerId == touch_id) {
+                int x = (int)(e.tfinger.x * WIN_W), y = (int)(e.tfinger.y * WIN_H);
+                int dx = x - touch_x, dy = y - touch_y;
+                touch_active = 0;
+                if (dx > 30 || dx < -30 || dy > 30 || dy < -30)
+                    handle_touch_swipe(touch_x, touch_y, dx, dy);
+                else handle_touch_tap(x, y);
+                continue;
+            }
             if (e.type != SDL_JOYBUTTONDOWN) continue;
             int b = e.jbutton.button;
             // direcoes (D-pad) sao tratadas no bloco de navegacao abaixo (junto
@@ -3196,10 +3599,11 @@ int main(int argc, char **argv) {
         else if (g_screen == SC_CONFIG) draw_settings();
         else if (g_screen == SC_MOVIE) draw_movie();
         else if (g_screen == SC_SERIES) { if (g_dlmenu) draw_dlmenu(); else draw_series(); }
+        else if (g_screen == SC_SAGA) draw_saga_detail();
         else if (g_screen == SC_SEARCH) draw_search();
         else if (g_screen == SC_PROFILES) draw_profiles();
         else if (g_screen == SC_LOADING) draw_catalog_loading();
-        else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else draw_landing(); }
+        else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else if (g_tab == TAB_SAGAS) draw_sagas(); else draw_landing(); }
 
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
             int w = 0, h = 0;
@@ -3236,9 +3640,10 @@ int main(int argc, char **argv) {
     if (g_land_thread) { SDL_WaitThread(g_land_thread, NULL); g_land_thread = NULL; }
     if (g_land_pending) { cJSON_Delete(g_land_pending); g_land_pending = NULL; }
     catalog_fetch_dispose(&g_fetch);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i <= TAB_SAGAS; i++) {
         if (g_land_cache[i]) { cJSON_Delete(g_land_cache[i]); g_land_cache[i] = NULL; }
     }
+    if (g_saga_detail) { cJSON_Delete(g_saga_detail); g_saga_detail = NULL; }
     g_land = NULL;
     if (g_search) cJSON_Delete(g_search);
     if (g_profiles) cJSON_Delete(g_profiles);

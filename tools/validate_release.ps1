@@ -60,7 +60,7 @@ Assert-True ($diagSource -notmatch 'play_url|Authorization|Bearer') 'Trace diagn
 
 $mainSource = Get-Content source/main.c -Raw
 Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
-Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
+Assert-True ($mainSource -match 'g_land_cache\[6\]') 'Troca de aba perdeu o cache de catalogo.'
 Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
 Assert-True ($mainSource -notmatch 'prefetch_order\[\] = \{ 1, 2, 3, 4 \}') 'Catalogos voltaram a ocupar heap automaticamente antes do player.'
 Assert-True ($mainSource -match 'playback_memory_enter') 'Player nao reserva memoria antes de abrir HLS.'

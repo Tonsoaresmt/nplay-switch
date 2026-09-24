@@ -21,7 +21,7 @@
 #define JOY_ZL 8
 #define JOY_ZR 9
 
-typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES, SC_SEARCH, SC_CONFIG, SC_MOVIE, SC_LOADING, SC_PROFILES } Screen;
+typedef enum { SC_LOGIN, SC_MAIN, SC_SERIES, SC_SEARCH, SC_CONFIG, SC_MOVIE, SC_LOADING, SC_PROFILES, SC_SAGA } Screen;
 extern Screen g_screen;
 
 // Cores padronizadas da UI

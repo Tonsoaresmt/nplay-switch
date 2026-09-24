@@ -16,6 +16,8 @@ foreach ($endpoint in @(
     '/api/catalog/tab-home\?tab=series',
     '/api/catalog/anime-home',
     '/api/catalog/tab-home\?tab=dorama',
+    '/api/catalog/sagas',
+    '/api/catalog/sagas/%.200s',
     '/api/catalog/search-v2\?q='
 )) {
     Assert-Contains $switchMain $endpoint "Endpoint ausente no Switch: $endpoint"
@@ -38,6 +40,8 @@ $stream = Get-Content (Join-Path $BackendRoot 'src/routes/stream.js') -Raw
 Assert-Contains $catalog "app\.get\('/tab-home'" 'Backend nao possui tab-home.'
 Assert-Contains $catalog "app\.get\('/anime-home'" 'Backend nao possui anime-home.'
 Assert-Contains $catalog "app\.get\('/series/:id'" 'Backend nao possui detalhe de series.'
+Assert-Contains $catalog "app\.get\('/sagas'" 'Backend nao possui lista de sagas.'
+Assert-Contains $catalog "app\.get\('/sagas/:slug'" 'Backend nao possui detalhe de saga.'
 Assert-Contains $search "app\.get\('/search-v2'" 'Backend nao possui busca v2.'
 Assert-Contains $search "WHEN c\.section='anime' THEN 'anime'" 'Busca v2 nao classifica anime.'
 Assert-Contains $search "WHEN c\.section='dorama' THEN 'dorama'" 'Busca v2 nao classifica dorama.'

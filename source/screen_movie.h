@@ -13,6 +13,7 @@ void draw_movie(void);
 
 // Trata os inputs do gamepad
 void input_movie(int b);
+void movie_touch_action(int favorite);
 
 // Limpa memoria do json do filme
 void close_movie_details(void);
