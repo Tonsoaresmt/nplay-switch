@@ -368,6 +368,9 @@ static int g_favs_profile_id = 0;
 // --- serie (detalhe) ---
 static cJSON *g_ser = NULL;
 static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
+static char g_ser_plot_lines[3][220];
+static int g_ser_plot_count = 0;
+static void rebuild_series_plot(void);
 
 // --- prototipos (funcoes que se chamam entre si) ---
 static void enter_tab(int tab);
@@ -986,6 +989,7 @@ static void pump_catalog_fetch(void) {
         g_ser = result;
         result = NULL;
         select_series_resume_target(g_ser);
+        rebuild_series_plot();
         g_screen = SC_SERIES;
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_SEARCH && cJSON_IsObject(result)) {
@@ -1771,6 +1775,37 @@ static const char *ep_display_title(cJSON *episode) {
     if (!title || !title[0]) title = jstr(episode, "title");
     return ep_clean(title);
 }
+static void rebuild_series_plot(void) {
+    g_ser_plot_count = 0;
+    const char *plot = jstr(ser_obj(), "plot");
+    if (!plot) return;
+    const char *p = plot;
+    while (*p && g_ser_plot_count < 3) {
+        while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        char *line = g_ser_plot_lines[g_ser_plot_count];
+        line[0] = '\0';
+        while (*p && *p != '\n' && *p != '\r') {
+            while (*p == ' ') p++;
+            const char *end = p;
+            while (*end && *end != ' ' && *end != '\n' && *end != '\r') end++;
+            if (end == p) break;
+            char candidate[220];
+            int word_len = (int)(end - p);
+            if (word_len > 190) word_len = 190;
+            snprintf(candidate, sizeof(candidate), "%s%s%.*s", line, line[0] ? " " : "", word_len, p);
+            int width = 0, height = 0;
+            text_cached(gRen, candidate, C_MUT, 0, &width, &height);
+            if (line[0] && width > 890) break;
+            snprintf(line, 220, "%s", candidate);
+            p = end;
+            if (width > 890) break;
+        }
+        if (line[0]) g_ser_plot_count++;
+        else if (*p) p++;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+}
 static void draw_series(void) {
     cJSON *s = ser_obj();
     int sid = jint(s, "id");
@@ -1800,15 +1835,12 @@ static void draw_series(void) {
     text_clip(meta, 270, 178, C_ACC2, 0, 900);
     const char *genre = jstr(s, "genre");
     if (genre) text_clip(genre, 270, 209, C_MUT, 2, 890);
-    const char *plot = jstr(s, "plot");
-    if (plot && plot[0]) {
-        text_clip(plot, 270, 242, C_TEXT, 0, 890);
-        // O painel nativo usa a mesma sintese de texto da faixa de detalhes da TV.
-    }
-    fill_rect(270, 304, 177, 48, C_ACC);
-    text_center_at("A  Assistir", 270, 177, 313, C_BG, 0);
-    fill_rect(461, 304, 220, 48, C_CARD);
-    text_center_at(fav ? "X  Favoritado" : "X  Favoritar", 461, 220, 313, C_TEXT, 0);
+    for (int i = 0; i < g_ser_plot_count; i++)
+        text_clip(g_ser_plot_lines[i], 270, 242 + i * 27, C_MUT, 0, 890);
+    fill_rect(270, 334, 177, 48, C_ACC);
+    text_center_at("A  Assistir", 270, 177, 343, C_BG, 0);
+    fill_rect(461, 334, 220, 48, C_CARD);
+    text_center_at(fav ? "X  Favoritado" : "X  Favoritar", 461, 220, 343, C_TEXT, 0);
 
     cJSON *au = ser_audio();
     if (arr_len(au) > 1) {
@@ -1816,9 +1848,9 @@ static void draw_series(void) {
         cJSON_ArrayForEach(av, au) if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) {
             const char *current = jstr(av, "label"); if (current) label = current;
         }
-        fill_rect(695, 304, 228, 48, C_CARD);
+        fill_rect(695, 334, 228, 48, C_CARD);
         char audio_label[100]; snprintf(audio_label, sizeof(audio_label), "ZL/ZR  %s", label);
-        text_center_at(audio_label, 695, 228, 313, C_TEXT, 0);
+        text_center_at(audio_label, 695, 228, 343, C_TEXT, 0);
     }
     int grouped = ser_grouped();
     int nsea = ser_nseasons(), nep = ser_nep();
