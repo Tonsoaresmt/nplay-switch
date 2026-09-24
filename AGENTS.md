@@ -1,5 +1,21 @@
 # Continuidade para agentes
 
+## Rodada 0.12.11 (24/09/2026)
+
+- O detalhe de serie agora escolhe o episodio parcialmente assistido mais
+  recente por `progress_updated_at`, em vez do primeiro na lista.
+- O fallback do Switch consulta `/api/stream/:itemId/variants` antes de usar
+  `/fail`; sem alternativa reproduzivel, nao provoca a desativacao global da
+  unica fonte. Depois de `/fail`, aceita somente o descriptor completo obtido
+  em nova resolucao, com o `source_id` esperado; nao herda container antigo.
+- Heartbeat/progresso do player so comecam depois do primeiro quadro realmente
+  apresentado. Uma tentativa que nao mostrou video nao regrava o progresso
+  salvo nem aciona trabalho de prefetch pelo ponto antigo.
+- Risco de backend ainda aberto: `/stream/session/:id/fail` desativa a fonte
+  globalmente apos falha de um cliente, mesmo se a causa for local. A rota
+  deveria escolher alternativa por sessao e devolver descriptor completo.
+  Nao ampliar chamadas a ela ate coordenar mudanca no servidor/site.
+
 ## Rodada 0.12.10 (24/09/2026)
 
 - A retomada continua ativa: o ponto salvo e buscado no HLS/R2. A 0.12.9

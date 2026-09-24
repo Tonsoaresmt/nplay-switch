@@ -939,6 +939,7 @@ static void select_series_resume_target(cJSON *detail) {
     int best_season = 0, best_local = 0, best_flat = 0;
     int fallback_season = 0, fallback_local = 0, fallback_flat = 0;
     int have_started = 0, have_fallback = 0, season_index = 0, flat_index = 0;
+    const char *latest_progress_at = NULL;
     cJSON *season;
     cJSON_ArrayForEach(season, seasons) {
         int local = 0;
@@ -948,9 +949,14 @@ static void select_series_resume_target(cJSON *detail) {
                 fallback_season = season_index; fallback_local = local;
                 fallback_flat = flat_index; have_fallback = 1;
             }
-            if (!have_started && episode_started(episode)) {
-                best_season = season_index; best_local = local;
-                best_flat = flat_index; have_started = 1;
+            if (episode_started(episode)) {
+                const char *updated_at = jstr(episode, "progress_updated_at");
+                if (!have_started || (updated_at &&
+                    (!latest_progress_at || strcmp(updated_at, latest_progress_at) >= 0))) {
+                    best_season = season_index; best_local = local;
+                    best_flat = flat_index; have_started = 1;
+                    latest_progress_at = updated_at;
+                }
             }
             local++; flat_index++;
         }

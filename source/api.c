@@ -200,10 +200,40 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     return out->play_url[0] ? 0 : -1;
 }
 
+static int has_playable_fallback(const PlaybackSource *current) {
+    char path[128];
+    snprintf(path, sizeof(path), "/api/stream/%d/variants?sid=%d",
+             current->item_id, current->session_id);
+    cJSON *response = api_get_timeout(path, 3L, 6L);
+    if (!response) return 0;
+    cJSON *variants = cJSON_GetObjectItemCaseSensitive(response, "variants");
+    if (!cJSON_IsArray(variants)) {
+        cJSON_Delete(response);
+        return 0;
+    }
+    int compatible = 0;
+    cJSON *variant;
+    cJSON_ArrayForEach(variant, variants) {
+        if (jint(variant, "src_id") == current->source_id) continue;
+        // /fail escolhe o proximo da mesma ordem. Se esse primeiro candidato
+        // nao toca no player nativo, nao desative globalmente a fonte atual.
+        const char *container = jstr(variant, "container");
+        compatible = container && container[0] &&
+            strcmp(container, "embed") && strcmp(container, "torrent") &&
+            jstr(variant, "play_url") != NULL;
+        break;
+    }
+    cJSON_Delete(response);
+    return compatible;
+}
+
 int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
     if (!current || !out || current->session_id <= 0) return -1;
-    *out = *current;
-    out->play_url[0] = '\0';
+    if (!has_playable_fallback(current)) {
+        snprintf(g_api_last_error, sizeof(g_api_last_error),
+                 "Nenhuma fonte alternativa compativel com o Switch");
+        return -1;
+    }
     char path[128], body[80], url[1024];
     snprintf(path, sizeof(path), "/api/stream/session/%d/fail", current->session_id);
     snprintf(body, sizeof(body), "{\"source_id\":%d}", current->source_id);
@@ -221,21 +251,25 @@ int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
         membuf_free(&resp);
         return -1;
     }
-    parse_playback_source(json, out);
-    // O endpoint de fail troca a fonte, mas hoje nao devolve delivery/container.
-    // Tenta obter o descritor completo da nova fonte; se a rede cair justamente
-    // aqui, preserva a URL de fallback e o container anterior como ultimo recurso.
-    out->delivery = DELIVERY_UNKNOWN;
-    out->delivery_str[0] = '\0';
+    // /fail retorna somente um ponteiro assinado. Ele pode apontar para HLS,
+    // MP4, embed ou torrent: nunca reutilize container/delivery da fonte antiga.
+    int next_source_id = jint(json, "source_id");
+    int has_pointer = jstr(json, "play_url") != NULL;
     cJSON_Delete(json);
     membuf_free(&resp);
-    if (!out->play_url[0]) return -1;
+    if (next_source_id <= 0 || !has_pointer) return -1;
     PlaybackSource complete = {0};
     if (api_reresolve_playback(current->item_id,
-                               current->quality[0] ? current->quality : NULL,
-                               &complete) == 0 && complete.play_url[0]) {
-        *out = complete;
+                              current->quality[0] ? current->quality : NULL,
+                              &complete) != 0 || !complete.play_url[0] ||
+        complete.source_id != next_source_id || !complete.container[0] ||
+        !strcmp(complete.container, "embed") ||
+        !strcmp(complete.container, "torrent")) {
+        snprintf(g_api_last_error, sizeof(g_api_last_error),
+                 "Fonte alternativa sem formato reproduzivel confirmado");
+        return -1;
     }
+    *out = complete;
     return 0;
 }
 

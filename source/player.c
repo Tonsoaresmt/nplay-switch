@@ -1173,7 +1173,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // Heartbeat & Progress tracking are now managed by a separate thread
     Uint32 last_heartbeat = SDL_GetTicks();
     PlaybackHeartbeat *hb = heartbeat;
-    if (hb) SDL_AtomicSet(&hb->pipeline_ready, 1);
     player_boot_stage("09 reproduzindo");
     ui_popcorn_release();
 
@@ -1724,6 +1723,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         nplay_curl_avio_set_startup_window(0);
                         g_player_presented_frame = 1;
                         first_present_ms = SDL_GetTicks() - play_started_tick;
+                        if (hb) {
+                            SDL_AtomicSet(&hb->current_pos, (int)cur_pos);
+                            SDL_AtomicSet(&hb->duration, (int)dur);
+                            SDL_AtomicSet(&hb->pipeline_ready, 1);
+                        }
                         diag_player_event("render", "first-present", "position=%.2f ms=%u",
                                           cur_pos, first_present_ms);
                         logged_first_present = 1;
@@ -1862,6 +1866,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     double attempt_start = current_pos;
     int resume_restart_attempted = 0;
     double dur = 0.0;
+    int ever_presented_frame = 0;
     int final_rc = 0;
     PlaybackSource active = request->playback;
     if (active.item_id <= 0) active.item_id = request->item_id;
@@ -1895,10 +1900,12 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                           retry_count + 1, attempt_start, active.session_id, active.source_id);
         int rc = player_play_internal(ren, joy, &attempt, &hb, attempt_start,
                                       &out_pos, &out_dur, &resume_seeked, &presented_frame);
+        SDL_AtomicSet(&hb.pipeline_ready, 0);
         nplay_curl_avio_set_abort_check(NULL, NULL);
         nplay_curl_avio_set_startup_window(0);
         diag_player_event("player", "attempt-end", "attempt=%d rc=%d pos=%.1f dur=%.1f",
                           retry_count + 1, rc, out_pos, out_dur);
+        if (presented_frame) ever_presented_frame = 1;
         // So grave uma nova posicao depois de realmente mostrar video. Uma
         // tentativa de retomada pode atualizar cur_pos sem decodificar nada.
         if (out_pos > 0 && (presented_frame || rc == 1)) current_pos = out_pos;
@@ -2022,7 +2029,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     }
     
     // Save progress once at the end
-    if (request->progress_cb) {
+    if (request->progress_cb && ever_presented_frame) {
         request->progress_cb(request->item_id, (int)current_pos, (int)dur, request->userdata);
     }
 
