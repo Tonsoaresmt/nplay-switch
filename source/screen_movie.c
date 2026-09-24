@@ -185,21 +185,30 @@ void draw_movie(void) {
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int related_n = arr_len(related);
     if (related_n > 0) {
-        text_draw(gRen, "Titulos relacionados", 54, 449, C_TEXT, 0);
+        text_draw(gRen, "Titulos relacionados", 54, 433, C_TEXT, 0);
         char count[48]; snprintf(count, sizeof(count), "%d titulos", related_n);
-        text_right(count, WIN_W - 54, 454, C_MUT, 2);
-        int start = g_related_sel - 2;
+        text_right(count, WIN_W - 54, 439, C_MUT, 2);
+        int start = g_related_sel - 1;
         if (start < 0) start = 0;
-        if (start > related_n - 5) start = related_n > 5 ? related_n - 5 : 0;
-        for (int i = start; i < related_n && i < start + 5; i++) {
+        if (start > related_n - 3) start = related_n > 3 ? related_n - 3 : 0;
+        for (int i = start; i < related_n && i < start + 3; i++) {
             cJSON *item = cJSON_GetArrayItem(related, i);
-            int x = 54 + (i - start) * 234;
-            fill_rect(x, 490, 216, 165, g_movie_zone == 1 && i == g_related_sel ?
+            int x = 54 + (i - start) * 390;
+            fill_rect(x, 461, 366, 198, g_movie_zone == 1 && i == g_related_sel ?
                       (SDL_Color){38, 34, 61, 255} : C_CARD);
-            if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 4, 486, 224, 173);
+            if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 4, 457, 374, 206);
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
-            if (cover) { SDL_Rect rr = {x, 490, 216, 124}; ui_contain(cover, &rr); }
-            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x + 8, 624, C_TEXT, 2, 200);
+            if (cover) { SDL_Rect rr = {x + 9, 468, 124, 184}; ui_contain(cover, &rr); }
+            char lines[2][PLOT_LINE_CAP] = {{0}};
+            int nlines = wrap_text(jstr(item, "title"), lines, 2, 207);
+            for (int line = 0; line < nlines; line++)
+                text_clip(lines[line], x + 145, 480 + line * 27, C_TEXT, 0, 207);
+            int item_year = jint(item, "year");
+            if (item_year > 0) {
+                char year_label[16]; snprintf(year_label, sizeof(year_label), "%d", item_year);
+                text_draw(gRen, year_label, x + 145, 558, C_MUT, 2);
+            }
+            text_draw(gRen, "A  Abrir", x + 145, 618, C_ACC2, 2);
         }
     }
     ui_footer(g_movie_zone == 1 ?
@@ -261,4 +270,21 @@ void movie_touch_action(int favorite) {
     g_movie_zone = 0;
     g_movie_sel = favorite ? 1 : 0;
     input_movie(JOY_A);
+}
+
+void movie_touch_related(int x, int y) {
+    if (!g_movie || y < 461 || y >= 659 || x < 54) return;
+    cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
+    int count = arr_len(related);
+    int start = g_related_sel - 1;
+    if (start < 0) start = 0;
+    if (start > count - 3) start = count > 3 ? count - 3 : 0;
+    int col = (x - 54) / 390;
+    if (col < 0 || col >= 3 || (x - 54) % 390 >= 366) return;
+    int index = start + col;
+    if (index < count) {
+        g_related_sel = index;
+        g_movie_zone = 1;
+        input_movie(JOY_A);
+    }
 }

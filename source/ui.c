@@ -1,5 +1,7 @@
 #include "ui.h"
 #include "text.h"
+#include "pipoca_atlas_bin.h"
+#include <SDL_image.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -12,6 +14,44 @@ const SDL_Color C_ACC  = { 155, 124, 255, 255 };
 const SDL_Color C_ACC2 = { 101, 168, 255, 255 };
 const SDL_Color C_ROSE = { 239, 120, 199, 255 };
 const SDL_Color C_GREEN= { 52, 211, 153, 255 };
+
+static SDL_Texture *g_popcorn_atlas = NULL;
+#define POPCORN_FRAME_SIZE 160
+#define POPCORN_COLUMNS 8
+#define POPCORN_FRAMES 29
+
+void ui_popcorn_draw(SDL_Renderer *ren, int center_x, int y, int size) {
+    if (!ren) return;
+    if (!g_popcorn_atlas) {
+        SDL_RWops *bytes = SDL_RWFromConstMem(pipoca_atlas_bin,
+                                              (int)pipoca_atlas_bin_size);
+        if (bytes) {
+            SDL_Surface *surface = IMG_Load_RW(bytes, 1);
+            if (surface) {
+                g_popcorn_atlas = SDL_CreateTextureFromSurface(ren, surface);
+                SDL_FreeSurface(surface);
+            }
+        }
+    }
+    if (!g_popcorn_atlas) return;
+    int frame = (int)((SDL_GetTicks() / 65) % POPCORN_FRAMES);
+    SDL_Rect src = {(frame % POPCORN_COLUMNS) * POPCORN_FRAME_SIZE,
+                    (frame / POPCORN_COLUMNS) * POPCORN_FRAME_SIZE,
+                    POPCORN_FRAME_SIZE, POPCORN_FRAME_SIZE};
+    SDL_Rect dst = {center_x - size / 2, y, size, size};
+    SDL_RenderCopy(ren, g_popcorn_atlas, &src, &dst);
+}
+
+void ui_popcorn_release(void) {
+    if (g_popcorn_atlas) SDL_DestroyTexture(g_popcorn_atlas);
+    g_popcorn_atlas = NULL;
+}
+
+void ui_loading_state(const char *title, const char *detail) {
+    ui_popcorn_draw(gRen, WIN_W / 2, 197, 176);
+    text_center_at(title ? title : "Carregando", 200, WIN_W - 400, 405, C_TEXT, 1);
+    text_center_at(detail ? detail : "", 220, WIN_W - 440, 455, C_MUT, 0);
+}
 
 void fill_rect(int x, int y, int w, int h, SDL_Color c) {
     if (!gRen) return;
@@ -85,7 +125,7 @@ void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw) {
     SDL_Rect previous;
     if (had_clip) {
         SDL_RenderGetClipRect(gRen, &previous);
-        SDL_IntersectRect(&clip, &previous, &clip);
+        if (!SDL_IntersectRect(&clip, &previous, &clip)) return;
     }
     SDL_RenderSetClipRect(gRen, &clip);
     text_draw(gRen, s, x, y, c, big);
@@ -108,7 +148,7 @@ int text_center_at(const char *s, int x, int area_w, int y, SDL_Color c, int big
         SDL_Rect previous;
         if (had_clip) {
             SDL_RenderGetClipRect(gRen, &previous);
-            SDL_IntersectRect(&clip, &previous, &clip);
+            if (!SDL_IntersectRect(&clip, &previous, &clip)) return w;
         }
         SDL_RenderSetClipRect(gRen, &clip);
         SDL_Rect d = { x + (area_w - w) / 2, y, w, h };

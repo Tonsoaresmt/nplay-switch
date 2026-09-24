@@ -1,17 +1,21 @@
-# Nplay Switch 0.12.3: interface e reprodução no console
+# Nplay Switch 0.12.4: interface e reprodução no console
 
 O teste da 0.12.1 reproduziu pausas a cada poucos segundos em vários títulos,
 apesar de o diagnóstico mostrar `buffer 0`: esse contador não media o tempo
 bloqueado dentro de `av_read_frame`. A 0.12.2 reutiliza conexões HLS ociosas e
 mostra a duração dessas esperas. A 0.12.3 também corrige a apresentação das
 capas e acrescenta Sagas, sinopse do episódio selecionado e navegação por toque.
-Atualize pelo menu do Nplay e confirme a versão.
+A 0.12.4 limita playlists HLS às faixas escolhidas, prepara o próximo segmento
+R2 em paralelo, corrige a sobreposição do banner e melhora capas relacionadas e
+as telas de carregamento. Atualize pelo menu do Nplay e confirme a versão.
 
-1. Em Configurações, confirme **Versão 0.12.3**. Compare a Home com a TV:
+1. Em Configurações, confirme **Versão 0.12.4**. Compare a Home com a TV:
    cabeçalho de 95 px, logo nova, destaque panorâmico, cinco capas verticais
    por fileira e contorno branco no foco. Confira se a arte inteira e os títulos
    da capa estão visíveis. Navegue com D-pad e analógico; segure a direção
    por alguns segundos em uma fileira longa.
+   Desça até Continuar assistindo e suba de volta: a sinopse do banner deve
+   ficar abaixo da logo e das abas.
 2. Abra um filme e uma série. O filme deve ter capa à esquerda e informações
    em painel horizontal. A série deve mostrar chips de temporada e cinco
    episódios com miniaturas. Teste esquerda/direita para mudar episódio e L/R

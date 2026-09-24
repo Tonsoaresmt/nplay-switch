@@ -587,9 +587,10 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPIDLE, 120L);
     curl_easy_setopt(c->easy, CURLOPT_TCP_KEEPINTVL, 60L);
     curl_easy_setopt(c->easy, CURLOPT_CONNECTTIMEOUT, 20L);
-    // Nao use timeout total: um servidor valido pode levar mais de 60 s para
-    // um episodio longo. Detecte apenas conexao realmente parada.
-    curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, 0L);
+    // Metadados HLS sao transferencias pequenas e sincronas na abertura: um
+    // servidor que nunca responde nao pode manter "Preparando video" sem fim.
+    // Segmentos longos continuam sem timeout total e usam deteccao de queda.
+    curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, c->synchronous ? 20L : 0L);
     curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, c->streaming ? wr_ring : wr_tmp);

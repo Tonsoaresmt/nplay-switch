@@ -58,6 +58,9 @@ void ui_badge(const char *label, int x, int y, SDL_Color color);
 int ui_card_badge(const char *label, int x, int y, SDL_Color color);
 void ui_empty_state(const char *title, const char *detail);
 void ui_progress(int x, int y, int w, int value, SDL_Color color);
+void ui_popcorn_draw(SDL_Renderer *ren, int center_x, int y, int size);
+void ui_popcorn_release(void);
+void ui_loading_state(const char *title, const char *detail);
 
 // Utilitarios visuais
 void toast(const char *msg);

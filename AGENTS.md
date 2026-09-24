@@ -4,6 +4,20 @@
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.
 
+## Rodada 0.12.4 (24/09/2026)
+
+- Captura real da 0.12.3: 17 pausas, 24 leituras HLS lentas, maxima de 5295 ms,
+  so tres quadros descartados. A hipotese principal e latencia de rede/segmento,
+  nao falta de decodificacao. Falta comparar com o trace detalhado no Switch.
+- HLS passa a descartar playlists de audio/legenda nao selecionadas; trocar faixa
+  atualiza o descarte. Segmentos R2 usam pre-abertura do proximo segmento do
+  FFmpeg, com buffers libcurl independentes e limite de memoria existente.
+- O banner nao cobre mais o cabecalho ao rolar; relacionados usam cards maiores;
+  catalogo refaz a aba ativa ao sair do player; preparacao usa arte da pipoquinha.
+- Contrato site/Switch e compilacao ARM64 limpa passaram. A mudanca de fluidez,
+  memoria durante longas sessoes, troca de faixas e desenho ainda precisa de
+  confirmacao no hardware, conforme `docs/SWITCH_0_12_HARDWARE_CHECK.md`.
+
 ## Rodada visual 0.12.0 (24/09/2026)
 
 - A 0.11.0 publicada manteve o layout antigo. A 0.12.0 em desenvolvimento porta

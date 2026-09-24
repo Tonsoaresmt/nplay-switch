@@ -703,7 +703,10 @@ static void playback_memory_enter(void) {
 
 static void playback_memory_leave(void) {
     cover_resume_after_playback();
-    if (g_screen == SC_MAIN && g_tab <= TAB_SAGAS && !g_land) load_landing(g_tab);
+    // O player descarta as landings para liberar memoria ao HLS. Recarregue a
+    // aba atual assim que ele termina, enquanto o detalhe ainda esta aberto:
+    // esperar o usuario apertar B produzia uma tela vazia de "Carregando".
+    if (g_tab <= TAB_SAGAS && !g_land) load_landing(g_tab);
 }
 
 static void on_player_progress(int item_id, int pos, int dur, void *u) {
@@ -1619,9 +1622,12 @@ static void draw_topbar(void) {
 #define RAILS_TOP 308
 #define RAIL_STEP (30 + RCH + 70)
 static void draw_landing(void) {
-    draw_topbar();
     if (!g_land) {
-        ui_empty_state(g_status[0] ? g_status : "Carregando catalogo", "Verifique a conexao caso esta tela demore para responder.");
+        draw_topbar();
+        if (g_land_thread) ui_loading_state(g_status[0] ? g_status : "Carregando catalogo",
+                                            "Buscando os destaques e as capas da sua conta");
+        else ui_empty_state(g_status[0] ? g_status : "Falha ao carregar catalogo",
+                            "Pressione A para tentar novamente.");
         ui_footer("Y Buscar    L/R Trocar categoria    - Configuracoes");
         return;
     }
@@ -1707,6 +1713,9 @@ static void draw_landing(void) {
         ui_badge(selected ? "A  BUSCAR" : "Y  BUSCAR", WIN_W - 190, search_y + 42, selected ? C_ACC : C_ACC2);
     }
     SDL_RenderSetClipRect(gRen, NULL);
+    // text_clip substitui temporariamente o clip da landing; o cabeçalho
+    // precisa ser desenhado por ultimo para cobrir qualquer glifo acima de y=95.
+    draw_topbar();
     ui_footer(g_railSel == g_railsN ?
         "A ou Y Abrir busca    Cima Voltar ao catalogo    L/R Trocar categoria" :
         "A Abrir    X Minha lista    Y Buscar    L/R Trocar categoria");
@@ -1824,7 +1833,10 @@ static cJSON *saga_variant_at(cJSON *group, int index) {
 static void draw_sagas(void) {
     draw_topbar();
     if (!g_land) {
-        ui_empty_state(g_status[0] ? g_status : "Carregando sagas", "Verifique a conexao caso esta tela demore.");
+        if (g_land_thread) ui_loading_state(g_status[0] ? g_status : "Carregando sagas",
+                                            "Buscando as colecoes da sua conta");
+        else ui_empty_state(g_status[0] ? g_status : "Falha ao carregar sagas",
+                            "Pressione A para tentar novamente.");
         ui_footer("L/R Trocar categoria    B Voltar");
         return;
     }
@@ -3274,6 +3286,7 @@ static void handle_button(int b) {
         else if (b == JOY_PLUS) g_running = 0;
         else if (b == JOY_MINUS) { g_setSel = 0; load_settings_status(); g_screen = SC_CONFIG; }
         else if (b == JOY_Y) do_search();
+        else if (b == JOY_A && g_tab <= TAB_SAGAS && !g_land && !g_land_thread) load_landing(g_tab);
         else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
         else if (g_tab == TAB_SAGAS) input_sagas(b);
         else input_landing(b);
@@ -3441,6 +3454,7 @@ static void handle_touch_tap(int x, int y) {
         if (x >= 280 && x < 452) movie_touch_action(0);
         else if (x >= 468 && x < 698) movie_touch_action(1);
     }
+    if (g_screen == SC_MOVIE && y >= 461 && y < 659) movie_touch_related(x, y);
 }
 static void handle_touch_swipe(int x, int y, int dx, int dy) {
     if (g_screen == SC_SEARCH && y >= 205) {
@@ -3646,6 +3660,7 @@ int main(int argc, char **argv) {
     if (g_saga_detail) { cJSON_Delete(g_saga_detail); g_saga_detail = NULL; }
     g_land = NULL;
     if (g_search) cJSON_Delete(g_search);
+    ui_popcorn_release();
     if (g_profiles) cJSON_Delete(g_profiles);
     if (g_dl) cJSON_Delete(g_dl);
     if (g_history) cJSON_Delete(g_history);

@@ -23,6 +23,7 @@
 #include "text.h"
 #include "store.h"
 #include "diag.h"
+#include "ui.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -127,6 +128,18 @@ static int player_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
     diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
     nplay_curl_avio_close(pb);
     return 0;
+}
+
+static void player_select_hls_streams(AVFormatContext *fmt, int video, int audio,
+                                      int subtitle) {
+    if (!fmt) return;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        enum AVMediaType type = fmt->streams[i]->codecpar->codec_type;
+        if (type == AVMEDIA_TYPE_VIDEO || type == AVMEDIA_TYPE_AUDIO ||
+            type == AVMEDIA_TYPE_SUBTITLE)
+            fmt->streams[i]->discard = ((int)i == video || (int)i == audio ||
+                                        (int)i == subtitle) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+    }
 }
 
 static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
@@ -378,15 +391,16 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
 }
 
 static void draw_center_state(SDL_Renderer *ren, const char *state, const char *detail, int accent) {
-    const int w = 410, h = 108, x = (PWIN_W - w) / 2, y = (PWIN_H - h) / 2 - 15;
+    ui_popcorn_draw(ren, PWIN_W / 2, 155, 190);
+    const int w = 620, h = 125, x = (PWIN_W - w) / 2, y = 375;
     pfill(ren, x, y, w, h, PC_DARK, 225);
     pfill(ren, x, y, 6, h, accent ? PC_ACC : PC_ACC2, 255);
     int sw = 0, sh = 0;
     SDL_Texture *st = text_cached(ren, state, PC_TEXT, 1, &sw, &sh);
-    if (st) { SDL_Rect d = { x + (w - sw) / 2, y + 18, sw, sh }; SDL_RenderCopy(ren, st, NULL, &d); }
+    if (st) { SDL_Rect d = { x + (w - sw) / 2, y + 19, sw, sh }; SDL_RenderCopy(ren, st, NULL, &d); }
     int dw = 0, dh = 0;
     SDL_Texture *dt = text_cached(ren, detail, PC_MUT, 0, &dw, &dh);
-    if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 65, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
+    if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 73, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
 }
 
 static int chapter_at(AVFormatContext *fmt, double target, double timeline_origin,
@@ -694,7 +708,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             // Cada recurso e um AVIO libcurl proprio. A reutilizacao interna do
             // protocolo HTTP do FFmpeg nao e compativel com um io_open customizado.
             av_dict_set(&open_opts, "http_persistent", "0", 0);
-            av_dict_set(&open_opts, "http_multiple", "0", 0);
+            // O demuxer HLS do FFmpeg abre o proximo segmento antes de consumir
+            // o atual quando http_multiple=1. Nosso io_open cria um AVIO/libcurl
+            // independente para ele; nao reutiliza o AVIO atual nem o protocolo
+            // HTTP nativo. Limite o prefetch ao R2, cujos segmentos sao imutaveis.
+            av_dict_set(&open_opts, "http_multiple",
+                        req->delivery == DELIVERY_R2 ? "1" : "0", 0);
             av_dict_set(&open_opts, "seg_max_retry", "3", 0);
         } else {
             av_dict_set(&open_opts, "seekable", "1", 0);
@@ -719,22 +738,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_RenderPresent(ren);
     open_watch.deadline_us = av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL);
     // Na abertura HLS, priorize video e um audio. Legendas e audios alternativos
-    // continuam enumerados/restaurados depois, mas nao podem segurar o primeiro
-    // quadro enquanto FFmpeg tenta sondar todas as 5-6 playlists do R2.
-    enum AVDiscard saved_discard[64];
-    unsigned saved_count = fmt->nb_streams < 64 ? fmt->nb_streams : 64;
-    int probe_audio = -1;
+    // continuam enumerados; suas playlists so sao lidas quando selecionadas.
+    int probe_audio = -1, probe_video = -1;
     if (native_hls) {
-        for (unsigned i = 0; i < saved_count; i++) {
-            saved_discard[i] = fmt->streams[i]->discard;
+        for (unsigned i = 0; i < fmt->nb_streams; i++) {
             if (probe_audio < 0 && fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
                 probe_audio = (int)i;
+            if (probe_video < 0 && fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+                probe_video = (int)i;
         }
-        for (unsigned i = 0; i < saved_count; i++) {
-            enum AVMediaType type = fmt->streams[i]->codecpar->codec_type;
-            if (type == AVMEDIA_TYPE_SUBTITLE || (type == AVMEDIA_TYPE_AUDIO && (int)i != probe_audio))
-                fmt->streams[i]->discard = AVDISCARD_ALL;
-        }
+        // O primeiro pacote do demuxer HLS aplica discard as playlists. Nao
+        // sondar variantes que nao participam do primeiro quadro.
+        player_select_hls_streams(fmt, probe_video, probe_audio, -1);
     }
     int headers_ready = 0;
     if (native_hls) {
@@ -754,9 +769,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     diag_player_event("format", headers_ready ? "probe-skip" : "probe-begin",
                       "streams=%u", fmt->nb_streams);
     rc = headers_ready ? 0 : avformat_find_stream_info(fmt, NULL);
-    if (native_hls) {
-        for (unsigned i = 0; i < saved_count; i++) fmt->streams[i]->discard = saved_discard[i];
-    }
     open_watch.deadline_us = 0;
     if (rc < 0) {
         diag_player_event("format", "probe-fail", "rc=%d streams=%u", rc, fmt->nb_streams);
@@ -838,6 +850,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     AVCodecContext *sctx = NULL;
     char sub_text[512] = ""; double sub_end = 0;
     if (scur >= 0 && open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
+    if (native_hls) {
+        player_select_hls_streams(fmt, vidx, aidx, scur >= 0 ? sidxs[scur] : -1);
+        diag_player_event("hls-io", "tracks", "video=%d audio=%d subtitle=%d",
+                          vidx, aidx, scur >= 0 ? sidxs[scur] : -1);
+    }
 
     double dur = (fmt->duration > 0) ? fmt->duration / (double)AV_TIME_BASE : 0;
     double timeline_origin = (fmt->start_time != AV_NOPTS_VALUE)
@@ -979,6 +996,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     PlaybackHeartbeat *hb = heartbeat;
     if (hb) SDL_AtomicSet(&hb->pipeline_ready, 1);
     player_boot_stage("09 reproduzindo");
+    ui_popcorn_release();
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
@@ -1056,6 +1074,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                     snprintf(notice, sizeof(notice), "Saida de audio indisponivel");
                                 } else if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
                                     acur = track_sel; aidx = next_idx;
+                                    if (native_hls)
+                                        player_select_hls_streams(fmt, vidx, aidx,
+                                                                  scur >= 0 ? sidxs[scur] : -1);
                                     atb = fmt->streams[aidx]->time_base;
                                     if (adev) SDL_ClearQueuedAudio(adev);
                                     audio_clock = cur_pos; last_ac = -1;
@@ -1072,6 +1093,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 snprintf(notice, sizeof(notice), "Legenda atual mantida");
                             } else if (open_sub_dec(fmt, next >= 0 ? sidxs[next] : -1, &sctx) == 0) {
                                 scur = next; sub_text[0] = 0; sub_end = 0;
+                                if (native_hls)
+                                    player_select_hls_streams(fmt, vidx, aidx,
+                                                              scur >= 0 ? sidxs[scur] : -1);
                                 if (scur >= 0) {
                                     char lang[48]; format_language(stream_lang(fmt, sidxs[scur]), lang, sizeof(lang));
                                     snprintf(notice, sizeof(notice), "Legenda %d/%d  %s", scur + 1, nsub, lang);
@@ -1690,6 +1714,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     }
 
     diag_player_finish(final_rc);
+    ui_popcorn_release();
 
     return final_rc;
 }
