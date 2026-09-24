@@ -326,7 +326,8 @@ static int producer_stream(void *arg) {
         if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
         if (c->seek_req >= 0) { SDL_UnlockMutex(c->mtx); continue; }
         prod = c->produced_offset;
-        if (got < 0 || (got == 0 && !c->fetch_complete)) {
+        if (got < 0 || (got == 0 && (!c->fetch_complete ||
+            (c->size > 0 && prod < c->size)))) {
             Uint32 now = SDL_GetTicks();
             if (!fail_since) fail_since = now;
             if (got == -2 || now - fail_since >= 120000) {
