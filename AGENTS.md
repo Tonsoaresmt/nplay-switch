@@ -936,5 +936,16 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - O limite vertical das fileiras inclui os 40 px de titulo/foco abaixo da capa.
   Favoritos sao carregados por `CatalogFetch` apos selecionar perfil, com
   cancelamento no fechamento; nao voltar a chamar `api_get` na thread SDL.
-- Antes de publicar a 0.11.x como latest, executar no console o roteiro em
-  `docs/SWITCH_0_11_HARDWARE_CHECK.md`.
+- A 0.11.0 foi preparada para atualizar a partir do aplicativo antigo a pedido
+  do usuario; executar no console o roteiro em
+  `docs/SWITCH_0_11_HARDWARE_CHECK.md` e corrigir falhas observadas.
+
+## Identidade e atualizacao 0.11.0 em 23/09/2026
+
+- `icon.jpg` foi derivado do icone 512x512 vigente no site Nplay, convertido
+  para JPEG 256x256 exigido pelo hbmenu. O JPEG foi encontrado byte a byte no
+  NRO gerado.
+- O asset publico v0.10.1 foi baixado e seu SHA-256 conferido com o digest da
+  release. Ele contem `/releases/latest`, download `.nro` e busca dos caminhos
+  Nplay/Meruem. A versao instalada pelo usuario ainda precisa ser identificada
+  e a atualizacao confirmada no console; o build local nao prova essa etapa.

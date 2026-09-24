@@ -7,7 +7,7 @@ offline e os controles próprios do console.
 
 ## Linha de base
 
-- Release pública: v0.10.1, com `Nplay.nro` no GitHub Releases.
+- Base da atualização automática: v0.10.1, com `Nplay.nro` no GitHub Releases.
 - O catálogo usa cinco landings, cache de até 160 texturas e três workers de
   capas. A abertura do player libera landings e capas por causa da pressão de
   memória observada no hardware. Não reintroduzir prefetch das cinco abas.
@@ -80,10 +80,13 @@ offline e os controles próprios do console.
    indisponível no Switch sem iniciar um player vazio. Validar áudio, legenda,
    seek, retomada, expiração da URL, failover, suspensão e retorno. O Fastify
    não passa a retransmitir vídeo.
-5. **Distribuição.** Versão nova exige GitHub Release com `Nplay.nro`; push de
-   código sozinho não atualiza o console. Verificar tamanho, SHA-256 e cabeçalho
-   antes da troca, preservar caminho instalado e testar atualização 0.10.1 →
-   0.11.x no Switch real antes de publicar como `latest`.
+5. **Distribuição.** A 0.11.0 deve ser publicada como GitHub Release com
+   `Nplay.nro`; push de código sozinho não atualiza o console. Verificar tamanho,
+   SHA-256 e cabeçalho antes da troca e preservar o caminho instalado. A release
+   0.10.1 contém o atualizador que consulta `/releases/latest`, baixa o `.nro`
+   e procura cópias Nplay/Meruem no SD. A transição precisa de confirmação no
+   Switch real; versões anteriores ao conserto do instalador podem requerer
+   bootstrap manual.
 
 ## Critérios antes da release pública
 
