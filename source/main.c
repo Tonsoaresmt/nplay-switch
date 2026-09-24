@@ -2955,20 +2955,31 @@ static void draw_player_diagnostics(void) {
                  stats.width, stats.height, stats.decoded_frames, stats.dropped_frames,
                  stats.hardware_decode ? "sim" : "nao");
         text_clip(summary, 252, 132, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0, 776);
-        snprintf(summary, sizeof(summary), "Pausas %d  |  leituras lentas %d (max %u ms)  |  buffer %d  |  erro %d",
-                 stats.present_gaps, stats.slow_reads, stats.worst_read_ms,
-                 stats.buffering_events, stats.playback_error);
+        if (stats.read_gaps + stats.sync_gaps + stats.other_gaps == stats.present_gaps)
+            snprintf(summary, sizeof(summary), "Pausas %d (rede/leitura %d, sincronia %d, outros %d)  |  pior %u ms",
+                     stats.present_gaps, stats.read_gaps, stats.sync_gaps,
+                     stats.other_gaps, stats.worst_present_ms);
+        else
+            snprintf(summary, sizeof(summary), "Pausas %d  |  pior intervalo %u ms",
+                     stats.present_gaps, stats.worst_present_ms);
         text_clip(summary, 252, 157, C_ACC2, 0, 776);
+        unsigned audio_queue_ms = (unsigned)((unsigned long long)stats.max_audio_bytes * 1000u / 192000u);
+        snprintf(summary, sizeof(summary), "Leituras >=250 ms: %d (pior %u ms)  |  audio em fila: %u ms  |  erro %d",
+                 stats.slow_reads, stats.worst_read_ms, audio_queue_ms, stats.playback_error);
+        text_clip(summary, 252, 184, C_ACC2, 0, 776);
+        snprintf(summary, sizeof(summary), "Inicio: %u ms (abrir %u, faixas %u)",
+                 stats.first_present_ms, stats.open_ms, stats.probe_ms);
+        text_clip(summary, 252, 209, C_ACC2, 0, 776);
     } else text_draw(gRen, "O trace abaixo sobrevive mesmo quando o aplicativo fecha.", 252, 132, C_TEXT, 0);
     if (has_boot_stage) {
         snprintf(summary, sizeof(summary), "Ultima etapa simples: %s", boot_stage);
-        text_clip(summary, 252, 184, C_ACC, 0, 776);
+        text_clip(summary, 252, 236, C_ACC, 0, 776);
     }
 
-    text_draw(gRen, "ULTIMA TENTATIVA  |  EVENTOS RECENTES", 252, 204, C_MUT, 0);
-    if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 238, C_TEXT, 0);
+    text_draw(gRen, "ULTIMA TENTATIVA  |  EVENTOS RECENTES", 252, 262, C_MUT, 0);
+    if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 288, C_TEXT, 0);
     for (int i = 0; i < g_diag_player_count; i++)
-        text_clip(g_diag_player_lines[i], 252, 238 + i * 32,
+        text_clip(g_diag_player_lines[i], 252, 288 + i * 24,
                   i == g_diag_player_count - 1 ? C_ACC : C_TEXT, 0, 776);
 
     text_draw(gRen, "ULTIMAS REQUISICOES (codigo / tempo / tamanho)", 252, 446, C_MUT, 0);

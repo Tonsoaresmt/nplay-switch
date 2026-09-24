@@ -1,4 +1,4 @@
-# Nplay Switch 0.12.5: interface e reprodução no console
+# Nplay Switch 0.12.6: interface e reprodução no console
 
 O teste da 0.12.1 reproduziu pausas a cada poucos segundos em vários títulos,
 apesar de o diagnóstico mostrar `buffer 0`: esse contador não media o tempo
@@ -7,11 +7,12 @@ mostra a duração dessas esperas. A 0.12.3 também corrige a apresentação das
 capas e acrescenta Sagas, sinopse do episódio selecionado e navegação por toque.
 A 0.12.4 limita playlists HLS às faixas escolhidas, prepara o próximo segmento
 R2 em paralelo, corrige a sobreposição do banner e melhora capas relacionadas e
-as telas de carregamento. A 0.12.5 encerra tentativas HLS que não entregam o
-primeiro quadro e mostra eventos de rede legíveis no diagnóstico. Atualize pelo
-menu do Nplay e confirme a versão.
+as telas de carregamento. A 0.12.5 limita tentativas HLS sem primeiro quadro.
+A 0.12.6 permite cancelar com B durante leituras bloqueadas, reutiliza conexões
+das playlists e separa os intervalos sem quadro por leitura, sincronia e outros.
+Atualize pelo menu do Nplay e confirme a versão.
 
-1. Em Configurações, confirme **Versão 0.12.5**. Compare a Home com a TV:
+1. Em Configurações, confirme **Versão 0.12.6**. Compare a Home com a TV:
    cabeçalho de 95 px, logo nova, destaque panorâmico, cinco capas verticais
    por fileira e contorno branco no foco. Confira se a arte inteira e os títulos
    da capa estão visíveis. Navegue com D-pad e analógico; segure a direção
@@ -36,13 +37,16 @@ menu do Nplay e confirme a versão.
    uma pausa. Teste também Continuar assistindo, pausa, busca para o meio do
    vídeo, áudio/legenda e retorno ao catálogo.
    Depois de sair, em Configurações > X, anote `descartados`, `HW`, `Pausas`,
-   `leituras lentas` e `max ms`. `Pausas` conta intervalos de pelo menos 250 ms
-   entre quadros; `leituras lentas` separa espera de HLS de queda do decoder.
+   `leituras lentas`, `pior ms` e `Início`. `Pausas` conta intervalos de pelo
+   menos 250 ms entre quadros; a divisão rede/leitura, sincronia e outros
+   indica o que ocupou a maior parte de cada intervalo.
 6. Se surgir o HTTP
    404, abra **Configurações > X** e anote a linha de rede com método e caminho
    (GET ou POST, `/api/...`) e o ID do título/episódio. Não copie token, senha
    ou URL assinada. Essa linha distingue catálogo, autorização e mídia.
-7. Depois de uma pausa, copie as últimas linhas de
+7. Em X-Men '97, tente dois episódios que ficavam em “Preparando vídeo”.
+   Se demorar, pressione B durante a abertura: ela deve ser cancelada e o
+   catálogo deve voltar. Depois de uma pausa, copie as últimas linhas de
    `sdmc:/switch/.nplay-player-trace.log`. Eventos `avio close` anormais ou
    amostrados registram requisições, maior tempo até o primeiro byte e
    esvaziamentos do buffer;

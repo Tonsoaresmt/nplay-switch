@@ -482,15 +482,22 @@ void store_save_player_stats(int width, int height, int decoded_frames,
                              unsigned max_audio_bytes, int playback_error,
                              int hardware_decode, int slow_reads,
                              unsigned worst_read_ms, int present_gaps,
-                             unsigned worst_present_ms) {
+                             unsigned worst_present_ms, int read_gaps,
+                             int sync_gaps, int other_gaps,
+                             unsigned open_ms, unsigned probe_ms,
+                             unsigned first_present_ms) {
     FILE *f = fopen(PLAYER_STATS_F, "wb");
     if (!f) return;
     fprintf(f, "resolution=%dx%d\nhardware_decode=%d\ndecoded_frames=%d\ndropped_frames=%d\n"
                "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n"
-               "slow_reads=%d\nworst_read_ms=%u\npresent_gaps=%d\nworst_present_ms=%u\n",
+               "slow_reads=%d\nworst_read_ms=%u\npresent_gaps=%d\nworst_present_ms=%u\n"
+               "read_gaps=%d\nsync_gaps=%d\nother_gaps=%d\n"
+               "open_ms=%u\nprobe_ms=%u\nfirst_present_ms=%u\n",
             width, height, hardware_decode, decoded_frames, dropped_frames,
             buffering_events, max_audio_bytes, playback_error,
-            slow_reads, worst_read_ms, present_gaps, worst_present_ms);
+            slow_reads, worst_read_ms, present_gaps, worst_present_ms,
+            read_gaps, sync_gaps, other_gaps,
+            open_ms, probe_ms, first_present_ms);
     fclose(f);
 }
 
@@ -512,6 +519,12 @@ int store_load_player_stats(struct player_stats *out) {
         else if (sscanf(line, "worst_read_ms=%u", &out->worst_read_ms) == 1) { }
         else if (sscanf(line, "present_gaps=%d", &out->present_gaps) == 1) { }
         else if (sscanf(line, "worst_present_ms=%u", &out->worst_present_ms) == 1) { }
+        else if (sscanf(line, "read_gaps=%d", &out->read_gaps) == 1) { }
+        else if (sscanf(line, "sync_gaps=%d", &out->sync_gaps) == 1) { }
+        else if (sscanf(line, "other_gaps=%d", &out->other_gaps) == 1) { }
+        else if (sscanf(line, "open_ms=%u", &out->open_ms) == 1) { }
+        else if (sscanf(line, "probe_ms=%u", &out->probe_ms) == 1) { }
+        else if (sscanf(line, "first_present_ms=%u", &out->first_present_ms) == 1) { }
         else if (sscanf(line, "error=%d", &out->playback_error) == 1) found_result = 1;
     }
     fclose(f);

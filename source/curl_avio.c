@@ -28,6 +28,17 @@ static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
 static SDL_atomic_t g_resource_sequence = {0};
 static SDL_atomic_t g_startup_deadline = {0};
+static int (*g_abort_check)(void *) = NULL;
+static void *g_abort_userdata = NULL;
+
+void nplay_curl_avio_set_abort_check(int (*check)(void *), void *userdata) {
+    g_abort_check = check;
+    g_abort_userdata = userdata;
+}
+
+static int abort_requested(void) {
+    return g_abort_check && g_abort_check(g_abort_userdata);
+}
 
 void nplay_curl_avio_set_startup_window(unsigned timeout_ms) {
     SDL_AtomicSet(&g_startup_deadline,
@@ -98,7 +109,7 @@ typedef struct {
     unsigned char *tmp; size_t tmp_len;
     int write_overflow;
     int accounted, reserved_kb;
-    int static_data, synchronous, streaming;
+    int static_data, synchronous, streaming, pooled;
     size_t static_pos, static_len;
     int resource_id, first_http_logged;
     Uint32 first_read_tick;
@@ -186,7 +197,8 @@ static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
 static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_t e) {
     (void)a; (void)b; (void)d; (void)e;
     CurlIO *c = (CurlIO *)ud;
-    return (!c->running || c->seek_req >= 0 || startup_deadline_expired()) ? 1 : 0;
+    return (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
+            (c->synchronous && abort_requested())) ? 1 : 0;
 }
 
 static int fetch_block(CurlIO *c, int64_t start) {
@@ -209,15 +221,18 @@ static int fetch_block(CurlIO *c, int64_t start) {
     CURLcode r = curl_easy_perform(c->easy);
     Uint32 fetch_ms = SDL_GetTicks() - fetch_started;
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    long new_connections = 0;
+    curl_easy_getinfo(c->easy, CURLINFO_NUM_CONNECTS, &new_connections);
     c->fetch_count++;
     c->downloaded_bytes += c->tmp_len;
     if (fetch_ms > c->worst_fetch_ms) c->worst_fetch_ms = fetch_ms;
     if (fetch_ms >= 1000) c->slow_fetch_count++;
     if (!c->first_http_logged || r != CURLE_OK || code < 200 || code >= 400 || c->write_overflow) {
         diag_player_event("avio", "http",
-                          "id=%d %s code=%ld curl=%d off=%lld got=%u ov=%d",
+                          "id=%d %s code=%ld curl=%d conn=%ld ms=%u off=%lld got=%u ov=%d",
                           c->resource_id, c->profile, code, (int)r,
-                          (long long)start, (unsigned)c->tmp_len, c->write_overflow);
+                          new_connections, fetch_ms, (long long)start,
+                          (unsigned)c->tmp_len, c->write_overflow);
         c->first_http_logged = 1;
     }
     if (c->range_total > 0) c->size = c->range_total;
@@ -256,7 +271,7 @@ static void free_cio(CurlIO *c) {
                           c->resource_id, c->profile, c->fetch_count,
                           c->worst_first_byte_ms, c->empty_waits,
                           c->downloaded_bytes, SDL_AtomicGet(&g_reserved_kb));
-    if (c->streaming) hls_easy_return(c->easy);
+    if (c->pooled) hls_easy_return(c->easy);
     else if (c->easy) curl_easy_cleanup(c->easy);
     if (c->mtx) SDL_DestroyMutex(c->mtx);
     if (c->c_data) SDL_DestroyCond(c->c_data);
@@ -491,11 +506,21 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
     // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
     // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
     // poder desenhar o estado CARREGANDO e continuar recebendo comandos.
-    int waits = c->delivered ? 1 : 67; // ate ~20 s apenas no primeiro acesso
+    int waits = c->delivered ? 3 : 200; // ate 300 ms; 20 s no primeiro acesso
     while (c->count == 0 && !c->eof && !c->err && c->running && waits-- > 0 &&
            !startup_deadline_expired() &&
-           (c->delivered || SDL_GetTicks() - c->first_read_tick < 20000u))
-        SDL_CondWaitTimeout(c->c_data, c->mtx, 300);
+           (c->delivered || SDL_GetTicks() - c->first_read_tick < 20000u)) {
+        SDL_CondWaitTimeout(c->c_data, c->mtx, 100);
+        // FFmpeg nao consulta interrupt_callback em todas as leituras AVIO.
+        // A checagem corre na thread do player para B continuar responsivo.
+        SDL_UnlockMutex(c->mtx);
+        int cancelled = abort_requested();
+        SDL_LockMutex(c->mtx);
+        if (cancelled) {
+            SDL_UnlockMutex(c->mtx);
+            return AVERROR_EXIT;
+        }
+    }
     if (c->count == 0) {
         if (startup_deadline_expired() ||
             (!c->delivered && SDL_GetTicks() - c->first_read_tick >= 20000u)) {
@@ -599,12 +624,13 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->block_size = block_size;
     c->synchronous = synchronous;
     c->streaming = profile && !strcmp(profile, "media");
+    c->pooled = profile && (!strcmp(profile, "media") || !strcmp(profile, "meta"));
     c->ring_cap = synchronous ? 0 : ring_cap;
     c->tmp_cap = synchronous ? HLS_META_INITIAL : c->streaming ? 0 : block_size;
     c->tmp_limit = synchronous ? HLS_META_MAX : c->streaming ? 0 : block_size;
     c->ring = synchronous ? NULL : (unsigned char *)malloc(c->ring_cap);
     c->tmp  = c->tmp_cap ? (unsigned char *)malloc(c->tmp_cap) : NULL;
-    c->easy = c->streaming ? hls_easy_take() : curl_easy_init();
+    c->easy = c->pooled ? hls_easy_take() : curl_easy_init();
     c->mtx = SDL_CreateMutex();
     c->c_data = SDL_CreateCond();
     c->c_space = SDL_CreateCond();
@@ -639,9 +665,10 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     curl_easy_setopt(c->easy, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(c->easy, CURLOPT_XFERINFOFUNCTION, xfer_cb);
     curl_easy_setopt(c->easy, CURLOPT_XFERINFODATA, c);
-    // Cada rendition HLS tem uma thread/handle de longa duracao. Nao coloque
-    // essas conexoes no CURLSH 7.69 usado por requests curtos da UI; compartilhar
-    // o cache de conexoes entre produtores simultaneos causou crash no hardware.
+    // O pool entrega um handle por vez a cada recurso HLS, inclusive playlists.
+    // Isso permite reutilizar TLS/DNS nas leituras sequenciais de metadados.
+    // Nao use o CURLSH 7.69 da UI: compartilhar conexoes entre produtores
+    // simultaneos causou crash no hardware.
     net_configure_curl_isolated(c->easy);
 
     unsigned char *avio_buf = (unsigned char *)av_malloc((size_t)avio_buffer_size);

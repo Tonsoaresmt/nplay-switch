@@ -4,6 +4,22 @@
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.
 
+## Rodada 0.12.6 (24/09/2026)
+
+- Captura real da 0.12.5: um titulo chegou a reproduzir por cerca de 75 s com
+  oito intervalos >=250 ms entre quadros, seis leituras lentas (max. 543 ms),
+  um quadro descartado e nenhum erro. A causa das pausas ainda nao foi isolada.
+- X-Men '97 permaneceu em "Preparando video" e B nao saiu. O callback HLS agora
+  consulta B/Minus durante transferencias de playlist e esperas do AVIO sem
+  consultar SDL a cada leitura que ja possui bytes. O cancelamento limpa o
+  evento de botao pendente ao voltar para o catalogo.
+- O pool de handles libcurl passou a atender playlists HLS sequenciais alem dos
+  segmentos. A tela de diagnostico persiste tempo de abertura, probe e primeiro
+  quadro, e divide pausas por leitura, sincronizacao e outro trabalho.
+- Build/contrato local passaram; falta validar no Switch real dois episodios de
+  X-Men '97, cancelamento com B e fluidez por pelo menos dez minutos. Se o
+  preparo persistir, usar Configuracoes > X apos reiniciar sem tocar outro video.
+
 ## Rodada 0.12.5 (24/09/2026)
 
 - Relato no hardware 0.12.4: varios episodios de X-Men '97 permanecem na tela

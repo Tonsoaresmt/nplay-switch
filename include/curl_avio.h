@@ -22,6 +22,10 @@ AVIOContext *nplay_curl_avio_open_hls(const char *url);
 // Passe 0 quando o primeiro quadro aparecer ou a tentativa terminar.
 void nplay_curl_avio_set_startup_window(unsigned timeout_ms);
 
+// O callback roda apenas na thread de abertura/leitura do FFmpeg, nunca na
+// thread produtora do segmento. Permite cancelar uma leitura bloqueante com B.
+void nplay_curl_avio_set_abort_check(int (*check)(void *), void *userdata);
+
 // Diagnostico sem URLs: quantidade de recursos HLS abertos e memoria reservada.
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb);
 
