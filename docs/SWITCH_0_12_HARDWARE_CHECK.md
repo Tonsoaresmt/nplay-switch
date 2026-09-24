@@ -1,4 +1,4 @@
-# Nplay Switch 0.12.6: interface e reprodução no console
+# Nplay Switch 0.12.7: interface e reprodução no console
 
 O teste da 0.12.1 reproduziu pausas a cada poucos segundos em vários títulos,
 apesar de o diagnóstico mostrar `buffer 0`: esse contador não media o tempo
@@ -8,11 +8,12 @@ capas e acrescenta Sagas, sinopse do episódio selecionado e navegação por toq
 A 0.12.4 limita playlists HLS às faixas escolhidas, prepara o próximo segmento
 R2 em paralelo, corrige a sobreposição do banner e melhora capas relacionadas e
 as telas de carregamento. A 0.12.5 limita tentativas HLS sem primeiro quadro.
-A 0.12.6 permite cancelar com B durante leituras bloqueadas, reutiliza conexões
-das playlists e separa os intervalos sem quadro por leitura, sincronia e outros.
+A 0.12.6 mede melhor a abertura e as pausas. A 0.12.7 mantém o cancelamento
+com B até a tentativa realmente encerrar e retira gravações normais na microSD
+do caminho de apresentação dos quadros.
 Atualize pelo menu do Nplay e confirme a versão.
 
-1. Em Configurações, confirme **Versão 0.12.6**. Compare a Home com a TV:
+1. Em Configurações, confirme **Versão 0.12.7**. Compare a Home com a TV:
    cabeçalho de 95 px, logo nova, destaque panorâmico, cinco capas verticais
    por fileira e contorno branco no foco. Confira se a arte inteira e os títulos
    da capa estão visíveis. Navegue com D-pad e analógico; segure a direção
@@ -46,7 +47,7 @@ Atualize pelo menu do Nplay e confirme a versão.
    ou URL assinada. Essa linha distingue catálogo, autorização e mídia.
 7. Em X-Men '97, tente dois episódios que ficavam em “Preparando vídeo”.
    Se demorar, pressione B durante a abertura: ela deve ser cancelada e o
-   catálogo deve voltar. Depois de uma pausa, copie as últimas linhas de
+   catálogo deve voltar sem começar a reproduzir. Depois de uma pausa, copie as últimas linhas de
    `sdmc:/switch/.nplay-player-trace.log`. Eventos `avio close` anormais ou
    amostrados registram requisições, maior tempo até o primeiro byte e
    esvaziamentos do buffer;

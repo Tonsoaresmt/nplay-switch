@@ -4,6 +4,23 @@
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.
 
+## Rodada 0.12.7 (24/09/2026)
+
+- No Switch 0.12.6, o usuario relatou que B durante "Preparando video" fez a
+  reproducao iniciar. O cancelamento era marcado mas o callback voltava a
+  aceitar leituras quando B era solto; FFmpeg podia recuperar a faixa e seguir.
+  O estado cancelado agora e permanente na tentativa e conferido apos root,
+  abertura, probe e cada leitura. O prazo HLS tambem e absoluto ate o primeiro
+  quadro e nao pode ser reiniciado por uma etapa posterior.
+- Captura 0.12.6: 1920x1080, 1185 quadros, dois descartados, quatro pausas
+  atribuidas a leitura (pior 661 ms), tres leituras >=250 ms (pior 631 ms),
+  fila de audio maxima 192 ms e inicio em 8557 ms (6694 ms na abertura).
+- A thread de video fazia varias gravacoes sincronas no cartao SD dentro de
+  `av_read_frame` ao abrir/fechar cada recurso HLS. Depois do primeiro quadro,
+  eventos normais de segmento deixam de ser gravados; erros e esperas >=1 s
+  continuam, e resumos de rede e prefetch sao gravados ao sair. Ainda falta medir no
+  hardware se isso reduz os engasgos e se persistem demoras do R2.
+
 ## Rodada 0.12.6 (24/09/2026)
 
 - Captura real da 0.12.5: um titulo chegou a reproduzir por cerca de 75 s com

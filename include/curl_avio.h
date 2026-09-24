@@ -29,6 +29,15 @@ void nplay_curl_avio_set_abort_check(int (*check)(void *), void *userdata);
 // Diagnostico sem URLs: quantidade de recursos HLS abertos e memoria reservada.
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb);
 
+// Resumo sem URLs das requisicoes de segmentos da tentativa atual. O resumo
+// evita gravar cada resposta bem-sucedida na microSD durante a reproducao.
+typedef struct {
+    int requests, slow_first_bytes, worst_first_ms, new_connections, failures;
+    int first_reads, ready_first_reads, young_first_reads, old_empty_first_reads;
+} NplayCurlAvioQuality;
+void nplay_curl_avio_quality_reset(void);
+void nplay_curl_avio_quality_get(NplayCurlAvioQuality *out);
+
 // Fecha e libera o AVIOContext criado acima (curl + buffers). Chame DEPOIS de
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).
 void nplay_curl_avio_close(AVIOContext *ctx);

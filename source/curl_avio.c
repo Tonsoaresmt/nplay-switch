@@ -28,6 +28,15 @@ static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
 static SDL_atomic_t g_resource_sequence = {0};
 static SDL_atomic_t g_startup_deadline = {0};
+static SDL_atomic_t g_media_requests = {0};
+static SDL_atomic_t g_media_slow_first = {0};
+static SDL_atomic_t g_media_worst_first = {0};
+static SDL_atomic_t g_media_new_connections = {0};
+static SDL_atomic_t g_media_failures = {0};
+static SDL_atomic_t g_media_first_reads = {0};
+static SDL_atomic_t g_media_ready_first = {0};
+static SDL_atomic_t g_media_young_first = {0};
+static SDL_atomic_t g_media_old_empty_first = {0};
 static int (*g_abort_check)(void *) = NULL;
 static void *g_abort_userdata = NULL;
 
@@ -38,6 +47,37 @@ void nplay_curl_avio_set_abort_check(int (*check)(void *), void *userdata) {
 
 static int abort_requested(void) {
     return g_abort_check && g_abort_check(g_abort_userdata);
+}
+
+void nplay_curl_avio_quality_reset(void) {
+    SDL_AtomicSet(&g_media_requests, 0);
+    SDL_AtomicSet(&g_media_slow_first, 0);
+    SDL_AtomicSet(&g_media_worst_first, 0);
+    SDL_AtomicSet(&g_media_new_connections, 0);
+    SDL_AtomicSet(&g_media_failures, 0);
+    SDL_AtomicSet(&g_media_first_reads, 0);
+    SDL_AtomicSet(&g_media_ready_first, 0);
+    SDL_AtomicSet(&g_media_young_first, 0);
+    SDL_AtomicSet(&g_media_old_empty_first, 0);
+}
+
+void nplay_curl_avio_quality_get(NplayCurlAvioQuality *out) {
+    if (!out) return;
+    out->requests = SDL_AtomicGet(&g_media_requests);
+    out->slow_first_bytes = SDL_AtomicGet(&g_media_slow_first);
+    out->worst_first_ms = SDL_AtomicGet(&g_media_worst_first);
+    out->new_connections = SDL_AtomicGet(&g_media_new_connections);
+    out->failures = SDL_AtomicGet(&g_media_failures);
+    out->first_reads = SDL_AtomicGet(&g_media_first_reads);
+    out->ready_first_reads = SDL_AtomicGet(&g_media_ready_first);
+    out->young_first_reads = SDL_AtomicGet(&g_media_young_first);
+    out->old_empty_first_reads = SDL_AtomicGet(&g_media_old_empty_first);
+}
+
+static void atomic_raise_max(SDL_atomic_t *target, int value) {
+    int old = SDL_AtomicGet(target);
+    while (value > old && !SDL_AtomicCAS(target, old, value))
+        old = SDL_AtomicGet(target);
 }
 
 void nplay_curl_avio_set_startup_window(unsigned timeout_ms) {
@@ -113,6 +153,7 @@ typedef struct {
     size_t static_pos, static_len;
     int resource_id, first_http_logged;
     Uint32 first_read_tick;
+    Uint32 opened_tick;
     int first_read_started;
     int startup_timeout_logged;
     unsigned fetch_count, slow_fetch_count, empty_waits;
@@ -262,8 +303,8 @@ static int fetch_block(CurlIO *c, int64_t start) {
 static void free_cio(CurlIO *c) {
     if (!c) return;
     if (c->th) { SDL_LockMutex(c->mtx); c->running = 0; SDL_CondSignal(c->c_space); SDL_CondSignal(c->c_data); SDL_UnlockMutex(c->mtx); SDL_WaitThread(c->th, NULL); }
-    int trace_close = !c->streaming || c->resource_id % 32 == 0 ||
-                      c->empty_waits || c->worst_first_byte_ms >= 1000 ||
+    int trace_close = !c->streaming || c->empty_waits >= 4 ||
+                      c->worst_first_byte_ms >= 1000 ||
                       c->fetch_count > 1;
     if (c->accounted && trace_close)
         diag_player_event("avio", "close",
@@ -350,9 +391,17 @@ static int fetch_stream(CurlIO *c, int64_t start) {
     c->fetch_count++;
     c->downloaded_bytes += c->stream_len;
     if (took > c->worst_fetch_ms) c->worst_fetch_ms = took;
-    if (rc != CURLE_OK || code < 200 || code >= 400 || new_connections > 0 ||
-        c->last_first_byte_ms >= 250 ||
-        (!c->first_http_logged && c->resource_id % 32 == 0)) {
+    SDL_AtomicAdd(&g_media_requests, 1);
+    if (c->last_first_byte_ms >= 250) SDL_AtomicAdd(&g_media_slow_first, 1);
+    atomic_raise_max(&g_media_worst_first, (int)c->last_first_byte_ms);
+    if (new_connections > 0)
+        SDL_AtomicAdd(&g_media_new_connections, (int)new_connections);
+    if (c->running && (rc != CURLE_OK || code < 200 || code >= 400))
+        SDL_AtomicAdd(&g_media_failures, 1);
+    // Sucesso normal nao deve aguardar escrita no cartao SD antes de sinalizar
+    // EOF ao demuxer. Preserve apenas falhas e atrasos realmente longos.
+    if ((c->running && (rc != CURLE_OK || code < 200 || code >= 400)) ||
+        c->last_first_byte_ms >= 1000) {
         diag_player_event("avio", "http", "id=%d media code=%ld curl=%d conn=%ld first=%u ms=%u",
                           c->resource_id, code, (int)rc, new_connections,
                           c->last_first_byte_ms, took);
@@ -502,6 +551,14 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
     if (!c->delivered && !c->first_read_started) {
         c->first_read_tick = SDL_GetTicks();
         c->first_read_started = 1;
+        if (c->streaming) {
+            Uint32 age_ms = c->first_read_tick - c->opened_tick;
+            SDL_AtomicAdd(&g_media_first_reads, 1);
+            if (c->count > 0) SDL_AtomicAdd(&g_media_ready_first, 1);
+            if (age_ms < 250) SDL_AtomicAdd(&g_media_young_first, 1);
+            if (age_ms >= 250 && c->count == 0)
+                SDL_AtomicAdd(&g_media_old_empty_first, 1);
+        }
     }
     // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
     // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
@@ -624,6 +681,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->block_size = block_size;
     c->synchronous = synchronous;
     c->streaming = profile && !strcmp(profile, "media");
+    c->opened_tick = SDL_GetTicks();
     c->pooled = profile && (!strcmp(profile, "media") || !strcmp(profile, "meta"));
     c->ring_cap = synchronous ? 0 : ring_cap;
     c->tmp_cap = synchronous ? HLS_META_INITIAL : c->streaming ? 0 : block_size;
@@ -677,7 +735,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->accounted = 1;
     SDL_AtomicAdd(&g_active_contexts, 1);
     SDL_AtomicAdd(&g_reserved_kb, c->reserved_kb);
-    if (!c->streaming || c->resource_id % 32 == 0)
+    if (!c->streaming)
         diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
                           c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
                           SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));

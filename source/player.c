@@ -49,6 +49,10 @@
 #define SEEK_HOLD_MS       550
 
 static char g_player_last_error[160] = "";
+// Os callbacks HLS de abertura/fechamento rodam dentro de av_read_frame na
+// thread que desenha os quadros. Depois do primeiro quadro, nao grave eventos
+// normais na microSD em toda troca de segmento.
+static int g_player_presented_frame = 0;
 
 static void player_boot_stage(const char *stage) {
     // O caminho plano existe mesmo quando o NRO foi instalado fora de uma pasta.
@@ -77,11 +81,15 @@ typedef struct {
     int64_t deadline_us;
     SDL_Joystick *joy;
     int cancelled;
+    int timed_out;
 } PlayerOpenDeadline;
 
 static int player_open_interrupted(void *userdata) {
     PlayerOpenDeadline *watch = (PlayerOpenDeadline *)userdata;
     if (!watch) return 0;
+    // Uma faixa HLS pode falhar e o FFmpeg continuar com as demais. Depois
+    // que B foi observado, a tentativa inteira deve permanecer cancelada.
+    if (watch->cancelled || watch->timed_out) return 1;
     // avformat_open_input/find_stream_info sao sincronas. Bombeie o controle
     // dentro do callback de interrupcao para B/- realmente funcionarem mesmo
     // enquanto FFmpeg espera rede ou uma rendition HLS.
@@ -101,7 +109,11 @@ static int player_open_interrupted(void *userdata) {
         watch->cancelled = 1;
         return 1;
     }
-    return watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us;
+    if (watch->deadline_us > 0 && av_gettime_relative() >= watch->deadline_us) {
+        watch->timed_out = 1;
+        return 1;
+    }
+    return 0;
 }
 
 // O HTTPS nativo do FFmpeg/libnx abre o master R2, mas no hardware pode ficar
@@ -120,18 +132,22 @@ static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
         return AVERROR_PROTOCOL_NOT_FOUND;
     int active = 0, reserved_kb = 0;
     char stage[96];
-    nplay_curl_avio_stats(&active, &reserved_kb);
-    snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
-    player_boot_stage(stage);
-    diag_player_event("hls-io", "open-begin", "active=%d reserved=%dKB", active, reserved_kb);
+    if (!g_player_presented_frame) {
+        nplay_curl_avio_stats(&active, &reserved_kb);
+        snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
+        player_boot_stage(stage);
+        diag_player_event("hls-io", "open-begin", "active=%d reserved=%dKB", active, reserved_kb);
+    }
     *pb = nplay_curl_avio_open_hls(url);
-    nplay_curl_avio_stats(&active, &reserved_kb);
-    snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
-                                      : "03 HLS sem memoria: %d recursos, %d KB",
-             active, reserved_kb);
-    player_boot_stage(stage);
-    diag_player_event("hls-io", *pb ? "open-ok" : "open-fail",
-                      "active=%d reserved=%dKB", active, reserved_kb);
+    if (!g_player_presented_frame || !*pb) {
+        nplay_curl_avio_stats(&active, &reserved_kb);
+        snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
+                                          : "03 HLS sem memoria: %d recursos, %d KB",
+                 active, reserved_kb);
+        player_boot_stage(stage);
+        diag_player_event("hls-io", *pb ? "open-ok" : "open-fail",
+                          "active=%d reserved=%dKB", active, reserved_kb);
+    }
     if (!*pb && fmt && fmt->interrupt_callback.callback &&
         fmt->interrupt_callback.callback(fmt->interrupt_callback.opaque))
         return AVERROR_EXIT;
@@ -140,7 +156,8 @@ static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
 
 static int player_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
     (void)fmt;
-    diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
+    if (!g_player_presented_frame)
+        diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
     nplay_curl_avio_close(pb);
     return 0;
 }
@@ -622,6 +639,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 double *out_pos, double *out_dur) {
     Uint32 play_started_tick = SDL_GetTicks();
     Uint32 open_elapsed_ms = 0, probe_elapsed_ms = 0, first_present_ms = 0;
+    g_player_presented_frame = 0;
+    nplay_curl_avio_quality_reset();
     g_player_last_error[0] = '\0';
     player_boot_stage("01 inicio do player");
     player_boot_stage(appletGetAppletType() == AppletType_Application
@@ -644,7 +663,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos.
     int native_hls = remote && is_hls;
     PlayerOpenDeadline open_watch = {
-        av_gettime_relative() + 30000000LL, joy, 0
+        av_gettime_relative() + 30000000LL, joy, 0, 0
     };
     nplay_curl_avio_set_abort_check(native_hls ? player_open_interrupted : NULL,
                                     native_hls ? &open_watch : NULL);
@@ -672,7 +691,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             diag_player_event("format", "root-open-fail", NULL);
             avformat_free_context(fmt);
             player_error_message(open_watch.cancelled ? "Abertura cancelada" :
+                                 open_watch.timed_out ? "Manifesto HLS: tempo esgotado" :
                                  "nao foi possivel baixar o manifesto HLS");
+            return open_watch.cancelled ? -11 : -10;
+        }
+        if (open_watch.cancelled || open_watch.timed_out) {
+            diag_player_event("format", "root-open-interrupted", "cancel=%d timeout=%d",
+                              open_watch.cancelled, open_watch.timed_out);
+            nplay_curl_avio_close(avio);
+            avformat_free_context(fmt);
+            player_error_message(open_watch.cancelled ? "Abertura cancelada" :
+                                 "Manifesto HLS: tempo esgotado");
             return open_watch.cancelled ? -11 : -10;
         }
         fmt->pb = avio;
@@ -706,7 +735,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         fmt->audio_codec_id = AV_CODEC_ID_AAC;
         fmt->subtitle_codec_id = AV_CODEC_ID_WEBVTT;
     }
-    open_watch.deadline_us = av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL);
+    if (!native_hls) open_watch.deadline_us = av_gettime_relative() + 30000000LL;
     fmt->interrupt_callback.callback = player_open_interrupted;
     fmt->interrupt_callback.opaque = &open_watch;
 
@@ -756,13 +785,22 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         else player_error_text(native_hls ? "abrir playlist HLS" : "abrir fonte", rc);
         nplay_curl_avio_close(avio); return open_watch.cancelled ? -11 : -10;
     }
+    if (open_watch.cancelled || open_watch.timed_out) {
+        diag_player_event("format", "open-interrupted", "ms=%u cancel=%d timeout=%d",
+                          open_elapsed_ms, open_watch.cancelled, open_watch.timed_out);
+        avformat_close_input(&fmt);
+        nplay_curl_avio_close(avio);
+        player_error_message(open_watch.cancelled ? "Abertura cancelada" :
+                             "Abrir playlist HLS: tempo esgotado");
+        return open_watch.cancelled ? -11 : -10;
+    }
     diag_player_event("format", "open-ok", "streams=%u ms=%u", fmt->nb_streams,
                       open_elapsed_ms);
     player_boot_stage("04 fonte aberta");
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
     draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
     SDL_RenderPresent(ren);
-    open_watch.deadline_us = av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL);
+    if (!native_hls) open_watch.deadline_us = av_gettime_relative() + 30000000LL;
     // Na abertura HLS, priorize video e um audio. Legendas e audios alternativos
     // continuam enumerados; suas playlists so sao lidas quando selecionadas.
     int probe_audio = -1, probe_video = -1;
@@ -806,9 +844,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         avformat_close_input(&fmt); nplay_curl_avio_close(avio);
         return open_watch.cancelled ? -11 : -2;
     }
+    if (open_watch.cancelled || open_watch.timed_out) {
+        diag_player_event("format", "probe-interrupted", "ms=%u cancel=%d timeout=%d",
+                          probe_elapsed_ms, open_watch.cancelled, open_watch.timed_out);
+        avformat_close_input(&fmt);
+        nplay_curl_avio_close(avio);
+        player_error_message(open_watch.cancelled ? "Abertura cancelada" :
+                             "Ler faixas HLS: tempo esgotado");
+        return open_watch.cancelled ? -11 : -2;
+    }
     // Continue vigiando ate o primeiro quadro: playlists podem abrir sem que
     // o primeiro segmento tenha entregue bytes suficientes para reproduzir.
-    open_watch.deadline_us = native_hls ? av_gettime_relative() + 20000000LL : 0;
+    if (!native_hls) open_watch.deadline_us = 0;
 
     player_boot_stage("06 faixas prontas");
     diag_player_event("format", "probe-ok", "streams=%u ms=%u duration=%lld",
@@ -1033,6 +1080,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             wall_start = av_gettime() / 1000000.0 - start_sec;
         }
         if (open_watch.cancelled) running = 0;
+        if (open_watch.timed_out) {
+            player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
+            playback_error = -5;
+            running = 0;
+        }
     }
 
     // Heartbeat & Progress tracking are now managed by a separate thread
@@ -1301,15 +1353,26 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         Uint32 audio_before_ms = adev ? (Uint32)(SDL_GetQueuedAudioSize(adev) * 1000.0 / bps) : 0;
         int ret = av_read_frame(fmt, pkt);
         Uint32 read_ms = SDL_GetTicks() - read_started;
+        if (open_watch.cancelled) {
+            running = 0;
+            av_packet_unref(pkt);
+            break;
+        }
+        if (open_watch.timed_out) {
+            player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
+            playback_error = -5;
+            av_packet_unref(pkt);
+            break;
+        }
         read_since_present_ms += read_ms;
         if (read_ms > worst_read_ms) worst_read_ms = read_ms;
         if (read_ms >= 250) {
             slow_reads++;
-            // O HLS pode bloquear dentro de io_open/read ate receber o proximo
-            // segmento. Nessa situacao nao retorna EAGAIN e o antigo contador
-            // de buffering permanece zero apesar da pausa visivel.
-            diag_player_event("demux", "read-wait", "ms=%u audio=%u rc=%d pos=%.1f",
-                              read_ms, audio_before_ms, ret, cur_pos);
+            // O tempo ja fica no resumo persistente. Evite abrir/fechar o trace
+            // na microSD para cada espera curta na thread que desenha quadros.
+            if (read_ms >= 1000)
+                diag_player_event("demux", "read-wait", "ms=%u audio=%u rc=%d pos=%.1f",
+                                  read_ms, audio_before_ms, ret, cur_pos);
         }
         if (!logged_first_read) {
             diag_player_event("demux", ret >= 0 ? "first-read-ok" : "first-read-fail",
@@ -1541,6 +1604,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (!logged_first_present) {
                         open_watch.deadline_us = 0;
                         nplay_curl_avio_set_startup_window(0);
+                        g_player_presented_frame = 1;
                         first_present_ms = SDL_GetTicks() - play_started_tick;
                         diag_player_event("render", "first-present", "position=%.2f ms=%u",
                                           cur_pos, first_present_ms);
@@ -1570,6 +1634,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     if (out_pos) *out_pos = cur_pos;
     if (out_dur) *out_dur = dur;
+    if (open_watch.cancelled) SDL_FlushEvent(SDL_JOYBUTTONDOWN);
     store_save_player_volume(vol);
     diag_player_event("player", "timing", "open=%u probe=%u first=%u gap=io%d/sync%d/other%d",
                       open_elapsed_ms, probe_elapsed_ms, first_present_ms,
@@ -1597,6 +1662,16 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
+    g_player_presented_frame = 0;
+    NplayCurlAvioQuality quality = {0};
+    nplay_curl_avio_quality_get(&quality);
+    diag_player_event("avio", "summary", "req=%d first>=250=%d max=%dms conn=%d fail=%d",
+                      quality.requests, quality.slow_first_bytes,
+                      quality.worst_first_ms, quality.new_connections,
+                      quality.failures);
+    diag_player_event("avio", "prefetch", "first=%d ready=%d young=%d oldempty=%d",
+                      quality.first_reads, quality.ready_first_reads,
+                      quality.young_first_reads, quality.old_empty_first_reads);
     diag_player_event("player", "cleanup-end", NULL);
     return playback_error ? playback_error : reached_end;
 }
