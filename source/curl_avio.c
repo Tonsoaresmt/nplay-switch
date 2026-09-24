@@ -633,10 +633,14 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
     }
     if (whence == AVSEEK_SIZE) {
         SDL_LockMutex(c->mtx);
-        int guard = 0;
-        while (c->size < 0 && c->running && !c->err && guard++ < 150) SDL_CondWaitTimeout(c->c_data, c->mtx, 100);
         int64_t s = c->size;
         SDL_UnlockMutex(c->mtx);
+        // AVSEEK_SIZE permite ENOSYS quando o Content-Length nao chegou.
+        // Esperar ate 15 s aqui nao produz bytes e ocorre dentro da abertura
+        // sincrona do HLS, podendo se repetir para cada segmento/rendition.
+        // O tamanho conhecido continua disponivel imediatamente; quando a
+        // resposta e chunked, o demuxer prossegue como stream de tamanho
+        // desconhecido em vez de congelar a tela de preparacao.
         return s >= 0 ? s : (int64_t)AVERROR(ENOSYS);
     }
     SDL_LockMutex(c->mtx);

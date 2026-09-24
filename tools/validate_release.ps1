@@ -67,7 +67,7 @@ Assert-True ($mainSource -match 'playback_memory_enter') 'Player nao reserva mem
 Assert-True ($mainSource -match 'hero_pool_add_ready\(g_heroesArr, cJSON_GetObjectItem\(g_land, "featured"\)\)' -and $mainSource -match 'jstr\(item, "hero_type"\)') 'Destaques do Switch perderam tipo ou curadoria pronta do site.'
 Assert-True ($mainSource -match 'cover_suspend_and_release') 'Workers de capa podem voltar a competir com a abertura HLS.'
 Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes de um crash nao aparece no diagnostico.'
-Assert-True ($mainSource -match 'diag_read_player_tail') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
+Assert-True ($mainSource -match 'diag_read_player_page') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
 Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
 
 $apiSource = Get-Content source/api.c -Raw

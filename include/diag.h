@@ -22,5 +22,7 @@ void diag_network_event(const char *method, const char *path, long http_code,
                         unsigned elapsed_ms, size_t response_bytes);
 
 int diag_read_player_tail(char lines[][DIAG_LINE_CAP], int max_lines);
+int diag_read_player_page(char lines[][DIAG_LINE_CAP], int max_lines,
+                          int page_from_latest, int *total_lines);
 int diag_read_network_tail(char lines[][DIAG_LINE_CAP], int max_lines);
 

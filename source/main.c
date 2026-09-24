@@ -2845,11 +2845,14 @@ static int g_diag_open = 0;
 static char g_diag_player_lines[6][DIAG_LINE_CAP];
 static char g_diag_network_lines[2][DIAG_LINE_CAP];
 static int g_diag_player_count = 0;
+static int g_diag_player_total = 0;
+static int g_diag_page = 0;
 static int g_diag_network_count = 0;
 static unsigned g_ui_frames = 0, g_ui_over_20ms = 0, g_ui_over_33ms = 0, g_ui_max_ms = 0;
 
 static void reload_player_diagnostics(void) {
-    g_diag_player_count = diag_read_player_tail(g_diag_player_lines, 6);
+    g_diag_player_count = diag_read_player_page(g_diag_player_lines, 6,
+                                                g_diag_page, &g_diag_player_total);
     g_diag_network_count = diag_read_network_tail(g_diag_network_lines, 2);
 }
 
@@ -2976,7 +2979,12 @@ static void draw_player_diagnostics(void) {
         text_clip(summary, 252, 236, C_ACC, 0, 776);
     }
 
-    text_draw(gRen, "ULTIMA TENTATIVA  |  EVENTOS RECENTES", 252, 262, C_MUT, 0);
+    int last_event = g_diag_player_total - g_diag_page * 6;
+    int first_event = last_event - g_diag_player_count + 1;
+    snprintf(summary, sizeof(summary), "ULTIMA TENTATIVA  |  eventos %d-%d de %d",
+             g_diag_player_count ? first_event : 0,
+             g_diag_player_count ? last_event : 0, g_diag_player_total);
+    text_draw(gRen, summary, 252, 262, C_MUT, 0);
     if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 288, C_TEXT, 0);
     for (int i = 0; i < g_diag_player_count; i++)
         text_clip(g_diag_player_lines[i], 252, 288 + i * 24,
@@ -2992,7 +3000,8 @@ static void draw_player_diagnostics(void) {
     text_clip(summary, 252, 558, C_ACC2, 0, 776);
     text_clip("Fotografe esta tela apos reabrir o Nplay. Nenhuma URL assinada ou senha e gravada.",
               252, 584, C_MUT, 0, 776);
-    text_center_at("A, B ou X Fechar", 252, 776, 614, C_TEXT, 0);
+    text_center_at("Cima anteriores  |  Baixo recentes  |  X atualizar  |  B fechar",
+                   252, 776, 614, C_TEXT, 0);
 }
 static void draw_preferences(void) {
     if (!g_prefs_open) return;
@@ -3141,11 +3150,18 @@ static void input_settings(int b) {
         return;
     }
     if (g_diag_open) {
-        if (b == JOY_A || b == JOY_B || b == JOY_MINUS || b == JOY_X) g_diag_open = 0;
+        if (b == JOY_UP && (g_diag_page + 1) * 6 < g_diag_player_total) {
+            g_diag_page++;
+            reload_player_diagnostics();
+        } else if (b == JOY_DOWN && g_diag_page > 0) {
+            g_diag_page--;
+            reload_player_diagnostics();
+        } else if (b == JOY_X) reload_player_diagnostics();
+        else if (b == JOY_A || b == JOY_B || b == JOY_MINUS) g_diag_open = 0;
         return;
     }
     if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
-    if (b == JOY_X) { reload_player_diagnostics(); g_diag_open = 1; return; }
+    if (b == JOY_X) { g_diag_page = 0; reload_player_diagnostics(); g_diag_open = 1; return; }
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
     else if (b == JOY_A) {

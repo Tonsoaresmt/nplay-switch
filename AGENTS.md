@@ -1,5 +1,22 @@
 # Continuidade para agentes
 
+## Rodada 0.12.8 (24/09/2026)
+
+- Logs reais de X-Men '97 T1E1 na 0.12.7 mostram entrega R2/HLS, playlists
+  HTTP 200 e abertura em 1,56 s em uma tentativa. As duas tentativas preservadas
+  terminaram por B antes do primeiro quadro; portanto nao comprovam a causa da
+  espera longa relatada. O trace da tentativa longa foi substituido por novas
+  tentativas. Nao afirmar que a reproducao foi validada no Switch.
+- A tentativa com retomada aos 48 s escreveu 76 eventos `hls-io` antes de exibir
+  qualquer quadro. A 0.12.8 remove gravacoes normais por recurso do caminho de
+  abertura, preserva erros e registra progresso a cada 5 s enquanto espera.
+- `AVSEEK_SIZE` nao aguarda mais ate 15 s quando o tamanho do segmento ainda e
+  desconhecido; retorna ENOSYS imediatamente, como fazia ao fim da espera.
+- Configuracoes > X permite subir/descer pelas paginas do trace no proprio
+  console. O arquivo continua em `sdmc:/switch/.nplay-player-trace.log`.
+- Build e contratos locais validam o NRO, mas fluidez e abertura no hardware
+  continuam sem confirmacao direta neste ambiente.
+
 ## Objetivo atual
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.

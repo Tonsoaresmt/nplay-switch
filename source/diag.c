@@ -123,7 +123,7 @@ static int read_tail(const char *path, char lines[][DIAG_LINE_CAP], int max_line
     if (!file) return 0;
     char ring[12][DIAG_LINE_CAP];
     int total = 0;
-    char line[DIAG_LINE_CAP];
+    char line[DIAG_LINE_CAP + 2];
     while (fgets(line, sizeof(line), file)) {
         size_t len = strlen(line);
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
@@ -139,8 +139,32 @@ static int read_tail(const char *path, char lines[][DIAG_LINE_CAP], int max_line
     return count;
 }
 
-int diag_read_player_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
-    int count = read_tail(PLAYER_LOG, lines, max_lines);
+int diag_read_player_page(char lines[][DIAG_LINE_CAP], int max_lines,
+                          int page_from_latest, int *total_lines) {
+    if (total_lines) *total_lines = 0;
+    if (!lines || max_lines <= 0 || page_from_latest < 0) return 0;
+    FILE *file = fopen(PLAYER_LOG, "rb");
+    if (!file) return 0;
+    char line[DIAG_LINE_CAP + 2];
+    int total = 0;
+    while (fgets(line, sizeof(line), file)) total++;
+    if (total_lines) *total_lines = total;
+    if (page_from_latest >= (total + max_lines - 1) / max_lines) {
+        fclose(file);
+        return 0;
+    }
+    int end = total - page_from_latest * max_lines;
+    int first = end - max_lines;
+    if (first < 0) first = 0;
+    rewind(file);
+    int count = 0;
+    for (int index = 0; index < end && fgets(line, sizeof(line), file); index++) {
+        if (index < first) continue;
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        snprintf(lines[count++], DIAG_LINE_CAP, "%s", line);
+    }
+    fclose(file);
     // A tela de 1280 px cortava exatamente o evento/HTTP de interesse: o
     // prefixo de heap e processo consumia toda a largura. O arquivo completo
     // continua intacto na microSD; so a apresentacao na tela fica concisa.
@@ -152,6 +176,10 @@ int diag_read_player_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
         snprintf(lines[i], DIAG_LINE_CAP, "%s", compact);
     }
     return count;
+}
+
+int diag_read_player_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
+    return diag_read_player_page(lines, max_lines, 0, NULL);
 }
 
 int diag_read_network_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
