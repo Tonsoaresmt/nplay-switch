@@ -2948,10 +2948,10 @@ static void draw_player_diagnostics(void) {
     int has_boot_stage = load_player_boot_stage(boot_stage, sizeof(boot_stage));
     int has_stats = store_load_player_stats(&stats);
     ui_panel(220, 66, 840, 586, C_ACC2);
-    text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 252, 92, C_ACC2, 0);
+    text_draw(gRen, "DIAGNOSTICO DO PLAYER", 252, 92, C_ACC2, 0);
     char summary[180];
     if (has_stats) {
-        snprintf(summary, sizeof(summary), "Video %dx%d  |  frames %d  |  descartados %d  |  HW %s",
+        snprintf(summary, sizeof(summary), "Ultimo video iniciado %dx%d  |  frames %d  |  descartados %d  |  HW %s",
                  stats.width, stats.height, stats.decoded_frames, stats.dropped_frames,
                  stats.hardware_decode ? "sim" : "nao");
         text_clip(summary, 252, 132, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0, 776);
@@ -2965,7 +2965,7 @@ static void draw_player_diagnostics(void) {
         text_clip(summary, 252, 184, C_ACC, 0, 776);
     }
 
-    text_draw(gRen, "RASTRO DO PLAYER", 252, 204, C_MUT, 0);
+    text_draw(gRen, "ULTIMA TENTATIVA  |  EVENTOS RECENTES", 252, 204, C_MUT, 0);
     if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 238, C_TEXT, 0);
     for (int i = 0; i < g_diag_player_count; i++)
         text_clip(g_diag_player_lines[i], 252, 238 + i * 32,

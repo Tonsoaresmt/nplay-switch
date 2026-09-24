@@ -626,6 +626,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int remote = !strncmp(url, "http://", 7) || !strncmp(url, "https://", 8);
     // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos.
     int native_hls = remote && is_hls;
+    nplay_curl_avio_set_startup_window(native_hls ? 30000u : 0u);
     // A build local ja possui HTTPS+TLS validado. Use o protocolo nativo tambem
     // para MP4: ele conhece Range/seek do MOV e elimina o AVIO por blocos que no
     // hardware ainda encerrava anime com `abrir fonte: End of file`.
@@ -769,7 +770,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     diag_player_event("format", headers_ready ? "probe-skip" : "probe-begin",
                       "streams=%u", fmt->nb_streams);
     rc = headers_ready ? 0 : avformat_find_stream_info(fmt, NULL);
-    open_watch.deadline_us = 0;
     if (rc < 0) {
         diag_player_event("format", "probe-fail", "rc=%d streams=%u", rc, fmt->nb_streams);
         if (open_watch.cancelled) player_error_message("Abertura cancelada");
@@ -778,6 +778,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         avformat_close_input(&fmt); nplay_curl_avio_close(avio);
         return open_watch.cancelled ? -11 : -2;
     }
+    // Continue vigiando ate o primeiro quadro: playlists podem abrir sem que
+    // o primeiro segmento tenha entregue bytes suficientes para reproduzir.
+    open_watch.deadline_us = native_hls ? av_gettime_relative() + 20000000LL : 0;
 
     player_boot_stage("06 faixas prontas");
     diag_player_event("format", "probe-ok", "streams=%u duration=%lld",
@@ -982,6 +985,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int seek_arm_dir = 0;
     double timeline_seek_from = 0, timeline_seek_target = 0;
     Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
+    Uint32 first_frame_started = SDL_GetTicks();
     SDL_Event e;
 
     // Retoma de onde parou somente quando ha margem suficiente ate o fim.
@@ -1000,6 +1004,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
+        if (native_hls && !logged_first_present &&
+            now_ticks - first_frame_started >= 30000u) {
+            diag_player_event("player", "first-frame-timeout", "elapsed=%u", now_ticks - first_frame_started);
+            player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
+            playback_error = -5;
+            break;
+        }
         if (now_ticks - last_heartbeat > 1000) {
             last_heartbeat = now_ticks;
             if (hb) {
@@ -1291,9 +1302,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
         if (ret < 0) {  // fim real ou falha definitiva da fonte/rede
+            if (open_watch.cancelled) { running = 0; break; }
             if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) {
                 if (ret == AVERROR_EOF) reached_end = 1;
-                else playback_error = -5;
+                else {
+                    playback_error = -5;
+                    if (native_hls && !logged_first_present)
+                        player_error_text("primeiro segmento HLS", ret);
+                }
                 diag_player_event("demux", "read-terminal", "rc=%d eof=%d", ret, reached_end);
                 break;
             }
@@ -1468,6 +1484,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     }
                     last_present_tick = present_tick;
                     if (!logged_first_present) {
+                        open_watch.deadline_us = 0;
+                        nplay_curl_avio_set_startup_window(0);
                         diag_player_event("render", "first-present", "position=%.2f", cur_pos);
                         logged_first_present = 1;
                     }
@@ -1608,6 +1626,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
                           retry_count + 1, current_pos, active.session_id, active.source_id);
         int rc = player_play_internal(ren, joy, &attempt, &hb, current_pos, &out_pos, &out_dur);
+        nplay_curl_avio_set_startup_window(0);
         diag_player_event("player", "attempt-end", "attempt=%d rc=%d pos=%.1f dur=%.1f",
                           retry_count + 1, rc, out_pos, out_dur);
         if (out_pos > 0) current_pos = out_pos;
@@ -1713,6 +1732,9 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         request->progress_cb(request->item_id, (int)current_pos, (int)dur, request->userdata);
     }
 
+    if (final_rc < 0)
+        diag_player_event("player", "final-error", "rc=%d %s", final_rc,
+                          g_player_last_error[0] ? g_player_last_error : "falha sem detalhe");
     diag_player_finish(final_rc);
     ui_popcorn_release();
 

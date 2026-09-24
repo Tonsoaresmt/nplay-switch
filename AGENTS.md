@@ -4,6 +4,19 @@
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.
 
+## Rodada 0.12.5 (24/09/2026)
+
+- Relato no hardware 0.12.4: varios episodios de X-Men '97 permanecem na tela
+  "Preparando video". A foto dos ajustes repete estatisticas antigas do ultimo
+  video iniciado; nao prova que a tentativa atual decodificou qualquer quadro.
+- O AVIO customizado esperava 20 s pelo primeiro byte, devolvia EAGAIN e podia
+  repetir esse ciclo sem limite. Agora cada recurso sem primeiro byte termina
+  com ETIMEDOUT, e a tentativa HLS tem limite absoluto ate o primeiro quadro.
+- O diagnostico na tela remove o prefixo de heap/proc que cortava o codigo HTTP
+  e o evento. O log integral na microSD permanece igual.
+- Ainda falta trace de um episodio especifico e teste no Switch real para
+  distinguir pacote R2 ausente/lento, manifesto problematico e falha do cliente.
+
 ## Rodada 0.12.4 (24/09/2026)
 
 - Captura real da 0.12.3: 17 pausas, 24 leituras HLS lentas, maxima de 5295 ms,

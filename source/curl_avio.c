@@ -27,6 +27,17 @@
 static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
 static SDL_atomic_t g_resource_sequence = {0};
+static SDL_atomic_t g_startup_deadline = {0};
+
+void nplay_curl_avio_set_startup_window(unsigned timeout_ms) {
+    SDL_AtomicSet(&g_startup_deadline,
+                  timeout_ms ? (int)(SDL_GetTicks() + timeout_ms) : 0);
+}
+
+static int startup_deadline_expired(void) {
+    int deadline = SDL_AtomicGet(&g_startup_deadline);
+    return deadline != 0 && (Sint32)(SDL_GetTicks() - (Uint32)deadline) >= 0;
+}
 
 // O demuxer HLS fecha um AVIO ao terminar cada segmento e abre outro para o
 // seguinte. Manter o easy handle ocioso preserva a conexao TCP/TLS sem usar
@@ -90,6 +101,9 @@ typedef struct {
     int static_data, synchronous, streaming;
     size_t static_pos, static_len;
     int resource_id, first_http_logged;
+    Uint32 first_read_tick;
+    int first_read_started;
+    int startup_timeout_logged;
     unsigned fetch_count, slow_fetch_count, empty_waits;
     unsigned worst_fetch_ms, worst_first_byte_ms, last_first_byte_ms, stream_started_tick;
     unsigned long long downloaded_bytes;
@@ -172,7 +186,7 @@ static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
 static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_t e) {
     (void)a; (void)b; (void)d; (void)e;
     CurlIO *c = (CurlIO *)ud;
-    return (!c->running || c->seek_req >= 0) ? 1 : 0;
+    return (!c->running || c->seek_req >= 0 || startup_deadline_expired()) ? 1 : 0;
 }
 
 static int fetch_block(CurlIO *c, int64_t start) {
@@ -470,13 +484,38 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
         return (int)n;
     }
     SDL_LockMutex(c->mtx);
+    if (!c->delivered && !c->first_read_started) {
+        c->first_read_tick = SDL_GetTicks();
+        c->first_read_started = 1;
+    }
     // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
     // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
     // poder desenhar o estado CARREGANDO e continuar recebendo comandos.
     int waits = c->delivered ? 1 : 67; // ate ~20 s apenas no primeiro acesso
-    while (c->count == 0 && !c->eof && !c->err && c->running && waits-- > 0)
+    while (c->count == 0 && !c->eof && !c->err && c->running && waits-- > 0 &&
+           !startup_deadline_expired() &&
+           (c->delivered || SDL_GetTicks() - c->first_read_tick < 20000u))
         SDL_CondWaitTimeout(c->c_data, c->mtx, 300);
     if (c->count == 0) {
+        if (startup_deadline_expired() ||
+            (!c->delivered && SDL_GetTicks() - c->first_read_tick >= 20000u)) {
+            int log_timeout = !c->startup_timeout_logged;
+            unsigned first_ms = c->last_first_byte_ms;
+            unsigned empty_waits = c->empty_waits;
+            int resource_id = c->resource_id;
+            char profile[sizeof(c->profile)];
+            snprintf(profile, sizeof(profile), "%s", c->profile);
+            c->startup_timeout_logged = 1;
+            c->err = 1;
+            SDL_UnlockMutex(c->mtx);
+            // Escrever o diagnostico na microSD fora do mutex de transporte:
+            // o produtor precisa dele para encerrar e liberar o AVIO.
+            if (log_timeout)
+                diag_player_event("avio", "first-byte-timeout",
+                                  "id=%d %s first=%u empty=%u",
+                                  resource_id, profile, first_ms, empty_waits);
+            return AVERROR(ETIMEDOUT);
+        }
         if (c->running && !c->err && !c->eof) {
             c->empty_waits++;
             SDL_UnlockMutex(c->mtx);

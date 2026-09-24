@@ -18,6 +18,10 @@ AVIOContext *nplay_curl_avio_open(const char *url, int64_t expected_size);
 // abertas ao mesmo tempo, portanto este usa blocos/ring menores que um MP4.
 AVIOContext *nplay_curl_avio_open_hls(const char *url);
 
+// Limite absoluto entre abrir o manifesto HLS e apresentar o primeiro quadro.
+// Passe 0 quando o primeiro quadro aparecer ou a tentativa terminar.
+void nplay_curl_avio_set_startup_window(unsigned timeout_ms);
+
 // Diagnostico sem URLs: quantidade de recursos HLS abertos e memoria reservada.
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb);
 

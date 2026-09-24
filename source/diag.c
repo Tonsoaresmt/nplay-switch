@@ -140,7 +140,18 @@ static int read_tail(const char *path, char lines[][DIAG_LINE_CAP], int max_line
 }
 
 int diag_read_player_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
-    return read_tail(PLAYER_LOG, lines, max_lines);
+    int count = read_tail(PLAYER_LOG, lines, max_lines);
+    // A tela de 1280 px cortava exatamente o evento/HTTP de interesse: o
+    // prefixo de heap e processo consumia toda a largura. O arquivo completo
+    // continua intacto na microSD; so a apresentacao na tela fica concisa.
+    for (int i = 0; i < count; i++) {
+        const char *event = strstr(lines[i], "MB ");
+        if (!event) continue;
+        char compact[DIAG_LINE_CAP];
+        snprintf(compact, sizeof(compact), "#%.4s  %s", lines[i], event + 3);
+        snprintf(lines[i], DIAG_LINE_CAP, "%s", compact);
+    }
+    return count;
 }
 
 int diag_read_network_tail(char lines[][DIAG_LINE_CAP], int max_lines) {
