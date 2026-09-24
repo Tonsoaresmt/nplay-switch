@@ -20,7 +20,7 @@ typedef struct {
 static MovieBackState g_movie_back[MOVIE_BACK_MAX];
 static int g_movie_back_n = 0;
 
-#define PLOT_LINES 5
+#define PLOT_LINES 3
 #define PLOT_MAX_LINES 32
 #define PLOT_LINE_CAP 180
 static char g_plot_lines[PLOT_MAX_LINES][PLOT_LINE_CAP];
@@ -63,7 +63,7 @@ static void rebuild_movie_plot(void) {
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
     const char *plot = jstr(g_movie, "plot");
     g_plot_line_count = wrap_text(plot ? plot : "Sinopse nao disponivel.",
-                                  g_plot_lines, PLOT_MAX_LINES, WIN_W - 280 - 48);
+                                  g_plot_lines, PLOT_MAX_LINES, WIN_W - 280 - 80);
 }
 
 static void activate_movie(cJSON *movie) {
@@ -146,114 +146,65 @@ void draw_movie(void) {
     const char *title = jstr(g_movie, "title");
     const char *logo = jstr(g_movie, "logo");
     const char *genre = jstr(g_movie, "genre");
-    const char *director = jstr(g_movie, "director");
     int year = jint(g_movie, "year");
     int duration = jint(g_movie, "duration");
 
-    ui_header("NPLAY / FILME", title ? title : "Filme", "B Voltar");
-
-    ui_panel(28, 86, 234, 343, C_ACC);
+    ui_header("NPLAY / FILME", NULL, "B Voltar");
+    SDL_Rect hero = {52, 110, WIN_W - 104, 316};
+    fill_rect(hero.x, hero.y, hero.w, hero.h, C_CARD);
+    SDL_Texture *backdrop = cover_get(jstr(g_movie, "backdrop"));
+    if (backdrop) ui_backdrop(backdrop, &hero);
+    fill_rect(hero.x, hero.y, 5, hero.h, C_ACC);
     SDL_Texture *poster = cover_get(logo);
-    if (poster) { SDL_Rect cr = {40, 98, 210, 315}; ui_cover(poster, &cr); }
-    else { fill_rect(40, 98, 210, 315, C_BAR); text_center_at("Sem capa", 40, 210, 242, C_MUT, 0); }
+    SDL_Rect cr = {65, 126, 184, 276};
+    fill_rect(cr.x, cr.y, cr.w, cr.h, C_BAR);
+    if (poster) ui_contain(poster, &cr);
+    else text_center_at("Sem capa", cr.x, cr.w, 242, C_MUT, 0);
 
     const int dx = 280;
-    text_draw(gRen, "INFORMACOES", dx, 94, C_ACC2, 0);
+    text_clip(title ? title : "Filme", dx, 136, C_TEXT, 1, WIN_W - dx - 60);
     char meta[320] = {0};
     if (year > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%d", year);
     if (duration > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%d min", meta[0] ? "  |  " : "", duration);
     if (genre && genre[0]) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%s", meta[0] ? "  |  " : "", genre);
-    text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 126, C_MUT, 0, WIN_W - dx - 40);
-
-    text_draw(gRen, "SINOPSE", dx, 168, C_ACC2, 0);
+    text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 180, C_ACC2, 0, WIN_W - dx - 60);
     int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
     if (g_plot_scroll > max_scroll) g_plot_scroll = max_scroll;
     for (int i = 0; i < PLOT_LINES && i + g_plot_scroll < g_plot_line_count; i++)
-        text_draw(gRen, g_plot_lines[i + g_plot_scroll], dx, 201 + i * 28, C_TEXT, 0);
+        text_draw(gRen, g_plot_lines[i + g_plot_scroll], dx, 224 + i * 28, C_MUT, 0);
     if (g_plot_line_count > PLOT_LINES) {
         char page[80];
-        snprintf(page, sizeof(page), "Sinopse %d/%d  -  cima/baixo para ler", g_plot_scroll + 1, max_scroll + 1);
-        text_right(page, WIN_W - 40, 344, C_MUT, 0);
-    }
-    if (director && director[0]) {
-        char credit[260]; snprintf(credit, sizeof(credit), "Direcao: %s", director);
-        text_clip(credit, dx, 372, C_MUT, 0, WIN_W - dx - 40);
+        snprintf(page, sizeof(page), "Sinopse %d/%d  ·  cima/baixo", g_plot_scroll + 1, max_scroll + 1);
+        text_right(page, WIN_W - 65, 314, C_MUT, 2);
     }
 
     int is_fav = is_fav_item(jint(g_movie, "id"));
-    draw_button(dx, 408, 172, "A  Assistir", g_movie_zone == 0 && g_movie_sel == 0);
-    draw_button(dx + 188, 408, 230, is_fav ? "Na Minha Lista" : "+ Minha Lista", g_movie_zone == 0 && g_movie_sel == 1);
+    draw_button(dx, 350, 172, "A  Assistir", g_movie_zone == 0 && g_movie_sel == 0);
+    draw_button(dx + 188, 350, 230, is_fav ? "Favoritado" : "Favoritar", g_movie_zone == 0 && g_movie_sel == 1);
 
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int related_n = arr_len(related);
-    int panel_target = g_movie_zone == 1 ? 246 : 458;
-    if (g_related_panel_y > panel_target) {
-        g_related_panel_y -= 30;
-        if (g_related_panel_y < panel_target) g_related_panel_y = panel_target;
-    } else if (g_related_panel_y < panel_target) {
-        g_related_panel_y += 30;
-        if (g_related_panel_y > panel_target) g_related_panel_y = panel_target;
-    }
-    int expanded = g_related_panel_y < 430;
-    if (expanded) ui_panel(22, g_related_panel_y, WIN_W - 44, 414, C_ACC);
-    else fill_rect(40, g_related_panel_y, WIN_W - 80, 2, C_CARD);
-    int heading_y = expanded ? g_related_panel_y + 20 : g_related_panel_y + 14;
-    int cards_y = expanded ? g_related_panel_y + 100 : g_related_panel_y + 42;
-    text_draw(gRen, "TITULOS RELACIONADOS", expanded ? 44 : 40, heading_y,
-              g_movie_zone == 1 ? C_TEXT : C_ACC2, expanded ? 1 : 0);
-    if (expanded && related_n > 0) {
-        cJSON *selected = cJSON_GetArrayItem(related, g_related_sel);
-        char position[48]; snprintf(position, sizeof(position), "%d de %d", g_related_sel + 1, related_n);
-        text_right(position, WIN_W - 48, heading_y + 7, C_ACC2, 0);
-        text_clip(jstr(selected, "title") ? jstr(selected, "title") : "Titulo",
-                  44, heading_y + 43, C_TEXT, 0, WIN_W - 88);
-    } else {
-        text_right(related_n > 0 ? "Baixo para ampliar" : "Novas sugestoes aparecerao aqui",
-                   WIN_W - 40, heading_y, C_MUT, 0);
-    }
-    if (related_n <= 0) {
-        text_draw(gRen, "Ainda nao encontramos obras relacionadas a este titulo.", 40, 540, C_MUT, 0);
-    } else {
-        // Mantem somente a vizinhanca imediata aquecida. Cinco chamadas no maximo
-        // entram na fila existente e respeitam o mesmo LRU/teto de 160 texturas.
-        // Assim o proximo card tende a aparecer pronto sem baixar a lista inteira.
-        if (g_movie_zone == 1) {
-            int first = g_related_sel - 2; if (first < 0) first = 0;
-            int last = g_related_sel + 2; if (last >= related_n) last = related_n - 1;
-            for (int i = first; i <= last; i++) {
-                cJSON *nearby = cJSON_GetArrayItem(related, i);
-                cover_get(jstr(nearby, "logo"));
-            }
-        }
-        int card_w = expanded ? 176 : 142;
-        int cover_w = expanded ? 152 : 104;
-        int cover_h = expanded ? 216 : 136;
-        int stride = expanded ? 196 : 158, scroll = 0;
-        int left = expanded ? 44 : 40;
-        int selected_x = left + g_related_sel * stride;
-        if (selected_x + card_w > WIN_W - 40) scroll = selected_x + card_w - (WIN_W - 40);
-        for (int i = 0; i < related_n; i++) {
+    if (related_n > 0) {
+        text_draw(gRen, "Titulos relacionados", 54, 449, C_TEXT, 0);
+        char count[48]; snprintf(count, sizeof(count), "%d titulos", related_n);
+        text_right(count, WIN_W - 54, 454, C_MUT, 2);
+        int start = g_related_sel - 2;
+        if (start < 0) start = 0;
+        if (start > related_n - 5) start = related_n > 5 ? related_n - 5 : 0;
+        for (int i = start; i < related_n && i < start + 5; i++) {
             cJSON *item = cJSON_GetArrayItem(related, i);
-            int x = left + i * stride - scroll;
-            if (x + card_w < 0 || x > WIN_W) continue;
+            int x = 54 + (i - start) * 234;
+            fill_rect(x, 490, 216, 165, g_movie_zone == 1 && i == g_related_sel ?
+                      (SDL_Color){38, 34, 61, 255} : C_CARD);
+            if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 4, 486, 224, 173);
             SDL_Texture *cover = cover_get(jstr(item, "logo"));
-            int cover_x = x + (card_w - cover_w) / 2;
-            if (g_movie_zone == 1 && i == g_related_sel) {
-                fill_rect(cover_x - 8, cards_y - 8, cover_w + 16, cover_h + 16, (SDL_Color){ 4, 6, 11, 255 });
-                border_rect(cover_x - 5, cards_y - 5, cover_w + 10, cover_h + 10, 2, C_ACC);
-            }
-            if (cover) { SDL_Rect rr = {cover_x, cards_y, cover_w, cover_h}; ui_cover(cover, &rr); }
-            else { fill_rect(cover_x, cards_y, cover_w, cover_h, C_CARD); text_center_at("Sem capa", cover_x, cover_w, cards_y + cover_h / 2 - 12, C_MUT, 0); }
-            int title_y = cards_y + cover_h + (expanded ? 9 : 0);
-            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x, title_y,
-                      g_movie_zone == 1 && i == g_related_sel ? C_TEXT : C_MUT, 0, card_w);
-            if (g_movie_zone == 1 && i == g_related_sel)
-                fill_rect(x, title_y + 29, card_w, 2, C_ACC2);
+            if (cover) { SDL_Rect rr = {x, 490, 216, 124}; ui_cover(cover, &rr); }
+            text_clip(jstr(item, "title") ? jstr(item, "title") : "-", x + 8, 624, C_TEXT, 2, 200);
         }
     }
     ui_footer(g_movie_zone == 1 ?
-              "Esquerda/direita Escolher    A Abrir    Y Assistir mais tarde    X Outra lista    Cima Voltar" :
-              "A Confirmar    Y Assistir mais tarde    X Outra lista    Baixo Relacionados    B Voltar");
+              "Esquerda/direita Escolher    A Abrir    Y Ver depois    Cima Voltar" :
+              "A Confirmar    Y Ver depois    X Outra lista    Baixo Relacionados    B Voltar");
 }
 
 void input_movie(int b) {

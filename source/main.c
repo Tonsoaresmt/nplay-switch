@@ -23,6 +23,7 @@
 #include "api.h"
 #include "diag.h"
 #include "catalog_fetch.h"
+#include "brand_bin.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -39,6 +40,7 @@ Uint32 g_toast_until = 0;
 char g_toast[160] = {0};
 static char g_self_path[600] = {0};
 static char g_user[128] = {0};
+static SDL_Texture *g_brand = NULL;
 static int g_do_update = 0;
 static Uint32 g_restart_at = 0;
 static int g_running; // definido/inicializado na secao de roteamento de input
@@ -237,10 +239,8 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     const char *title = jstr(item, "title"); if (!title) title = "";
     const char *logo = jstr(item, "logo");
     SDL_Texture *tex = cover_get(logo);
-    if (selected) {
-        fill_rect(x - 8, y - 8, cw + 16, coverH + 16, (SDL_Color){ 4, 6, 11, 255 });
-        border_rect(x - 5, y - 5, cw + 10, coverH + 10, 2, C_ACC);
-    }
+    fill_rect(x, y, cw, coverH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
+    if (selected) ui_focus(x - 4, y - 4, cw + 8, coverH + 60);
     SDL_Rect cr = { x, y, cw, coverH };
     if (tex) ui_cover(tex, &cr);
     else {
@@ -269,8 +269,9 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     }
     // O recorte e feito pelo renderer; nao corte por bytes, pois isso quebrava
     // acentos/UTF-8 e abreviava titulos antes de ocupar a largura disponivel.
-    text_clip(title, x, y + coverH + 8, selected ? C_TEXT : C_MUT, 0, cw);
-    if (selected) fill_rect(x, y + coverH + 37, cw, 2, C_ACC2);
+    text_clip(title, x + 8, y + coverH + 7, C_TEXT, 0, cw - 16);
+    const char *kind_label = kind && !strcmp(kind, "movie") ? "Filme" : "Serie";
+    text_clip(kind_label, x + 8, y + coverH + 32, C_MUT, 2, cw - 16);
 }
 
 // ============================================================= estado / telas
@@ -1133,7 +1134,7 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
 
     SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
     ui_header("NPLAY", "Preparando reproducao", "B Segundo plano");
-    text_clip(title ? title : "Video", 70, 96, C_TEXT, 1, WIN_W - 140);
+    text_clip(title ? title : "Video", 70, 108, C_TEXT, 1, WIN_W - 140);
 
     // Oito barras em onda. O movimento continua mesmo enquanto o percentual
     // ainda e desconhecido (fila, busca de peers ou leitura de metadados).
@@ -1551,25 +1552,30 @@ static void do_search(void) {
 
 // ------------------------------------------------------------- render: barra
 static void draw_topbar(void) {
-    fill_rect(0, 0, WIN_W, 72, C_BAR);
-    fill_rect(0, 0, 6, 72, C_ACC);
-    text_draw(gRen, "Nplay", 40, 18, C_ACC, 1);
-    int tx = 172;
+    fill_rect(0, 0, WIN_W, 95, C_BAR);
+    fill_rect(0, 0, WIN_W, 3, C_ACC);
+    if (g_brand) { SDL_Rect mark = {48, 23, 46, 46}; SDL_RenderCopy(gRen, g_brand, NULL, &mark); }
+    else { fill_rect(50, 27, 39, 39, C_ACC); text_center_at("N", 50, 39, 30, C_BG, 1); }
+    text_draw(gRen, "NPLAY", 96, 30, C_TEXT, 1);
+    int tx = 255;
     for (int t = 0; t < NTABS; t++) {
-        int w = text_draw(gRen, TAB_NAME[t], tx, 22, (t == g_tab) ? C_TEXT : C_MUT, 0);
-        if (t == g_tab) fill_rect(tx, 53, w, 3, C_ACC);
-        tx += w + 24;
+        int w = text_draw(gRen, TAB_NAME[t], tx + 11, 33, (t == g_tab) ? C_ACC : C_TEXT, 0);
+        if (t == g_tab) {
+            fill_rect(tx, 76, w + 22, 3, C_ACC);
+        }
+        tx += w + 33;
     }
-    text_right("Y Busca   - Config.   + Sair", WIN_W - 40, 24, C_MUT, 0);
-    fill_rect(40, 71, WIN_W - 80, 1, C_CARD);
+    text_right("Y  Buscar", WIN_W - 50, 33, C_TEXT, 0);
+    fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 
 // ------------------------------------------------------------- render: landing
-#define RCW 164
-#define RCH 232
-#define RGAP 14
-#define HERO_H 224
-#define RAILS_TOP (108 + HERO_H + 24)
+#define RCW 216
+#define RCH 184
+#define RGAP 18
+#define HERO_H 158
+#define RAILS_TOP 290
+#define RAIL_STEP (30 + RCH + 70)
 static void draw_landing(void) {
     draw_topbar();
     if (!g_land) {
@@ -1577,81 +1583,76 @@ static void draw_landing(void) {
         ui_footer("Y Buscar    L/R Trocar categoria    - Configuracoes");
         return;
     }
-    SDL_Rect content_clip = { 0, 72, WIN_W, WIN_H - 72 - 52 };
+    SDL_Rect content_clip = { 0, 95, WIN_W, WIN_H - 95 - 52 };
     SDL_RenderSetClipRect(gRen, &content_clip);
-    char hi[180]; snprintf(hi, sizeof(hi), "Bem-vindo de volta%s%s", g_user[0] ? ", " : "", g_user[0] ? g_user : "");
-    if (g_tab == 0) text_draw(gRen, hi, 40, 76 - g_homeScroll, C_MUT, 0);
-    else text_draw(gRen, TAB_NAME[g_tab], 40, 76 - g_homeScroll, C_MUT, 0);
-
     int nh = hero_count();
-    int hy = 108 - g_homeScroll;
-    if (nh > 0 && hy + HERO_H >= 72 && hy < WIN_H) {
+    int hy = 110 - g_homeScroll;
+    if (nh > 0 && hy + HERO_H >= 95 && hy < WIN_H) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
         const char *backdrop = jstr(h, "backdrop");
         SDL_Texture *bg = cover_get(backdrop);
         if (bg) {
-            SDL_Rect br = { 40, hy, WIN_W - 80, HERO_H };
-            ui_cover(bg, &br);
-            fill_rect(40, hy, 720, HERO_H, (SDL_Color){ 8, 10, 15, 218 });
-            fill_rect(760, hy, 480, HERO_H, (SDL_Color){ 8, 10, 15, 92 });
-            fill_rect(40, hy, 5, HERO_H, C_ACC);
+            SDL_Rect br = { 56, hy, WIN_W - 112, HERO_H };
+            ui_backdrop(bg, &br);
+            fill_rect(56, hy, 5, HERO_H, C_ACC);
         } else ui_panel(40, hy, WIN_W - 80, HERO_H, C_ACC);
-        if (g_railSel == -1) ui_focus(36, hy - 4, WIN_W - 72, HERO_H + 8);
-        int content_x = bg ? 72 : 228;
+        if (g_railSel == -1) ui_focus(52, hy - 4, WIN_W - 104, HERO_H + 8);
+        int content_x = bg ? 85 : 225;
         if (!bg) {
             SDL_Texture *tex = cover_get(jstr(h, "logo"));
-            SDL_Rect pr = { 60, hy + 16, 138, HERO_H - 32 };
-            if (tex) ui_cover(tex, &pr); else fill_rect(60, hy + 16, 138, HERO_H - 32, C_CARD);
+            SDL_Rect pr = { 66, hy + 12, 132, HERO_H - 24 };
+            if (tex) ui_cover(tex, &pr); else fill_rect(66, hy + 12, 132, HERO_H - 24, C_CARD);
         }
-        text_draw(gRen, "EM DESTAQUE AGORA", content_x, hy + 24, C_ACC, 0);
+        text_draw(gRen, "DESTAQUE NPLAY", content_x, hy + 14, C_ACC, 2);
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
-        text_clip(ht, content_x, hy + 52, C_TEXT, 1, bg ? 620 : WIN_W - 228 - 180);
+        text_clip(ht, content_x, hy + 39, C_TEXT, 1, bg ? 690 : WIN_W - 228 - 180);
         const char *hk = jstr(h, "kind");
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
         char meta[96]; const char *year = jstr(h, "year");
         snprintf(meta, sizeof(meta), "%s%s%s%s", kl, year && year[0] ? "  |  " : "", year && year[0] ? year : "",
                  (cJSON_IsTrue(cJSON_GetObjectItem(h, "r2_ready")) || jint(h, "r2_ready")) ? "  |  Pronto pra tocar" : "");
-        text_draw(gRen, meta, content_x, hy + 96, C_MUT, 0);
+        text_draw(gRen, meta, content_x, hy + 78, C_MUT, 2);
         const char *plot = jstr(h, "plot");
-        if (plot && plot[0]) text_clip(plot, content_x, hy + 128, C_TEXT, 0, bg ? 650 : 700);
-        text_draw(gRen, "A Abrir     Esquerda/direita Trocar destaque", content_x, hy + HERO_H - 36, C_MUT, 0);
+        if (plot && plot[0]) text_clip(plot, content_x, hy + 104, C_MUT, 2, bg ? 700 : 700);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", (g_heroIdx % nh) + 1, nh);
-        text_draw(gRen, cnt, WIN_W - 128, hy + HERO_H - 40, C_MUT, 0);
+        text_draw(gRen, cnt, WIN_W - 126, hy + HERO_H - 31, C_MUT, 2);
     }
 
-    int y = (nh > 0 ? RAILS_TOP : 120) - g_homeScroll;
+    int y = (nh > 0 ? RAILS_TOP : 125) - g_homeScroll;
     for (int r = 0; r < g_railsN; r++) {
         int items = g_rails[r].count;
         int ry = y + 30;
         // O titulo e o indicador de foco ficam abaixo da capa.
-        if (ry + RCH + 40 < 72) { y += 30 + RCH + 44; continue; }
+        if (ry + RCH + 52 < 95) { y += RAIL_STEP; continue; }
         if (y >= WIN_H) break;
-        text_draw(gRen, g_rails[r].label, 40, y, (r == g_railSel) ? C_TEXT : C_MUT, 0);
+        text_draw(gRen, g_rails[r].label, 54, y, C_TEXT, 0);
+        char total[40]; snprintf(total, sizeof(total), "%d titulos", items);
+        text_right(total, WIN_W - 55, y + 2, C_MUT, 2);
         int rowScroll = 0;
         if (r == g_railSel) {
-            int selX = 40 + g_railItem * (RCW + RGAP);
-            if (selX + RCW - rowScroll > WIN_W - 40) rowScroll = selX + RCW - (WIN_W - 40);
-            if (selX - rowScroll < 40) rowScroll = selX - 40;
+            int selX = 54 + g_railItem * (RCW + RGAP);
+            if (selX + RCW - rowScroll > WIN_W - 54) rowScroll = selX + RCW - (WIN_W - 54);
+            if (selX - rowScroll < 54) rowScroll = selX - 54;
             if (rowScroll < 0) rowScroll = 0;
         }
         const int step = RCW + RGAP;
-        int first = rowScroll > 40 + RCW ? (rowScroll - 40 - RCW) / step : 0;
-        int last = (WIN_W + rowScroll - 40) / step + 1;
+        int first = rowScroll > 54 + RCW ? (rowScroll - 54 - RCW) / step : 0;
+        int last = (WIN_W + rowScroll - 54) / step + 1;
         if (last > items) last = items;
         cJSON *it = cJSON_GetArrayItem(g_rails[r].arr, first);
         for (int i = first; i < last && it; i++, it = it->next) {
-            int x = 40 + i * (RCW + RGAP) - rowScroll;
+            int x = 54 + i * (RCW + RGAP) - rowScroll;
             if (x + RCW < 0 || x > WIN_W) continue;
             int series_item = catalog_item_is_series(it, g_rails[r].is_series);
             int fav_id = catalog_favorite_id(it, series_item);
             int fav = series_item ? is_fav_series(fav_id) : is_fav_item(fav_id);
             draw_card(x, ry, RCW, RCH, it, (r == g_railSel && i == g_railItem), fav);
         }
-        y += 30 + RCH + 44;
+        y += RAIL_STEP;
     }
-    int search_y = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 44) - g_homeScroll;
-    if (search_y + 116 >= 72 && search_y < WIN_H) {
+    int search_y = (nh > 0 ? RAILS_TOP : 125) + g_railsN * RAIL_STEP - g_homeScroll;
+    if (search_y + 116 >= 95 && search_y < WIN_H) {
         int selected = g_railSel == g_railsN;
         ui_panel(40, search_y, WIN_W - 80, 112, C_ACC2);
         if (selected) ui_focus(36, search_y - 4, WIN_W - 72, 120);
@@ -1672,31 +1673,31 @@ static void draw_landing(void) {
 }
 
 // ------------------------------------------------------------- render: busca (grade)
-#define GCOLS 6
-#define GMX 40
-#define GGAP 16
-#define GCW 180
-#define GCOVERW 158
-#define GCOVERH 226
-#define GCH 268
+#define GCOLS 5
+#define GMX 54
+#define GGAP 18
+#define GCW 216
+#define GCOVERW 216
+#define GCOVERH 246
+#define GCH 298
 static void draw_search(void) {
     draw_topbar();
-    SDL_Rect content_clip = { 0, 72, WIN_W, WIN_H - 72 - 52 };
+    SDL_Rect content_clip = { 0, 95, WIN_W, WIN_H - 95 - 52 };
     SDL_RenderSetClipRect(gRen, &content_clip);
     int n = srch_count_for(g_srchFilter);
     char hd[200]; snprintf(hd, sizeof(hd), "Resultados para \"%s\"", g_srchQuery);
-    text_clip(hd, 40, 88, C_TEXT, 1, 850);
+    text_clip(hd, 54, 111, C_TEXT, 1, 850);
     char count[64]; snprintf(count, sizeof(count), "%d resultado%s", n, n == 1 ? "" : "s");
-    text_right(count, WIN_W - 40, 94, C_MUT, 0);
+    text_right(count, WIN_W - 54, 119, C_MUT, 0);
     static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes", "Doramas" };
-    int chip_x = 40;
+    int chip_x = 54;
     for (int i = 0; i < 5; i++) {
         int count = srch_count_for(i); char label[48];
         snprintf(label, sizeof(label), "%s  %d", filters[i], count);
         int tw = 0, th = 0; text_cached(gRen, label, C_TEXT, 0, &tw, &th);
         int cw = tw + 28;
-        fill_rect(chip_x, 126, cw, 36, i == g_srchFilter ? C_ACC : C_CARD);
-        text_center_at(label, chip_x, cw, 132, i == g_srchFilter ? C_TEXT : C_MUT, 0);
+        fill_rect(chip_x, 161, cw, 36, i == g_srchFilter ? C_ACC : C_CARD);
+        text_center_at(label, chip_x, cw, 167, i == g_srchFilter ? C_BG : C_MUT, 0);
         chip_x += cw + 12;
     }
     if (n == 0) {
@@ -1705,7 +1706,7 @@ static void draw_search(void) {
         ui_footer("ZL/ZR Filtrar    Y Nova busca    B Voltar");
         return;
     }
-    int top = 184;
+    int top = 221;
     int index = 0;
     for (int group = 0; group < 2; group++) {
         int is_series = group == 0;
@@ -1715,7 +1716,7 @@ static void draw_search(void) {
             if (!srch_matches(it, is_series, g_srchFilter)) continue;
             int col = index % GCOLS, row = index / GCOLS;
             int yy = top + row * (GCH + GGAP) - g_srchScroll;
-            if (yy + GCH >= 66 && yy <= WIN_H) {
+            if (yy + GCH >= 95 && yy <= WIN_H) {
                 int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
                 int fav = is_series ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
                 draw_card(x, yy, GCOVERW, GCOVERH, it, index == g_srchSel, fav);
@@ -1778,84 +1779,89 @@ static void draw_series(void) {
     const char *section = jstr(s, "section");
     const char *area = section && !strcmp(section, "anime") ? "NPLAY / ANIME" :
                        section && !strcmp(section, "dorama") ? "NPLAY / DORAMA" : "NPLAY / SERIE";
-    ui_header(area, title, "B Voltar");
+    ui_header(area, NULL, "B Voltar");
 
-    int LX = 48, LW = 212;
-    ui_panel(32, 88, 244, 548, C_ACC);
+    SDL_Rect hero = { 52, 110, WIN_W - 104, 276 };
+    fill_rect(hero.x, hero.y, hero.w, hero.h, C_CARD);
+    SDL_Texture *backdrop = cover_get(jstr(s, "backdrop"));
+    if (backdrop) ui_backdrop(backdrop, &hero);
     SDL_Texture *tex = cover_get(jstr(s, "logo"));
-    SDL_Rect cr = { LX, 104, LW, 302 };
-    if (tex) ui_cover(tex, &cr); else fill_rect(LX, 104, LW, 302, C_BAR);
+    SDL_Rect cr = { 65, 120, 175, 255 };
+    fill_rect(cr.x, cr.y, cr.w, cr.h, C_BAR);
+    if (tex) ui_contain(tex, &cr);
+    fill_rect(52, 110, 5, 276, C_ACC);
+
+    text_clip(title, 270, 133, C_TEXT, 1, 940);
     const char *year = jstr(s, "year");
     double rating = 0; cJSON *jr = cJSON_GetObjectItem(s, "rating"); if (jr && cJSON_IsNumber(jr)) rating = jr->valuedouble;
-    char l1[80];
-    if (rating > 0) snprintf(l1, sizeof(l1), "%s%sNota %.1f", year ? year : "", year ? "   " : "", rating);
-    else snprintf(l1, sizeof(l1), "%s", year ? year : "");
-    if (l1[0]) text_clip(l1, LX, 420, C_TEXT, 0, LW);
+    char meta[128];
+    if (rating > 0) snprintf(meta, sizeof(meta), "★ %.1f    %s    %d episodios", rating, year ? year : "", jint(s, "episode_count"));
+    else snprintf(meta, sizeof(meta), "%s    %d episodios", year ? year : "", jint(s, "episode_count"));
+    text_clip(meta, 270, 178, C_ACC2, 0, 900);
     const char *genre = jstr(s, "genre");
-    if (genre) text_clip(genre, LX, 452, C_MUT, 0, LW);
-    char epc[48]; snprintf(epc, sizeof(epc), "%d episodios", jint(s, "episode_count"));
-    text_clip(epc, LX, 484, C_MUT, 0, LW);
+    if (genre) text_clip(genre, 270, 209, C_MUT, 2, 890);
+    const char *plot = jstr(s, "plot");
+    if (plot && plot[0]) {
+        text_clip(plot, 270, 242, C_TEXT, 0, 890);
+        // O painel nativo usa a mesma sintese de texto da faixa de detalhes da TV.
+    }
+    fill_rect(270, 304, 177, 48, C_ACC);
+    text_center_at("A  Assistir", 270, 177, 313, C_BG, 0);
+    fill_rect(461, 304, 220, 48, C_CARD);
+    text_center_at(fav ? "X  Favoritado" : "X  Favoritar", 461, 220, 313, C_TEXT, 0);
 
-    // versoes de audio (Legendado/Dublado) - troca com Y
     cJSON *au = ser_audio();
     if (arr_len(au) > 1) {
-        text_draw(gRen, "VERSAO DE AUDIO", LX, 526, C_ACC2, 0);
-        int ai = 0, current = 0; const char *current_label = "?"; cJSON *av;
-        cJSON_ArrayForEach(av, au) {
-            if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) {
-                current = ai; current_label = jstr(av, "label"); if (!current_label) current_label = "?";
-            }
-            ai++;
+        const char *label = "Audio"; cJSON *av;
+        cJSON_ArrayForEach(av, au) if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) {
+            const char *current = jstr(av, "label"); if (current) label = current;
         }
-        char audio_state[96]; snprintf(audio_state, sizeof(audio_state), "%s  %d/%d", current_label, current + 1, arr_len(au));
-        text_clip(audio_state, LX, 558, C_TEXT, 0, LW);
-        text_draw(gRen, "ZL/ZR para trocar", LX, 594, C_MUT, 0);
+        fill_rect(695, 304, 228, 48, C_CARD);
+        char audio_label[100]; snprintf(audio_label, sizeof(audio_label), "ZL/ZR  %s", label);
+        text_center_at(audio_label, 695, 228, 313, C_TEXT, 0);
     }
-
-    int RX = 300, REND = WIN_W - 40;
     int grouped = ser_grouped();
     int nsea = ser_nseasons(), nep = ser_nep();
-    char sh[64];
-    if (grouped) snprintf(sh, sizeof(sh), "Temporada %d de %d", ser_group_idx() + 1, nsea);
-    else { cJSON *sa = season_arr(); snprintf(sh, sizeof(sh), "Temporada %s", (sa && sa->string) ? sa->string : "1"); }
-    text_draw(gRen, sh, RX, 96, C_TEXT, 1);
-    if (nsea > 1) { char hint[64]; snprintf(hint, sizeof(hint), "L/R  %d temporadas", nsea); text_draw(gRen, hint, RX + 300, 104, C_MUT, 0); }
-    fill_rect(WIN_W - 276, 92, 236, 42, fav ? C_ROSE : C_CARD);
-    text_center_at(fav ? "X  Na Minha lista" : "X  Adicionar a lista",
-                   WIN_W - 276, 236, 99, C_TEXT, 0);
-    fill_rect(RX, 148, REND - RX, 2, C_CARD);
-
-    int listTop = 168, rowH = 44, visible = (WIN_H - listTop - 44) / rowH;
-    if (g_epSel < g_epScroll) g_epScroll = g_epSel;
-    if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
-    for (int i = g_epScroll; i < nep && i < g_epScroll + visible; i++) {
+    text_draw(gRen, "Temporadas", 54, 397, C_TEXT, 0);
+    if (nsea > 1) text_right("L/R trocar temporada", WIN_W - 54, 400, C_MUT, 2);
+    int current_season = grouped ? ser_group_idx() : g_seasonIdx;
+    int first_season = current_season > 5 ? current_season - 5 : 0;
+    for (int i = first_season; i < nsea && i < first_season + 7; i++) {
+        int x = 54 + (i - first_season) * 160;
+        fill_rect(x, 432, 150, 35, i == current_season ? C_ACC : C_CARD);
+        char chip[48]; snprintf(chip, sizeof(chip), "Temporada %d", i + 1);
+        text_center_at(chip, x, 150, 437, i == current_season ? C_BG : C_TEXT, 2);
+    }
+    char sh[64]; snprintf(sh, sizeof(sh), "Temporada %d", current_season + 1);
+    text_draw(gRen, sh, 54, 478, C_TEXT, 0);
+    char count[50]; snprintf(count, sizeof(count), "%d episodios", nep);
+    text_draw(gRen, count, 250, 484, C_MUT, 2);
+    int start = g_epSel - 2;
+    if (start < 0) start = 0;
+    if (start > nep - 5) start = nep > 5 ? nep - 5 : 0;
+    for (int i = start; i < nep && i < start + 5; i++) {
         cJSON *ep = ser_ep_at(i);
-        int yy = listTop + (i - g_epScroll) * rowH;
-        if (i == g_epSel) { fill_rect(RX - 8, yy - 5, REND - RX + 16, rowH - 2, C_CARD); fill_rect(RX - 8, yy - 5, 4, rowH - 2, C_ACC2); }
-        int en = jint(ep, "episode"); char nb[16]; snprintf(nb, sizeof(nb), "%d", en > 0 ? en : i + 1);
+        int x = 54 + (i - start) * (RCW + RGAP);
+        fill_rect(x, 514, RCW, 142, i == g_epSel ? (SDL_Color){38, 34, 61, 255} : C_CARD);
+        if (i == g_epSel) ui_focus(x - 4, 510, RCW + 8, 150);
+        const char *still = jstr(ep, "ep_still");
+        if (!still) still = jstr(ep, "logo");
+        SDL_Texture *thumb = cover_get(still ? still : jstr(s, "logo"));
+        if (thumb) { SDL_Rect er = {x, 514, RCW, 87}; ui_cover(thumb, &er); }
+        int en = jint(ep, "episode"); char nb[32]; snprintf(nb, sizeof(nb), "T%d · E%d", current_season + 1, en > 0 ? en : i + 1);
         int done = episode_completed(ep);
         int pos = jint(ep, "position_seconds"), duration = jint(ep, "duration_seconds");
         int progress = (!done && pos > 10 && duration > 0) ? pos * 100 / duration : 0;
         if (progress > 99) progress = 99;
-        text_draw(gRen, nb, RX, yy, (i == g_epSel) ? C_ACC : (done ? C_GREEN : C_MUT), 0);
-        text_clip(ep_display_title(ep), RX + 52, yy, (i == g_epSel) ? C_TEXT : C_MUT, 0, REND - RX - 130);
-        if (done) text_draw(gRen, "Visto", REND - 70, yy, C_GREEN, 2);
-        else if (progress > 0) {
-            char pct[16]; snprintf(pct, sizeof(pct), "%d%%", progress);
-            text_draw(gRen, pct, REND - 62, yy, C_ACC2, 2);
-            fill_rect(RX + 52, yy + 29, REND - RX - 138, 3, C_CARD);
-            fill_rect(RX + 52, yy + 29, (REND - RX - 138) * progress / 100, 3, C_ACC);
+        text_clip(nb, x + 8, 605, C_ACC2, 2, RCW - 16);
+        text_clip(ep_display_title(ep), x + 8, 626, C_TEXT, 2, RCW - 16);
+        if (done || progress > 0) {
+            fill_rect(x, 597, RCW, 4, C_MUT);
+            fill_rect(x, 597, RCW * (done ? 100 : progress) / 100, 4, C_ROSE);
         }
     }
-    // barra de rolagem (ha muitos episodios)
-    if (nep > visible) {
-        int trkH = visible * rowH, thumbH = trkH * visible / nep;
-        int thumbY = listTop + (trkH - thumbH) * g_epScroll / (nep - visible);
-        fill_rect(REND + 8, listTop, 4, trkH, C_CARD);
-        fill_rect(REND + 8, thumbY, 4, thumbH < 12 ? 12 : thumbH, C_ACC);
-    }
-    if (nep == 0) text_draw(gRen, "Sem episodios", RX, listTop, C_MUT, 0);
-    ui_footer("A Assistir    L/R Temporada    Y Preparar episodios    X Minha lista    + Listas    ZL/ZR Audio");
+    if (nep == 0) text_draw(gRen, "Sem episodios nesta temporada", 54, 535, C_MUT, 0);
+    ui_footer("A Assistir    Esquerda/direita Episodio    L/R Temporada    X Favoritar    ZL/ZR Audio");
 }
 
 // Menu "baixar episodios" (Y no detalhe): marca quais episodios baixar.
@@ -1868,10 +1874,10 @@ static void open_dlmenu(void) {
 static void draw_dlmenu(void) {
     cJSON *s = ser_obj(); const char *title = jstr(s, "title");
     ui_header("SALVAR NA CONTA", title ? title : "Escolher episodios", "B Cancelar");
-    text_center("Escolha os episodios que deseja deixar prontos para assistir", 78, C_MUT, 0);
+    text_center("Escolha os episodios que deseja deixar prontos para assistir", 104, C_MUT, 0);
     int n = ser_nep(), cnt = 0;
     for (int i = 0; i < g_epChkN; i++) if (g_epChk[i]) cnt++;
-    int listTop = 118, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
+    int listTop = 143, rowH = 40, visible = (WIN_H - listTop - 56) / rowH;
     if (g_epSel < g_epScroll) g_epScroll = g_epSel;
     if (g_epSel >= g_epScroll + visible) g_epScroll = g_epSel - visible + 1;
     for (int i = g_epScroll; i < n && i < g_epScroll + visible; i++) {
@@ -1947,30 +1953,27 @@ int media_list_prompt_add(int id, int is_series, const char *title, const char *
     return media_list_add_named(name, id, is_series, title, logo);
 }
 
-#define HIST_CW 168
-#define HIST_CH 224
-#define HIST_GAP 20
+#define HIST_CW 216
+#define HIST_CH 216
+#define HIST_GAP 18
 
 static int horizontal_scroll(int selected, int item_w, int gap) {
-    int x = 40 + selected * (item_w + gap), scroll = 0;
-    if (x + item_w > WIN_W - 40) scroll = x + item_w - (WIN_W - 40);
+    int x = 54 + selected * (item_w + gap), scroll = 0;
+    if (x + item_w > WIN_W - 54) scroll = x + item_w - (WIN_W - 54);
     return scroll > 0 ? scroll : 0;
 }
 
 static void draw_history_card(int x, int y, cJSON *item, int selected) {
     const char *title = jstr(item, "title"); if (!title) title = "Titulo";
-    if (selected) {
-        fill_rect(x - 8, y - 8, HIST_CW + 16, HIST_CH + 16, (SDL_Color){ 4, 6, 11, 255 });
-        border_rect(x - 5, y - 5, HIST_CW + 10, HIST_CH + 10, 2, C_ACC);
-    }
+    fill_rect(x, y, HIST_CW, HIST_CH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
+    if (selected) ui_focus(x - 4, y - 4, HIST_CW + 8, HIST_CH + 60);
     SDL_Texture *cover = cover_get(jstr(item, "logo"));
     if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; ui_cover(cover, &r); }
     else fill_rect(x, y, HIST_CW, HIST_CH, C_CARD);
     int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
     int pct = dur > 0 ? pos * 100 / dur : 0;
-    ui_progress(x, y + HIST_CH - 8, HIST_CW, pct, C_ACC);
-    text_clip(title, x, y + HIST_CH + 8, selected ? C_TEXT : C_MUT, 0, HIST_CW);
-    if (selected) fill_rect(x, y + HIST_CH + 37, HIST_CW, 2, C_ACC2);
+    ui_progress(x, y + HIST_CH - 4, HIST_CW, pct, C_ROSE);
+    text_clip(title, x + 8, y + HIST_CH + 8, C_TEXT, 0, HIST_CW - 16);
     if (!strcmp(jstr(item, "kind") ? jstr(item, "kind") : "", "episode")) {
         char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
         ui_card_badge(ep, x + 7, y + 7, C_ACC2);
@@ -2011,30 +2014,30 @@ static int history_set_position(cJSON *item, int position) {
 
 static void draw_history_home(void) {
     cJSON *items = history_items(); int nh = arr_len(items);
-    text_draw(gRen, "Continuar assistindo", 40, 88, g_history_zone == 0 ? C_TEXT : C_MUT, 1);
-    text_right(nh ? "A retoma do ponto salvo" : "Seu progresso aparecera aqui", WIN_W - 40, 96, C_MUT, 0);
+    text_draw(gRen, "Continuar assistindo", 54, 110, C_TEXT, 1);
+    text_right(nh ? "A retoma do ponto salvo" : "Seu progresso aparecera aqui", WIN_W - 54, 119, C_MUT, 0);
     if (!g_history && g_history_thread) {
-        text_draw(gRen, "Carregando seu historico...", 40, 146, C_MUT, 0);
+        text_draw(gRen, "Carregando seu historico...", 54, 157, C_MUT, 0);
     } else if (nh <= 0) {
-        ui_panel(40, 134, WIN_W - 80, 250, C_ACC2);
-        text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 202, C_TEXT, 1);
-        text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 264, C_MUT, 0);
+        ui_panel(54, 152, WIN_W - 108, 240, C_ACC2);
+        text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 214, C_TEXT, 1);
+        text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 276, C_MUT, 0);
     } else {
         int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
         for (int i = 0; i < nh; i++) {
-            int x = 40 + i * (HIST_CW + HIST_GAP) - scroll;
+            int x = 54 + i * (HIST_CW + HIST_GAP) - scroll;
             if (x + HIST_CW < 0 || x > WIN_W) continue;
-            draw_history_card(x, 134, cJSON_GetArrayItem(items, i), g_history_zone == 0 && i == g_history_sel);
+            draw_history_card(x, 152, cJSON_GetArrayItem(items, i), g_history_zone == 0 && i == g_history_sel);
         }
     }
 
     int list_count = store_media_list_count();
-    text_draw(gRen, "Suas listas", 40, 418, g_history_zone == 1 ? C_TEXT : C_MUT, 1);
-    text_right("Biblioteca, favoritos e colecoes pessoais", WIN_W - 40, 426, C_MUT, 0);
+    text_draw(gRen, "Suas listas", 54, 433, C_TEXT, 1);
+    text_right("Biblioteca, favoritos e colecoes pessoais", WIN_W - 54, 442, C_MUT, 0);
     int total = list_count + 2; // Biblioteca + listas locais + Nova lista
     int tile_w = 270, tile_gap = 18, scroll = horizontal_scroll(g_list_sel, tile_w, tile_gap);
     for (int i = 0; i < total; i++) {
-        int x = 40 + i * (tile_w + tile_gap) - scroll, y = 466;
+        int x = 54 + i * (tile_w + tile_gap) - scroll, y = 481;
         if (x + tile_w < 0 || x > WIN_W) continue;
         int selected = g_history_zone == 1 && i == g_list_sel;
         ui_panel(x, y, tile_w, 158, C_ACC);
@@ -2068,8 +2071,8 @@ static void draw_history_home(void) {
 
 // Biblioteca: uma capa por obra preparada para reproducao.
 static void draw_dl_grid(void) {
-    text_draw(gRen, "Biblioteca", 40, 88, C_TEXT, 1);
-    text_draw(gRen, "Obras preparadas para assistir", 40, 126, C_MUT, 0);
+    text_draw(gRen, "Biblioteca", 54, 111, C_TEXT, 1);
+    text_draw(gRen, "Obras preparadas para assistir", 54, 149, C_MUT, 0);
     if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 90, C_GREEN);
     if (!g_dl && g_dl_thread) {
         ui_empty_state("Atualizando seus itens", "Buscando o estado mais recente da sua conta...");
@@ -2081,7 +2084,7 @@ static void draw_dl_grid(void) {
         ui_footer("B Voltar ao Historico");
         return;
     }
-    int top = 164;
+    int top = 184;
     for (int i = 0; i < g_dlgN; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -2089,8 +2092,8 @@ static void draw_dl_grid(void) {
         if (yy + GCH < 66 || yy > WIN_H) continue;
         cJSON *j0 = dlg_job(i, 0);
         if (i == g_dlSel) {
-            fill_rect(x - 8, yy - 8, GCOVERW + 16, GCOVERH + 16, (SDL_Color){ 4, 6, 11, 255 });
-            border_rect(x - 5, yy - 5, GCOVERW + 10, GCOVERH + 10, 2, C_ACC);
+            fill_rect(x, yy, GCOVERW, GCH, (SDL_Color){38, 34, 61, 255});
+            ui_focus(x - 4, yy - 4, GCOVERW + 8, GCH + 8);
         }
         SDL_Texture *cov = cover_get(jstr(j0, "cover"));
         SDL_Rect cr = { x, yy, GCOVERW, GCOVERH };
@@ -2115,11 +2118,11 @@ static void draw_dl_detail(void) {
     if (g >= g_dlgN) { g_dlView = 0; return; }
     cJSON *j0 = dlg_job(g, 0);
     const char *title = jstr(j0, "title"); if (!title) title = "";
-    text_draw(gRen, "EPISODIOS PREPARADOS", 40, 92, C_ACC2, 0);
-    text_clip(title, 40, 124, C_TEXT, 1, WIN_W - 300);
+    text_draw(gRen, "EPISODIOS PREPARADOS", 54, 114, C_ACC2, 0);
+    text_clip(title, 54, 146, C_TEXT, 1, WIN_W - 300);
     if (dl_has_active()) ui_badge("TELA ATIVA", WIN_W - 174, 96, C_GREEN);
     int nj = g_dlg[g].nJobs;
-    int listTop = 176, rowH = 46, visible = (WIN_H - listTop - 56) / rowH;
+    int listTop = 195, rowH = 46, visible = (WIN_H - listTop - 56) / rowH;
     if (g_dlDetSel < g_dlDetScroll) g_dlDetScroll = g_dlDetSel;
     if (g_dlDetSel >= g_dlDetScroll + visible) g_dlDetScroll = g_dlDetSel - visible + 1;
     for (int i = g_dlDetScroll; i < nj && i < g_dlDetScroll + visible; i++) {
@@ -2159,16 +2162,16 @@ static void draw_dl_detail(void) {
 static void draw_custom_list(void) {
     const char *name = store_media_list_name(g_open_list);
     int n = store_media_list_item_count(g_open_list);
-    text_draw(gRen, "LISTA PESSOAL", 40, 90, C_ACC2, 0);
-    text_clip(name, 40, 122, C_TEXT, 1, 760);
+    text_draw(gRen, "LISTA PESSOAL", 54, 112, C_ACC2, 0);
+    text_clip(name, 54, 144, C_TEXT, 1, 760);
     char total[64]; snprintf(total, sizeof(total), "%d titulo%s", n, n == 1 ? "" : "s");
-    text_right(total, WIN_W - 40, 130, C_MUT, 0);
+    text_right(total, WIN_W - 54, 152, C_MUT, 0);
     if (n <= 0) {
         ui_empty_state("Esta lista esta vazia", "Use X nos relacionados para adicionar uma obra.");
         ui_footer("Y Renomear lista    ZR Excluir lista    B Voltar");
         return;
     }
-    int top = 174, selected_row = g_list_item_sel / GCOLS;
+    int top = 194, selected_row = g_list_item_sel / GCOLS;
     int selected_bottom = top + selected_row * (GCH + GGAP) + GCH;
     int scroll_px = selected_bottom > WIN_H - 52 ? selected_bottom - (WIN_H - 52) + 16 : 0;
     for (int i = 0; i < n; i++) {
@@ -2179,8 +2182,8 @@ static void draw_custom_list(void) {
         int id = 0, is_series = 0; char title[128], logo[720];
         if (!store_media_list_get(g_open_list, i, &id, &is_series, title, sizeof(title), logo, sizeof(logo))) continue;
         if (i == g_list_item_sel) {
-            fill_rect(x - 8, y - 8, GCOVERW + 16, GCOVERH + 16, (SDL_Color){ 4, 6, 11, 255 });
-            border_rect(x - 5, y - 5, GCOVERW + 10, GCOVERH + 10, 2, C_ACC);
+            fill_rect(x, y, GCOVERW, GCH, (SDL_Color){38, 34, 61, 255});
+            ui_focus(x - 4, y - 4, GCOVERW + 8, GCH + 8);
         }
         SDL_Texture *cover = cover_get(logo);
         if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; ui_cover(cover, &r); }
@@ -2297,7 +2300,7 @@ static void input_landing(int b) {
             } else if (nh > 0) g_railSel = -1;
         } else if (b == JOY_A) do_search();
         if (g_railSel == g_railsN) {
-            int sy = (nh > 0 ? RAILS_TOP : 120) + g_railsN * (30 + RCH + 44);
+            int sy = (nh > 0 ? RAILS_TOP : 125) + g_railsN * RAIL_STEP;
             if (sy + 132 - g_homeScroll > WIN_H - 52) g_homeScroll = sy + 132 - (WIN_H - 52) + 12;
         } else if (g_railSel < 0) g_homeScroll = 0;
         return;
@@ -2309,10 +2312,10 @@ static void input_landing(int b) {
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
     else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { int is = catalog_item_is_series(it, g_rails[g_railSel].is_series); int id = catalog_favorite_id(it, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
-    int ry = (nh > 0 ? RAILS_TOP : 120) + g_railSel * (30 + RCH + 44);
-    int item_h = g_railSel == g_railsN ? 112 : RCH + 60;
+    int ry = (nh > 0 ? RAILS_TOP : 125) + g_railSel * RAIL_STEP;
+    int item_h = g_railSel == g_railsN ? 112 : RCH + 90;
     if (ry + item_h - g_homeScroll > WIN_H - 52) g_homeScroll = ry + item_h - (WIN_H - 52) + 20;
-    if (ry - g_homeScroll < 80) g_homeScroll = ry - 80;
+    if (ry - g_homeScroll < 105) g_homeScroll = ry - 105;
     if (g_homeScroll < 0) g_homeScroll = 0;
 }
 static void input_search(int b) {
@@ -2331,9 +2334,9 @@ static void input_search(int b) {
     else if (b == JOY_DRIGHT) { if (g_srchSel + 1 < n) g_srchSel++; }
     else if (b == JOY_A) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) open_item(it, is); }
     else if (b == JOY_X) { int is; cJSON *it = srch_at(g_srchSel, &is); if (it) { if (is) toggle_fav_series(jint(it, "id")); else toggle_fav_item(jint(it, "id")); } }
-    int row = g_srchSel / GCOLS, rowTop = 184 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    int row = g_srchSel / GCOLS, rowTop = 221 + row * (GCH + GGAP), rowBot = rowTop + GCH;
     if (rowBot - g_srchScroll > WIN_H - 52) g_srchScroll = rowBot - (WIN_H - 52) + 16;
-    if (rowTop - g_srchScroll < 184) g_srchScroll = rowTop - 184;
+    if (rowTop - g_srchScroll < 221) g_srchScroll = rowTop - 221;
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
 static int prompt_next_episode(cJSON *episode) {
@@ -2390,8 +2393,8 @@ static void input_series(int b) {
         cJSON *au = ser_audio();
         if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
     }
-    else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
-    else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
+    else if (b == JOY_DLEFT || b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
+    else if (b == JOY_DRIGHT || b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
     else if (b == JOY_L) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
@@ -2579,9 +2582,9 @@ static void input_downloads(int b) {
     else if (b == JOY_X) {   // remove a obra inteira
         if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
     }
-    int row = g_dlSel / GCOLS, rowTop = 164 + row * (GCH + GGAP), rowBot = rowTop + GCH;
+    int row = g_dlSel / GCOLS, rowTop = 184 + row * (GCH + GGAP), rowBot = rowTop + GCH;
     if (rowBot - g_dlScroll > WIN_H - 52) g_dlScroll = rowBot - (WIN_H - 52) + 16;
-    if (rowTop - g_dlScroll < 164) g_dlScroll = rowTop - 164;
+    if (rowTop - g_dlScroll < 184) g_dlScroll = rowTop - 184;
     if (g_dlScroll < 0) g_dlScroll = 0;
 }
 
@@ -2804,8 +2807,8 @@ static void draw_settings(void) {
     ui_header("NPLAY", "Configuracoes", "B Voltar");
     char v[96]; snprintf(v, sizeof(v), "Versao %s", APP_VERSION_STR);
     char u[180]; snprintf(u, sizeof(u), "Conta  %s", g_user[0] ? g_user : "-");
-    text_draw(gRen, u, 40, 92, C_TEXT, 0);
-    text_right(v, WIN_W - 40, 92, C_MUT, 0);
+    text_draw(gRen, u, 40, 104, C_TEXT, 0);
+    text_right(v, WIN_W - 40, 104, C_MUT, 0);
     text_draw(gRen, "CONTA E BIBLIOTECA", 40, 138, C_ACC2, 0);
 
     ui_panel(40, 174, 580, 170, C_ACC);
@@ -3064,6 +3067,11 @@ int main(int argc, char **argv) {
     SDL_Window *win = SDL_CreateWindow("Nplay", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_W, WIN_H, SDL_WINDOW_SHOWN);
     gRen = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_SetRenderDrawBlendMode(gRen, SDL_BLENDMODE_BLEND);
+    SDL_RWops *brand_data = SDL_RWFromConstMem(brand_bin, (int)brand_bin_size);
+    if (brand_data) {
+        SDL_Surface *brand_surface = IMG_Load_RW(brand_data, 1);
+        if (brand_surface) { g_brand = SDL_CreateTextureFromSurface(gRen, brand_surface); SDL_FreeSurface(brand_surface); }
+    }
     SDL_InitSubSystem(SDL_INIT_JOYSTICK);
     g_joy = SDL_JoystickOpen(0);
 
@@ -3196,6 +3204,7 @@ int main(int argc, char **argv) {
     SDL_DestroyMutex(g_cov_mtx);
     text_exit(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
+    if (g_brand) SDL_DestroyTexture(g_brand);
     SDL_DestroyRenderer(gRen); SDL_DestroyWindow(win);
     diag_exit();
     IMG_Quit(); SDL_Quit(); socketExit();

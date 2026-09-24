@@ -5,12 +5,12 @@
 
 const SDL_Color C_BG   = {  8, 10, 15, 255 };
 const SDL_Color C_BAR  = { 12, 15, 23, 255 };
-const SDL_Color C_CARD = { 20, 24, 36, 255 };
-const SDL_Color C_TEXT = { 234, 240, 250, 255 };
-const SDL_Color C_MUT  = { 139, 150, 173, 255 };
-const SDL_Color C_ACC  = { 139, 92, 246, 255 };
-const SDL_Color C_ACC2 = { 59, 130, 246, 255 };
-const SDL_Color C_ROSE = { 251, 113, 133, 255 };
+const SDL_Color C_CARD = { 21, 25, 39, 255 };
+const SDL_Color C_TEXT = { 244, 245, 252, 255 };
+const SDL_Color C_MUT  = { 170, 178, 197, 255 };
+const SDL_Color C_ACC  = { 155, 124, 255, 255 };
+const SDL_Color C_ACC2 = { 101, 168, 255, 255 };
+const SDL_Color C_ROSE = { 239, 120, 199, 255 };
 const SDL_Color C_GREEN= { 52, 211, 153, 255 };
 
 void fill_rect(int x, int y, int w, int h, SDL_Color c) {
@@ -37,6 +37,32 @@ void ui_cover(SDL_Texture *texture, const SDL_Rect *dst) {
     if (lhs > rhs) { src.w = th * dst->w / dst->h; src.x = (tw - src.w) / 2; }
     else if (lhs < rhs) { src.h = tw * dst->h / dst->w; src.y = (th - src.h) / 2; }
     SDL_RenderCopy(gRen, texture, &src, dst);
+}
+
+void ui_contain(SDL_Texture *texture, const SDL_Rect *dst) {
+    int tw = 0, th = 0;
+    if (!texture || !dst || SDL_QueryTexture(texture, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) return;
+    SDL_Rect out = *dst;
+    if ((long long)tw * dst->h > (long long)th * dst->w) {
+        out.h = th * dst->w / tw;
+        out.y += (dst->h - out.h) / 2;
+    } else {
+        out.w = tw * dst->h / th;
+        out.x += (dst->w - out.w) / 2;
+    }
+    SDL_RenderCopy(gRen, texture, NULL, &out);
+}
+
+void ui_backdrop(SDL_Texture *texture, const SDL_Rect *dst) {
+    if (!texture || !dst) return;
+    ui_cover(texture, dst);
+    // TV shell: imagem legivel a direita, texto sobre uma rampa escura a esquerda.
+    for (int i = 0; i < 16; i++) {
+        int x = dst->x + dst->w * i / 16;
+        int next = dst->x + dst->w * (i + 1) / 16;
+        fill_rect(x, dst->y, next - x + 1, dst->h,
+                  (SDL_Color){8, 10, 15, (Uint8)(248 - i * 14)});
+    }
 }
 
 void toast(const char *msg) {
@@ -100,23 +126,23 @@ int text_right(const char *s, int right, int y, SDL_Color c, int big) {
 }
 
 void ui_header(const char *section, const char *title, const char *action) {
-    fill_rect(0, 0, WIN_W, 72, C_BAR);
-    fill_rect(0, 0, 6, 72, C_ACC);
-    if (section && section[0]) text_draw(gRen, section, 40, 24, C_ACC, 0);
+    fill_rect(0, 0, WIN_W, 95, C_BAR);
+    fill_rect(0, 0, WIN_W, 3, C_ACC);
+    if (section && section[0]) text_draw(gRen, section, 50, 31, C_ACC, 0);
     if (title && title[0]) {
         int w = 0, h = 0;
         SDL_Texture *t = text_cached(gRen, title, C_TEXT, 1, &w, &h);
         int maxw = 680;
         if (t) {
-            SDL_Rect clip = { 300, 12, maxw, 48 };
+            SDL_Rect clip = { 300, 22, maxw, 48 };
             SDL_RenderSetClipRect(gRen, &clip);
-            SDL_Rect d = { 300 + (maxw - (w > maxw ? maxw : w)) / 2, 17, w, h };
+            SDL_Rect d = { 300 + (maxw - (w > maxw ? maxw : w)) / 2, 27, w, h };
             SDL_RenderCopy(gRen, t, NULL, &d);
             SDL_RenderSetClipRect(gRen, NULL);
         }
     }
-    if (action && action[0]) text_right(action, WIN_W - 40, 24, C_MUT, 0);
-    fill_rect(40, 71, WIN_W - 80, 1, C_CARD);
+    if (action && action[0]) text_right(action, WIN_W - 50, 31, C_MUT, 0);
+    fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 
 void ui_footer(const char *hint) {
@@ -131,7 +157,7 @@ void ui_panel(int x, int y, int w, int h, SDL_Color accent) {
 }
 
 void ui_focus(int x, int y, int w, int h) {
-    border_rect(x, y, w, h, 3, C_ACC2);
+    border_rect(x, y, w, h, 4, (SDL_Color){255, 255, 255, 255});
 }
 
 void ui_badge(const char *label, int x, int y, SDL_Color color) {

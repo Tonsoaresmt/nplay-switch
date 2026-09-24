@@ -1,4 +1,19 @@
-# Nplay Switch 0.11: reconstrução incremental
+# Nplay Switch: reconstrução nativa guiada pelo modo TV
+
+## Correção de escopo em 0.12.0
+
+A 0.11.0 publicada estabilizou consultas e perfis, mas conservou o layout SDL
+antigo. Ela não foi uma reformulação visual. A 0.12.0 em desenvolvimento muda
+de fato o cabeçalho, a logo em tempo de execução, o foco branco, as cores, o
+destaque horizontal, as fileiras de cinco cards, a busca de cinco colunas, os
+detalhes de filme e os episódios de série em cards com imagem. O D-pad navega
+esses episódios horizontalmente; L/R continuam trocando temporadas.
+
+Esta versão ainda não é paridade funcional completa com a TV web: Sagas,
+Favoritos, Minha lista e Pedidos permanecem sob fluxos nativos existentes ou
+sem aba dedicada. A falha HTTP 404 relatada pelo usuário ao iniciar reprodução
+na 0.11.0 também precisa de diagnóstico no console; o trabalho visual não a
+resolve. Não publicar como `latest` antes de validar ambos no hardware.
 
 O Switch continua um cliente nativo SDL2/FFmpeg/libcurl. A TV web é a referência
 de organização visual e de recursos, não um runtime a ser embutido no NRO. O

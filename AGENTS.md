@@ -4,6 +4,19 @@
 
 O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura SDL2/FFmpeg/libcurl existente. Priorize fluidez da UI, uso previsivel de memoria e estabilidade do streaming.
 
+## Rodada visual 0.12.0 (24/09/2026)
+
+- A 0.11.0 publicada manteve o layout antigo. A 0.12.0 em desenvolvimento porta
+  a composicao visual de `public/tv/shell.css` para o SDL: header de 95 px,
+  paleta TV, marca embutida, destaque panoramico, cinco cards por fileira,
+  foco branco, detalhe largo e episodios com miniaturas.
+- Build e contrato site/Switch foram executados localmente. Ainda falta testar
+  desenho e navegacao em Switch real. O 404 ao pressionar Assistir na 0.11.0
+  nao foi diagnosticado; nao tratar o build como prova de reproducao.
+- Os novos assets visuais nao podem aumentar o numero de texturas de catalogo
+  carregadas durante abertura HLS. Manter o teto LRU e liberar memoria para o
+  player antes de tocar.
+
 ## Estado das otimizacoes
 
 - `source/main.c`: cache de capas usa hash para lookup, fila de surfaces prontas e limite LRU de 160 texturas.

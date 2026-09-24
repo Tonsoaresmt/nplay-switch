@@ -44,6 +44,8 @@ extern char g_toast[160];
 void fill_rect(int x, int y, int w, int h, SDL_Color c);
 void border_rect(int x, int y, int w, int h, int th, SDL_Color c);
 void ui_cover(SDL_Texture *texture, const SDL_Rect *dst);
+void ui_contain(SDL_Texture *texture, const SDL_Rect *dst);
+void ui_backdrop(SDL_Texture *texture, const SDL_Rect *dst);
 void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw);
 int  text_center(const char *s, int y, SDL_Color c, int big);
 int  text_center_at(const char *s, int x, int w, int y, SDL_Color c, int big);
