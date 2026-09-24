@@ -1,5 +1,17 @@
 # Continuidade para agentes
 
+## Rodada 0.12.9 (24/09/2026)
+
+- Relato no hardware: começar do início reproduziu sem travar; a espera em
+  “Preparando vídeo” parece concentrada no fluxo de Continuar. O diagnóstico
+  da reprodução bem-sucedida registrou início em cerca de 3,7 s e zero pausas.
+- A retomada HLS busca a posição antes do primeiro quadro. Se não houver quadro
+  em até 12 s após o seek, a tentativa volta ao início na mesma fonte. Nenhum
+  progresso é substituído pela posição de uma tentativa sem quadro exibido.
+- Um HLS que atinge EOF após o seek sem mostrar quadro também ativa a
+  recuperação. A causa exata do bloqueio no FFmpeg/console ainda não foi
+  comprovada por rastreio dessa tentativa específica.
+
 ## Rodada 0.12.8 (24/09/2026)
 
 - Logs reais de X-Men '97 T1E1 na 0.12.7 mostram entrega R2/HLS, playlists

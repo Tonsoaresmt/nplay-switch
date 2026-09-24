@@ -645,7 +645,8 @@ typedef struct {
 } PlaybackHeartbeat;
 static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *req,
                                 PlaybackHeartbeat *heartbeat, double start_sec,
-                                double *out_pos, double *out_dur) {
+                                double *out_pos, double *out_dur,
+                                int *out_resume_seeked, int *out_presented_frame) {
     Uint32 play_started_tick = SDL_GetTicks();
     Uint32 open_elapsed_ms = 0, probe_elapsed_ms = 0, first_present_ms = 0;
     g_player_presented_frame = 0;
@@ -657,6 +658,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                       : "01 memoria: modo applet");
     if (out_pos) *out_pos = 0;
     if (out_dur) *out_dur = 0;
+    if (out_resume_seeked) *out_resume_seeked = 0;
+    if (out_presented_frame) *out_presented_frame = 0;
     
     const char *url = req->url;
     int is_hls = (req->container && !strcmp(req->container, "m3u8"));
@@ -1088,9 +1091,21 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         diag_player_event("seek", "resume-end", "rc=%d ms=%u", seek_rc,
                           SDL_GetTicks() - seek_started);
         if (seek_rc >= 0) {
+            if (out_resume_seeked) *out_resume_seeked = 1;
             audio_clock = start_sec; cur_pos = start_sec;
             wall_start = av_gettime() / 1000000.0 - start_sec;
+            // Um seek HLS pode retornar sucesso mas nao entregar o primeiro
+            // quadro. Nao deixe a retomada prender a tela de preparacao: o
+            // supervisor pode reabrir a mesma fonte desde o inicio.
+            if (native_hls) {
+                int64_t resume_deadline = av_gettime_relative() + 12000000LL;
+                if (open_watch.deadline_us > resume_deadline)
+                    open_watch.deadline_us = resume_deadline;
+                nplay_curl_avio_set_startup_window(12000u);
+                first_frame_started = SDL_GetTicks();
+            }
         }
+        if (open_watch.timed_out && out_resume_seeked) *out_resume_seeked = 1;
         if (open_watch.cancelled) running = 0;
         if (open_watch.timed_out) {
             player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
@@ -1644,8 +1659,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         av_packet_unref(pkt);
     }
 
+    // Um HLS que termina logo apos o seek sem mostrar quadro nao concluiu a
+    // reproducao. Trate como falha para acionar a segunda abertura desde zero.
+    if (native_hls && out_resume_seeked && *out_resume_seeked &&
+        !logged_first_present && reached_end) {
+        diag_player_event("seek", "resume-empty", "pos=%.1f", start_sec);
+        player_error_message("Retomada nao entregou video");
+        playback_error = -5;
+        reached_end = 0;
+    }
     if (out_pos) *out_pos = cur_pos;
     if (out_dur) *out_dur = dur;
+    if (out_presented_frame) *out_presented_frame = logged_first_present;
     if (open_watch.cancelled) SDL_FlushEvent(SDL_JOYBUTTONDOWN);
     store_save_player_volume(vol);
     diag_player_event("player", "timing", "open=%u probe=%u first=%u gap=io%d/sync%d/other%d",
@@ -1743,6 +1768,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
 
     int retry_count = 0;
     double current_pos = request->start_sec;
+    double attempt_start = current_pos;
+    int resume_restart_attempted = 0;
     double dur = 0.0;
     int final_rc = 0;
     PlaybackSource active = request->playback;
@@ -1764,6 +1791,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     while (1) {
         SDL_AtomicSet(&hb.pipeline_ready, 0);
         double out_pos = 0, out_dur = 0;
+        int resume_seeked = 0, presented_frame = 0;
         PlayerRequest attempt = *request;
         attempt.playback = active;
         attempt.session_id = active.session_id;
@@ -1773,14 +1801,32 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.container = active.container;
         attempt.url = active.play_url;
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
-                          retry_count + 1, current_pos, active.session_id, active.source_id);
-        int rc = player_play_internal(ren, joy, &attempt, &hb, current_pos, &out_pos, &out_dur);
+                          retry_count + 1, attempt_start, active.session_id, active.source_id);
+        int rc = player_play_internal(ren, joy, &attempt, &hb, attempt_start,
+                                      &out_pos, &out_dur, &resume_seeked, &presented_frame);
         nplay_curl_avio_set_abort_check(NULL, NULL);
         nplay_curl_avio_set_startup_window(0);
         diag_player_event("player", "attempt-end", "attempt=%d rc=%d pos=%.1f dur=%.1f",
                           retry_count + 1, rc, out_pos, out_dur);
-        if (out_pos > 0) current_pos = out_pos;
+        // So grave uma nova posicao depois de realmente mostrar video. Uma
+        // tentativa de retomada pode atualizar cur_pos sem decodificar nada.
+        if (out_pos > 0 && (presented_frame || rc == 1)) current_pos = out_pos;
         if (out_dur > 0) dur = out_dur;
+
+        if (rc < 0 && rc != -11 && resume_seeked && !presented_frame &&
+            !resume_restart_attempted && attempt_start > 3 &&
+            active.container[0] && !strcmp(active.container, "m3u8")) {
+            resume_restart_attempted = 1;
+            attempt_start = 0;
+            diag_player_event("recover", "resume-from-start",
+                              "rc=%d saved=%.1f", rc, current_pos);
+            SDL_SetRenderDrawColor(ren, 15, 15, 15, 255);
+            SDL_RenderClear(ren);
+            draw_center_state(ren, "RETOMADA INDISPONIVEL",
+                              "Abrindo o video desde o inicio...", 0);
+            SDL_RenderPresent(ren);
+            continue;
+        }
 
         if (rc == 1) { // Terminou naturalmente
             result->reason = EXIT_REASON_NATURAL;
@@ -1868,6 +1914,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             }
             active = renewed;
             SDL_AtomicSet(&hb.session_id, active.session_id);
+            attempt_start = presented_frame ? current_pos :
+                            (resume_restart_attempted ? 0 : current_pos);
             retry_count++;
             result->recovery_count = retry_count;
             continue;
