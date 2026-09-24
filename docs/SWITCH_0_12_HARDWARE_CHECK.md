@@ -1,10 +1,10 @@
-# Nplay Switch 0.12.0: teste visual e reprodução no console
+# Nplay Switch 0.12.1: teste de reprodução no console
 
 Este é um candidato da branch `codex/switch-rebuild`, ainda fora da release
 `latest`. A 0.11.0 instalada não baixa esta versão pelo menu de atualização.
 Guarde uma cópia do NRO atual e abra o candidato pelo hbmenu em modo aplicativo.
 
-1. Em Configurações, confirme **Versão 0.12.0**. Compare a Home com a TV:
+1. Em Configurações, confirme **Versão 0.12.1**. Compare a Home com a TV:
    cabeçalho de 95 px, logo nova, destaque panorâmico, cinco cards por fileira
    e contorno branco no foco. Navegue com D-pad e analógico; segure a direção
    por alguns segundos em uma fileira longa.
@@ -15,12 +15,25 @@ Guarde uma cópia do NRO atual e abra o candidato pelo hbmenu em modo aplicativo
    uma obra de nome longo.
 3. Busque uma obra, troque os filtros com ZL/ZR, abra e volte com B. Confira o
    Histórico e a Biblioteca, inclusive ao rolar além da primeira linha.
-4. Reproduza um filme e um episódio que funcionem no site. Se surgir o HTTP
+4. Na Home e nas abas Filmes/Séries, confira se um destaque de filme abre
+   detalhe de filme e se um destaque de série abre detalhe de série. A vitrine
+   das abas deve usar os destaques editoriais prontos que aparecem no site.
+5. Reproduza por pelo menos 10 minutos um filme e um episódio R2 que funcionem
+   no site. Conte pausas perceptíveis e observe se o vídeo pula trechos após
+   uma pausa. Teste também Continuar assistindo, pausa, busca para o meio do
+   vídeo, áudio/legenda e retorno ao catálogo.
+6. Se surgir o HTTP
    404, abra **Configurações > X** e anote a linha de rede com método e caminho
    (GET ou POST, `/api/...`) e o ID do título/episódio. Não copie token, senha
    ou URL assinada. Essa linha distingue catálogo, autorização e mídia.
-5. Se a reprodução começar, teste pausa, seek, áudio/legenda, retorno ao
-   catálogo e retomada. O build local não comprova essas etapas no hardware.
+7. Depois de uma pausa, copie as últimas linhas de
+   `sdmc:/switch/.nplay-player-trace.log`. Eventos `avio close` anormais ou
+   amostrados registram requisições, maior tempo até o primeiro byte e
+   esvaziamentos do buffer;
+   `demux buffering-end` mede a duração da pausa. Esses dados separam lentidão
+   de rede de quadros perdidos no decodificador.
+
+O build local e os testes de contrato não comprovam fluidez no hardware.
 
 O ícone do atalho no menu HOME pertence ao forwarder NSP, não ao NRO. O NRO
 contém o ícone novo para o hbmenu e agora também o usa no cabeçalho interno.

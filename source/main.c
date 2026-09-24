@@ -403,6 +403,7 @@ void detail_return_to_origin(void) {
 static int idx_of(int *arr, int n, int v) { for (int i = 0; i < n; i++) if (arr[i] == v) return i; return -1; }
 static int catalog_item_is_series(cJSON *item, int fallback) {
     const char *kind = item ? jstr(item, "kind") : NULL;
+    if (!kind) kind = item ? jstr(item, "hero_type") : NULL;
     if (kind && (!strcmp(kind, "movie") || !strcmp(kind, "live"))) return 0;
     if (kind && (!strcmp(kind, "series") || !strcmp(kind, "episode"))) return 1;
     return fallback;
@@ -473,6 +474,20 @@ static void hero_pool_add(cJSON *pool, cJSON *items) {
         if (!duplicate) cJSON_AddItemReferenceToArray(pool, item);
     }
 }
+static void hero_pool_add_ready(cJSON *pool, cJSON *items) {
+    if (!pool || !cJSON_IsArray(items)) return;
+    cJSON *item;
+    cJSON_ArrayForEach(item, items) {
+        if (arr_len(pool) >= 8) break;
+        if (!(cJSON_IsTrue(cJSON_GetObjectItem(item, "r2_ready")) || jint(item, "r2_ready")) || !jstr(item, "logo")) continue;
+        int id = jint(item, "id"), duplicate = 0;
+        cJSON *existing;
+        cJSON_ArrayForEach(existing, pool) {
+            if (id > 0 && jint(existing, "id") == id) { duplicate = 1; break; }
+        }
+        if (!duplicate) cJSON_AddItemReferenceToArray(pool, item);
+    }
+}
 // Carrega a landing da aba (0..4). Cada aba vira hero + rails, como no app de PC.
 static void landing_apply(int tab, cJSON *land) {
     g_land = land;
@@ -519,14 +534,15 @@ static void landing_apply(int tab, cJSON *land) {
         cJSON_ArrayForEach(e, gs) add_rail(jstr(e, "genre"), cJSON_GetObjectItem(e, "items"), 1);
     } else {                 // tab-home (movie/series/dorama)
         int is_series = (tab != 1);
-        cJSON *hero = cJSON_GetObjectItem(g_land, "hero");
         cJSON_DeleteItemFromObject(g_land, "_switchHeroes");
         g_heroesArr = cJSON_CreateArray();
-        if (hero) cJSON_AddItemReferenceToArray(g_heroesArr, hero);
+        // O site prioriza os destaques editoriais que ja estao prontos no R2.
+        hero_pool_add_ready(g_heroesArr, cJSON_GetObjectItem(g_land, "featured"));
         if (arr_len(g_heroesArr) == 0) {
-            cJSON_Delete(g_heroesArr);
-            g_heroesArr = cJSON_GetObjectItem(g_land, "recent");
-        } else cJSON_AddItemToObject(g_land, "_switchHeroes", g_heroesArr);
+            hero_pool_add_ready(g_heroesArr, cJSON_GetObjectItem(g_land, "prontos"));
+            hero_pool_add_ready(g_heroesArr, cJSON_GetObjectItem(g_land, "recent"));
+        }
+        cJSON_AddItemToObject(g_land, "_switchHeroes", g_heroesArr);
         add_rail("Pronto pra tocar", cJSON_GetObjectItem(g_land, "prontos"), is_series);
         add_rail("Minha lista", cJSON_GetObjectItem(g_land, "favoritos"), is_series);
         add_rail("Lancamentos", cJSON_GetObjectItem(g_land, "recent"), is_series);
@@ -536,7 +552,6 @@ static void landing_apply(int tab, cJSON *land) {
     }
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
 }
-
 static const char *landing_path(int tab) {
     switch (tab) {
         case 1: return "/api/catalog/tab-home?tab=movie";
@@ -1050,7 +1065,7 @@ static void open_item(cJSON *item, int is_series) {
     }
     cJSON *sid = cJSON_GetObjectItem(item, "series_id");
     if (sid && cJSON_IsNumber(sid)) { open_series(sid->valueint); return; }
-    if ((kind && !strcmp(kind, "series")) || is_series) open_series(id);
+    if (catalog_item_is_series(item, is_series)) open_series(id);
     else {
         if (id <= 0) return;
         char path[96]; snprintf(path, sizeof(path), "/api/catalog/movie/%d/info", id);
@@ -1611,6 +1626,7 @@ static void draw_landing(void) {
         const char *ht = jstr(h, "title"); if (!ht) ht = "";
         text_clip(ht, content_x, hy + 39, C_TEXT, 1, bg ? 690 : WIN_W - 228 - 180);
         const char *hk = jstr(h, "kind");
+        if (!hk) hk = jstr(h, "hero_type");
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
         char meta[96]; const char *year = jstr(h, "year");
@@ -2318,7 +2334,7 @@ static void input_landing(int b) {
         if (b == JOY_DOWN) g_railSel = 0; // primeira rail ou chamada de busca
         else if (b == JOY_DLEFT) { if (nh) g_heroIdx = (g_heroIdx - 1 + nh) % nh; g_hero_next = SDL_GetTicks() + 6000; }
         else if (b == JOY_DRIGHT) { if (nh) g_heroIdx = (g_heroIdx + 1) % nh; g_hero_next = SDL_GetTicks() + 6000; }
-        else if (b == JOY_A) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); const char *k = jstr(h, "kind"); open_item(h, k ? strcmp(k, "movie") != 0 : g_heroSeriesDefault); } }
+        else if (b == JOY_A) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); open_item(h, catalog_item_is_series(h, g_heroSeriesDefault)); } }
         else if (b == JOY_X) { if (nh) { cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh); int is = catalog_item_is_series(h, g_heroSeriesDefault); int id = catalog_favorite_id(h, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
         g_homeScroll = 0;
         return;

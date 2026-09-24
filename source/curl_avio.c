@@ -20,10 +20,9 @@
 
 #define FILE_BLOCK   (512 * 1024)
 #define FILE_RINGCAP (16 * 1024 * 1024)
-#define HLS_META_BLOCK   (64 * 1024)
-#define HLS_META_RINGCAP (256 * 1024)
-#define HLS_MEDIA_BLOCK  (256 * 1024)
-#define HLS_MEDIA_RINGCAP (1024 * 1024)
+#define HLS_META_INITIAL (64 * 1024)
+#define HLS_META_MAX     (4 * 1024 * 1024)
+#define HLS_MEDIA_RINGCAP (4 * 1024 * 1024)
 
 static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
@@ -34,7 +33,7 @@ typedef struct {
     char *url;
     unsigned char *ring;
     size_t ring_cap;
-    size_t block_size, tmp_cap;
+    size_t block_size, tmp_cap, tmp_limit;
     size_t head, count;                // head = 1o byte disponivel; count = bytes no ring
     volatile int64_t base;             // offset (arquivo) de ring[head] = pos do consumidor
     volatile int64_t size;             // total (-1 desconhecido)
@@ -48,9 +47,15 @@ typedef struct {
     unsigned char *tmp; size_t tmp_len;
     int write_overflow;
     int accounted, reserved_kb;
-    int static_data;
+    int static_data, synchronous, streaming;
     size_t static_pos, static_len;
     int resource_id, first_http_logged;
+    unsigned fetch_count, slow_fetch_count, empty_waits;
+    unsigned worst_fetch_ms, worst_first_byte_ms, last_first_byte_ms, stream_started_tick;
+    unsigned long long downloaded_bytes;
+    int64_t produced_offset, request_start;
+    size_t stream_len;
+    long response_code;
     char profile[8];
 } CurlIO;
 
@@ -59,8 +64,24 @@ static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
     if (sz != 0 && nm > SIZE_MAX / sz) { c->write_overflow = 1; return 0; }
     size_t n = sz * nm;
     if (n > c->tmp_cap - c->tmp_len) {
-        c->write_overflow = 1;
-        return 0;
+        if (!c->synchronous || n > c->tmp_limit - c->tmp_len) {
+            c->write_overflow = 1;
+            return 0;
+        }
+        size_t next = c->tmp_cap;
+        while (n > next - c->tmp_len) {
+            if (next >= c->tmp_limit / 2) { next = c->tmp_limit; break; }
+            next *= 2;
+        }
+        unsigned char *grown = (unsigned char *)realloc(c->tmp, next);
+        if (!grown) { c->write_overflow = 1; return 0; }
+        c->tmp = grown;
+        if (c->accounted) {
+            int extra_kb = (int)((next - c->tmp_cap) / 1024);
+            c->reserved_kb += extra_kb;
+            SDL_AtomicAdd(&g_reserved_kb, extra_kb);
+        }
+        c->tmp_cap = next;
     }
     memcpy(c->tmp + c->tmp_len, ptr, n); c->tmp_len += n; return n;
 }
@@ -77,15 +98,33 @@ static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
     if (copy > 5 && !strncasecmp(line, "HTTP/", 5)) {
         c->response_length = -1;
         c->range_total = -1;
+        const char *space = strchr(line, ' ');
+        c->response_code = space ? atol(space + 1) : 0;
     } else if (copy > 14 && !strncasecmp(line, "Content-Range:", 14)) {
         for (size_t i = 0; i + 1 < copy; i++) if (line[i] == '/') {
             long long total = atoll(line + i + 1);
-            if (total > 0) c->range_total = total;
+            if (total > 0) {
+                c->range_total = total;
+                if (c->streaming) {
+                    SDL_LockMutex(c->mtx);
+                    c->size = total;
+                    SDL_CondSignal(c->c_data);
+                    SDL_UnlockMutex(c->mtx);
+                }
+            }
             break;
         }
     } else if (copy > 15 && !strncasecmp(line, "Content-Length:", 15)) {
         long long length = atoll(line + 15);
-        if (length >= 0) c->response_length = length;
+        if (length >= 0) {
+            c->response_length = length;
+            if (c->streaming && c->response_code == 200 && c->request_start == 0) {
+                SDL_LockMutex(c->mtx);
+                c->size = length;
+                SDL_CondSignal(c->c_data);
+                SDL_UnlockMutex(c->mtx);
+            }
+        }
     }
     return n;
 }
@@ -103,11 +142,23 @@ static int fetch_block(CurlIO *c, int64_t start) {
     c->response_length = -1;
     c->range_total = -1;
     char range[64];
-    snprintf(range, sizeof(range), "%lld-%lld", (long long)start,
-             (long long)(start + (int64_t)c->block_size - 1));
-    curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
+    if (c->synchronous) {
+        // Manifestos reescritos pelo Worker nao possuem offsets estaveis.
+        // Um Range do objeto original devolve uma playlist incompleta.
+        curl_easy_setopt(c->easy, CURLOPT_RANGE, NULL);
+    } else {
+        snprintf(range, sizeof(range), "%lld-%lld", (long long)start,
+                 (long long)(start + (int64_t)c->block_size - 1));
+        curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
+    }
+    Uint32 fetch_started = SDL_GetTicks();
     CURLcode r = curl_easy_perform(c->easy);
+    Uint32 fetch_ms = SDL_GetTicks() - fetch_started;
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    c->fetch_count++;
+    c->downloaded_bytes += c->tmp_len;
+    if (fetch_ms > c->worst_fetch_ms) c->worst_fetch_ms = fetch_ms;
+    if (fetch_ms >= 1000) c->slow_fetch_count++;
     if (!c->first_http_logged || r != CURLE_OK || code < 200 || code >= 400 || c->write_overflow) {
         diag_player_event("avio", "http",
                           "id=%d %s code=%ld curl=%d off=%lld got=%u ov=%d",
@@ -141,11 +192,16 @@ static int fetch_block(CurlIO *c, int64_t start) {
 // Encerra a thread e libera tudo do CurlIO.
 static void free_cio(CurlIO *c) {
     if (!c) return;
-    if (c->accounted)
-        diag_player_event("avio", "close", "id=%d %s active=%d reserved=%dKB",
-                          c->resource_id, c->profile,
-                          SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     if (c->th) { SDL_LockMutex(c->mtx); c->running = 0; SDL_CondSignal(c->c_space); SDL_CondSignal(c->c_data); SDL_UnlockMutex(c->mtx); SDL_WaitThread(c->th, NULL); }
+    int trace_close = !c->streaming || c->resource_id % 32 == 0 ||
+                      c->empty_waits || c->worst_first_byte_ms >= 1000 ||
+                      c->fetch_count > 1;
+    if (c->accounted && trace_close)
+        diag_player_event("avio", "close",
+                          "id=%d %s req=%u first=%ums empty=%u bytes=%llu mem=%dKB",
+                          c->resource_id, c->profile, c->fetch_count,
+                          c->worst_first_byte_ms, c->empty_waits,
+                          c->downloaded_bytes, SDL_AtomicGet(&g_reserved_kb));
     if (c->easy) curl_easy_cleanup(c->easy);
     if (c->mtx) SDL_DestroyMutex(c->mtx);
     if (c->c_data) SDL_DestroyCond(c->c_data);
@@ -162,6 +218,135 @@ static void ring_put(CurlIO *c, const unsigned char *src, size_t n) {
     memcpy(c->ring + tail, src, first);
     if (n > first) memcpy(c->ring, src + first, n - first);
     c->count += n;
+}
+// Segmentos HLS chegam ao buffer conforme a rede entrega bytes. Nao espere
+// completar cada bloco antes de acordar o demuxer, nem abra varias conexoes
+// Range para o mesmo segmento. O ring aplica backpressure ao libcurl.
+static size_t wr_ring(char *ptr, size_t sz, size_t nm, void *ud) {
+    CurlIO *c = (CurlIO *)ud;
+    if (sz != 0 && nm > SIZE_MAX / sz) return 0;
+    size_t n = sz * nm;
+    if (c->response_code >= 300 && c->response_code < 400) return n;
+    if (c->request_start > 0 && c->response_code != 206) return 0;
+    if (c->response_code < 200 || c->response_code >= 300) return n;
+    if (n && !c->stream_len) {
+        unsigned first_ms = SDL_GetTicks() - c->stream_started_tick;
+        c->last_first_byte_ms = first_ms;
+        if (first_ms > c->worst_first_byte_ms) c->worst_first_byte_ms = first_ms;
+        if (first_ms >= 1000) c->slow_fetch_count++;
+    }
+    size_t off = 0;
+    while (off < n) {
+        SDL_LockMutex(c->mtx);
+        while (c->running && c->seek_req < 0 && c->count == c->ring_cap)
+            SDL_CondWaitTimeout(c->c_space, c->mtx, 200);
+        if (!c->running || c->seek_req >= 0) {
+            SDL_UnlockMutex(c->mtx);
+            return 0;
+        }
+        size_t take = c->ring_cap - c->count;
+        if (take > n - off) take = n - off;
+        ring_put(c, (const unsigned char *)ptr + off, take);
+        c->produced_offset += take;
+        c->stream_len += take;
+        off += take;
+        SDL_CondSignal(c->c_data);
+        SDL_UnlockMutex(c->mtx);
+    }
+    return n;
+}
+
+static int fetch_stream(CurlIO *c, int64_t start) {
+    c->fetch_complete = 0;
+    c->response_length = c->range_total = -1;
+    c->response_code = 0;
+    c->request_start = start;
+    c->stream_len = 0;
+    c->last_first_byte_ms = 0;
+    char range[64];
+    if (start == 0) curl_easy_setopt(c->easy, CURLOPT_RANGE, NULL);
+    else {
+        snprintf(range, sizeof(range), "%lld-", (long long)start);
+        curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
+    }
+    Uint32 started = SDL_GetTicks();
+    c->stream_started_tick = started;
+    CURLcode rc = curl_easy_perform(c->easy);
+    Uint32 took = SDL_GetTicks() - started;
+    long code = 0;
+    curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    c->fetch_count++;
+    c->downloaded_bytes += c->stream_len;
+    if (took > c->worst_fetch_ms) c->worst_fetch_ms = took;
+    if (rc != CURLE_OK || code < 200 || code >= 400 ||
+        c->last_first_byte_ms >= 1000 ||
+        (!c->first_http_logged && c->resource_id % 32 == 0)) {
+        diag_player_event("avio", "http", "id=%d media code=%ld curl=%d off=%lld got=%u ms=%u",
+                          c->resource_id, code, (int)rc, (long long)start,
+                          (unsigned)c->stream_len, took);
+        c->first_http_logged = 1;
+    }
+    if (code == 416 && c->size >= 0 && start >= c->size) {
+        c->fetch_complete = 1;
+        return 0;
+    }
+    if (code >= 400 && code < 500 && code != 408 && code != 429) return -2;
+    if (code != 200 && code != 206) return -1;
+    if (start > 0 && code != 206) return -2;
+    if (rc != CURLE_OK && c->stream_len == 0) return -1;
+    c->fetch_complete = rc == CURLE_OK;
+    return c->stream_len ? 1 : 0;
+}
+
+static int producer_stream(void *arg) {
+    CurlIO *c = (CurlIO *)arg;
+    int64_t prod = 0;
+    Uint32 fail_since = 0;
+    while (1) {
+        SDL_LockMutex(c->mtx);
+        if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
+        if (c->seek_req >= 0) {
+            prod = c->seek_req;
+            c->base = c->produced_offset = prod;
+            c->head = c->count = 0;
+            c->seek_req = -1;
+            c->eof = c->err = 0;
+        }
+        if (c->size >= 0 && prod >= c->size) {
+            c->eof = 1;
+            SDL_CondSignal(c->c_data);
+            SDL_CondWaitTimeout(c->c_space, c->mtx, 200);
+            SDL_UnlockMutex(c->mtx);
+            continue;
+        }
+        SDL_UnlockMutex(c->mtx);
+
+        int got = fetch_stream(c, prod);
+        SDL_LockMutex(c->mtx);
+        if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
+        if (c->seek_req >= 0) { SDL_UnlockMutex(c->mtx); continue; }
+        prod = c->produced_offset;
+        if (got < 0 || (got == 0 && !c->fetch_complete)) {
+            Uint32 now = SDL_GetTicks();
+            if (!fail_since) fail_since = now;
+            if (got == -2 || now - fail_since >= 120000) {
+                c->err = 1;
+                SDL_CondSignal(c->c_data);
+            }
+            SDL_UnlockMutex(c->mtx);
+            SDL_Delay(300);
+            continue;
+        }
+        fail_since = 0;
+        c->err = 0;
+        if (c->fetch_complete) {
+            if (c->size < 0) c->size = prod;
+            if (prod >= c->size) c->eof = 1;
+            SDL_CondSignal(c->c_data);
+        }
+        SDL_UnlockMutex(c->mtx);
+    }
+    return 0;
 }
 
 // thread produtora: baixa blocos a frente e enche o ring buffer
@@ -249,6 +434,7 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
         SDL_CondWaitTimeout(c->c_data, c->mtx, 300);
     if (c->count == 0) {
         if (c->running && !c->err && !c->eof) {
+            c->empty_waits++;
             SDL_UnlockMutex(c->mtx);
             return AVERROR(EAGAIN);
         }
@@ -328,15 +514,18 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->response_length = c->range_total = -1;
     c->seek_req = -1; c->base = 0; c->running = 1;
     c->block_size = block_size;
-    c->ring_cap = ring_cap;
-    c->tmp_cap = block_size;
-    c->ring = (unsigned char *)malloc(c->ring_cap);
-    c->tmp  = (unsigned char *)malloc(c->tmp_cap);
+    c->synchronous = synchronous;
+    c->streaming = profile && !strcmp(profile, "media");
+    c->ring_cap = synchronous ? 0 : ring_cap;
+    c->tmp_cap = synchronous ? HLS_META_INITIAL : c->streaming ? 0 : block_size;
+    c->tmp_limit = synchronous ? HLS_META_MAX : c->streaming ? 0 : block_size;
+    c->ring = synchronous ? NULL : (unsigned char *)malloc(c->ring_cap);
+    c->tmp  = c->tmp_cap ? (unsigned char *)malloc(c->tmp_cap) : NULL;
     c->easy = curl_easy_init();
     c->mtx = SDL_CreateMutex();
     c->c_data = SDL_CreateCond();
     c->c_space = SDL_CreateCond();
-    if (!c->ring || !c->tmp || !c->easy || !c->mtx || !c->c_data || !c->c_space) { free_cio(c); return NULL; }
+    if ((!synchronous && !c->ring) || (c->tmp_cap && !c->tmp) || !c->easy || !c->mtx || !c->c_data || !c->c_space) { free_cio(c); return NULL; }
     curl_easy_setopt(c->easy, CURLOPT_URL, c->url);
     curl_easy_setopt(c->easy, CURLOPT_USERAGENT, "Nplay-Switch/1.0");
     curl_easy_setopt(c->easy, CURLOPT_FOLLOWLOCATION, 1L);
@@ -359,7 +548,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, 0L);
     curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, wr_tmp);
+    curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, c->streaming ? wr_ring : wr_tmp);
     curl_easy_setopt(c->easy, CURLOPT_WRITEDATA, c);
     curl_easy_setopt(c->easy, CURLOPT_HEADERFUNCTION, hdr_size);
     curl_easy_setopt(c->easy, CURLOPT_HEADERDATA, c);
@@ -377,23 +566,29 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->accounted = 1;
     SDL_AtomicAdd(&g_active_contexts, 1);
     SDL_AtomicAdd(&g_reserved_kb, c->reserved_kb);
-    diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
-                      c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
-                      SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
+    if (!c->streaming || c->resource_id % 32 == 0)
+        diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
+                          c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
+                          SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     if (synchronous) {
         // O crash real da 0.9.8 ocorreu entre a primeira resposta HTTP e o
         // retorno de avformat_open_input. Para recursos pequenos, nao existe
         // beneficio em entregar ao demuxer enquanto outra thread ainda altera
         // o mesmo contexto. Baixe, valide e congele o payload primeiro.
         int got = fetch_block(c, 0);
-        if (got <= 0 || (size_t)got > c->ring_cap ||
-            (c->size > 0 && c->size > got)) {
+        if (got <= 0 || !c->fetch_complete ||
+            (c->size > 0 && c->size != got)) {
             diag_player_event("avio", "metadata-invalid",
                               "id=%d got=%d total=%lld", c->resource_id, got,
                               (long long)c->size);
             av_free(avio_buf); free_cio(c); return NULL;
         }
-        memcpy(c->ring, c->tmp, (size_t)got);
+        // Reutiliza a alocacao que acabou de receber o corpo; nao duplica
+        // playlists grandes na memoria limitada do console.
+        c->ring = c->tmp;
+        c->ring_cap = c->tmp_cap;
+        c->tmp = NULL;
+        c->tmp_cap = 0;
         c->static_data = 1;
         c->static_len = (size_t)got;
         c->static_pos = 0;
@@ -401,7 +596,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
         c->eof = 1;
         diag_player_event("avio", "metadata-ready", "id=%d bytes=%d", c->resource_id, got);
     } else {
-        c->th = SDL_CreateThread(producer, "cavio", c);
+        c->th = SDL_CreateThread(c->streaming ? producer_stream : producer, "cavio", c);
         if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }
     }
     AVIOContext *ctx = avio_alloc_context(avio_buf, avio_buffer_size, 0, c, cio_read, NULL, cio_seek);
@@ -428,8 +623,8 @@ static int hls_is_metadata_url(const char *url) {
 
 AVIOContext *nplay_curl_avio_open_hls(const char *url) {
     if (hls_is_metadata_url(url))
-        return curl_avio_open_profile(url, -1, HLS_META_RINGCAP, HLS_META_RINGCAP, 32768, "meta", 1);
-    return curl_avio_open_profile(url, -1, HLS_MEDIA_BLOCK, HLS_MEDIA_RINGCAP, 65536, "media", 0);
+        return curl_avio_open_profile(url, -1, HLS_META_INITIAL, 0, 32768, "meta", 1);
+    return curl_avio_open_profile(url, -1, 0, HLS_MEDIA_RINGCAP, 65536, "media", 0);
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

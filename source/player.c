@@ -952,6 +952,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     unsigned int audio_buf_cap = 0;                // reutilizado entre frames (evita churn no heap)
     Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     Uint32 buffering_since = 0;
+    Uint32 buffering_audio_ms = 0, longest_buffer_ms = 0;
     Uint32 notice_until = 0;
     char notice[96] = "";
     int hud_pinned = 0, have_video_frame = 0;
@@ -1222,7 +1223,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         if (ret == AVERROR(EAGAIN)) {
             // Buffer vazio e/ou timeout de rede, thread de download ainda esta trabalhando.
             Uint32 now_ticks = SDL_GetTicks();
-            if (!buffering_since) { buffering_since = now_ticks; buffering_events++; }
+            if (!buffering_since) {
+                buffering_since = now_ticks;
+                buffering_audio_ms = adev ? (Uint32)(SDL_GetQueuedAudioSize(adev) * 1000.0 / bps) : 0;
+                buffering_events++;
+            }
             if (now_ticks - buffering_since >= 250) {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                 if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -1241,7 +1246,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             SDL_Delay(30);
             continue;
         }
-        buffering_since = 0;
         if (ret < 0) {  // fim real ou falha definitiva da fonte/rede
             if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) {
                 if (ret == AVERROR_EOF) reached_end = 1;
@@ -1250,6 +1254,21 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 break;
             }
             SDL_Delay(40); continue;
+        }
+        if (buffering_since) {
+            Uint32 waited = SDL_GetTicks() - buffering_since;
+            if (waited > longest_buffer_ms) longest_buffer_ms = waited;
+            // Depois de uma queda, o relogio de parede avancou sem quadros.
+            // Desconte somente o tempo alem do audio que ainda estava na fila,
+            // senao a retomada considera os quadros atrasados e os descarta.
+            if (waited >= 750 && (!adev || SDL_GetQueuedAudioSize(adev) < 8192)) {
+                Uint32 frozen = waited > buffering_audio_ms ? waited - buffering_audio_ms : 0;
+                wall_start += frozen / 1000.0;
+            }
+            if (waited >= 500)
+                diag_player_event("demux", "buffering-end", "ms=%u audioq=%u pos=%.1f",
+                                  waited, adev ? SDL_GetQueuedAudioSize(adev) : 0, cur_pos);
+            buffering_since = 0;
         }
         if (aidx >= 0 && pkt->stream_index == aidx && actx) {
             if (avcodec_send_packet(actx, pkt) == 0) {
@@ -1429,8 +1448,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     store_save_player_stats(vw, vh, decoded_video, dropped_video,
                             buffering_events, max_audio_queue, playback_error,
                             hardware_decode);
-    diag_player_event("player", "cleanup-begin", "pos=%.1f frames=%d drop=%d err=%d",
-                      cur_pos, decoded_video, dropped_video, playback_error);
+    diag_player_event("player", "cleanup-begin", "pos=%.1f frames=%d drop=%d stalls=%d longest=%ums err=%d",
+                      cur_pos, decoded_video, dropped_video, buffering_events,
+                      longest_buffer_ms, playback_error);
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);
