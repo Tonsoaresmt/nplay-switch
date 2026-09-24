@@ -945,6 +945,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0;
     int decoded_video = 0, dropped_video = 0, buffering_events = 0, hardware_decode = 0;
+    int slow_reads = 0, present_gaps = 0;
+    Uint32 worst_read_ms = 0, worst_present_ms = 0, last_present_tick = 0;
     unsigned max_audio_queue = 0;
     store_load_player_volume(&vol);
     int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
@@ -999,6 +1001,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                               timeline_seek_target, timeline_origin,
                                               &wall_start, &audio_clock, &cur_pos,
                                               &last_ac, &last_ac_wall, sub_text, &sub_end) == 0) {
+                            last_present_tick = 0;
                             snprintf(notice, sizeof(notice), "Reproducao em %.0f%%",
                                      dur > 0 ? timeline_seek_target * 100.0 / dur : 0.0);
                             if (hb) SDL_AtomicSet(&hb->force_progress, 1);
@@ -1093,6 +1096,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 else if (b == JOY_PLUS) hud_pinned = !hud_pinned;
                 else if (b == JOY_A) {
                     paused = !paused;
+                    last_present_tick = 0;
                     if (adev) SDL_PauseAudioDevice(adev, paused);
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
                 }
@@ -1113,6 +1117,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                           timeline_origin, &wall_start, &audio_clock,
                                           &cur_pos, &last_ac, &last_ac_wall,
                                           sub_text, &sub_end) == 0) {
+                        last_present_tick = 0;
                         snprintf(notice, sizeof(notice), "%s %.0f segundos", forward ? "Avancou" : "Voltou", step);
                         if (hb) SDL_AtomicSet(&hb->force_progress, 1);
                     } else {
@@ -1170,6 +1175,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
         }
         if (timeline_seek) {
+            last_present_tick = 0;
             double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
             if (elapsed > 0.08) elapsed = 0.08;
             timeline_seek_tick = seek_now;
@@ -1191,6 +1197,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
         if (track_menu) {
+            last_present_tick = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
             if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
@@ -1203,6 +1210,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
         if (paused) {   // continua desenhando (quadro congelado + HUD)
+            last_present_tick = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
             if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
@@ -1214,7 +1222,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
 
+        Uint32 read_started = SDL_GetTicks();
+        Uint32 audio_before_ms = adev ? (Uint32)(SDL_GetQueuedAudioSize(adev) * 1000.0 / bps) : 0;
         int ret = av_read_frame(fmt, pkt);
+        Uint32 read_ms = SDL_GetTicks() - read_started;
+        if (read_ms > worst_read_ms) worst_read_ms = read_ms;
+        if (read_ms >= 250) {
+            slow_reads++;
+            // O HLS pode bloquear dentro de io_open/read ate receber o proximo
+            // segmento. Nessa situacao nao retorna EAGAIN e o antigo contador
+            // de buffering permanece zero apesar da pausa visivel.
+            diag_player_event("demux", "read-wait", "ms=%u audio=%u rc=%d pos=%.1f",
+                              read_ms, audio_before_ms, ret, cur_pos);
+        }
         if (!logged_first_read) {
             diag_player_event("demux", ret >= 0 ? "first-read-ok" : "first-read-fail",
                               "rc=%d stream=%d", ret, ret >= 0 ? pkt->stream_index : -1);
@@ -1416,6 +1436,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                  acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
                     if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
                     SDL_RenderPresent(ren);
+                    Uint32 present_tick = SDL_GetTicks();
+                    if (last_present_tick) {
+                        Uint32 gap_ms = present_tick - last_present_tick;
+                        if (gap_ms > worst_present_ms) worst_present_ms = gap_ms;
+                        if (gap_ms >= 250) present_gaps++;
+                    }
+                    last_present_tick = present_tick;
                     if (!logged_first_present) {
                         diag_player_event("render", "first-present", "position=%.2f", cur_pos);
                         logged_first_present = 1;
@@ -1447,10 +1474,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     store_save_player_volume(vol);
     store_save_player_stats(vw, vh, decoded_video, dropped_video,
                             buffering_events, max_audio_queue, playback_error,
-                            hardware_decode);
-    diag_player_event("player", "cleanup-begin", "pos=%.1f frames=%d drop=%d stalls=%d longest=%ums err=%d",
-                      cur_pos, decoded_video, dropped_video, buffering_events,
-                      longest_buffer_ms, playback_error);
+                            hardware_decode, slow_reads, worst_read_ms,
+                            present_gaps, worst_present_ms);
+    diag_player_event("player", "cleanup-begin", "pos=%.1f frames=%d drop=%d waits=%d max=%ums gaps=%d hw=%d err=%d",
+                      cur_pos, decoded_video, dropped_video, slow_reads,
+                      worst_read_ms, present_gaps, hardware_decode, playback_error);
 
     if (adev) SDL_CloseAudioDevice(adev);
     if (sws) sws_freeContext(sws);

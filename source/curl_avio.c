@@ -28,6 +28,46 @@ static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
 static SDL_atomic_t g_resource_sequence = {0};
 
+// O demuxer HLS fecha um AVIO ao terminar cada segmento e abre outro para o
+// seguinte. Manter o easy handle ocioso preserva a conexao TCP/TLS sem usar
+// CURLSH entre as threads de audio e video (inseguro no libcurl do Switch).
+#define HLS_IDLE_HANDLES 4
+static CURL *g_hls_idle[HLS_IDLE_HANDLES];
+static int g_hls_idle_count = 0;
+static SDL_SpinLock g_hls_idle_lock = 0;
+
+static CURL *hls_easy_take(void) {
+    CURL *easy = NULL;
+    SDL_AtomicLock(&g_hls_idle_lock);
+    if (g_hls_idle_count > 0) easy = g_hls_idle[--g_hls_idle_count];
+    SDL_AtomicUnlock(&g_hls_idle_lock);
+    if (easy) curl_easy_reset(easy); // conserva conexoes e cache TLS/DNS
+    return easy ? easy : curl_easy_init();
+}
+
+static void hls_easy_return(CURL *easy) {
+    if (!easy) return;
+    int kept = 0;
+    SDL_AtomicLock(&g_hls_idle_lock);
+    if (g_hls_idle_count < HLS_IDLE_HANDLES) {
+        g_hls_idle[g_hls_idle_count++] = easy;
+        kept = 1;
+    }
+    SDL_AtomicUnlock(&g_hls_idle_lock);
+    if (!kept) curl_easy_cleanup(easy);
+}
+
+void nplay_curl_avio_pool_clear(void) {
+    CURL *idle[HLS_IDLE_HANDLES];
+    int count;
+    SDL_AtomicLock(&g_hls_idle_lock);
+    count = g_hls_idle_count;
+    memcpy(idle, g_hls_idle, (size_t)count * sizeof(CURL *));
+    g_hls_idle_count = 0;
+    SDL_AtomicUnlock(&g_hls_idle_lock);
+    for (int i = 0; i < count; i++) curl_easy_cleanup(idle[i]);
+}
+
 typedef struct {
     CURL *easy;
     char *url;
@@ -202,7 +242,8 @@ static void free_cio(CurlIO *c) {
                           c->resource_id, c->profile, c->fetch_count,
                           c->worst_first_byte_ms, c->empty_waits,
                           c->downloaded_bytes, SDL_AtomicGet(&g_reserved_kb));
-    if (c->easy) curl_easy_cleanup(c->easy);
+    if (c->streaming) hls_easy_return(c->easy);
+    else if (c->easy) curl_easy_cleanup(c->easy);
     if (c->mtx) SDL_DestroyMutex(c->mtx);
     if (c->c_data) SDL_DestroyCond(c->c_data);
     if (c->c_space) SDL_DestroyCond(c->c_space);
@@ -275,15 +316,17 @@ static int fetch_stream(CurlIO *c, int64_t start) {
     Uint32 took = SDL_GetTicks() - started;
     long code = 0;
     curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    long new_connections = 0;
+    curl_easy_getinfo(c->easy, CURLINFO_NUM_CONNECTS, &new_connections);
     c->fetch_count++;
     c->downloaded_bytes += c->stream_len;
     if (took > c->worst_fetch_ms) c->worst_fetch_ms = took;
-    if (rc != CURLE_OK || code < 200 || code >= 400 ||
-        c->last_first_byte_ms >= 1000 ||
+    if (rc != CURLE_OK || code < 200 || code >= 400 || new_connections > 0 ||
+        c->last_first_byte_ms >= 250 ||
         (!c->first_http_logged && c->resource_id % 32 == 0)) {
-        diag_player_event("avio", "http", "id=%d media code=%ld curl=%d off=%lld got=%u ms=%u",
-                          c->resource_id, code, (int)rc, (long long)start,
-                          (unsigned)c->stream_len, took);
+        diag_player_event("avio", "http", "id=%d media code=%ld curl=%d conn=%ld first=%u ms=%u",
+                          c->resource_id, code, (int)rc, new_connections,
+                          c->last_first_byte_ms, took);
         c->first_http_logged = 1;
     }
     if (code == 416 && c->size >= 0 && start >= c->size) {
@@ -522,7 +565,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->tmp_limit = synchronous ? HLS_META_MAX : c->streaming ? 0 : block_size;
     c->ring = synchronous ? NULL : (unsigned char *)malloc(c->ring_cap);
     c->tmp  = c->tmp_cap ? (unsigned char *)malloc(c->tmp_cap) : NULL;
-    c->easy = curl_easy_init();
+    c->easy = c->streaming ? hls_easy_take() : curl_easy_init();
     c->mtx = SDL_CreateMutex();
     c->c_data = SDL_CreateCond();
     c->c_space = SDL_CreateCond();

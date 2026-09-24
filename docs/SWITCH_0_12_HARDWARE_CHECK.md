@@ -1,10 +1,11 @@
-# Nplay Switch 0.12.1: teste de reprodução no console
+# Nplay Switch 0.12.2: teste de reprodução no console
 
-Este é um candidato da branch `codex/switch-rebuild`, ainda fora da release
-`latest`. A 0.11.0 instalada não baixa esta versão pelo menu de atualização.
-Guarde uma cópia do NRO atual e abra o candidato pelo hbmenu em modo aplicativo.
+O teste da 0.12.1 reproduziu pausas a cada poucos segundos em vários títulos,
+apesar de o diagnóstico mostrar `buffer 0`: esse contador não media o tempo
+bloqueado dentro de `av_read_frame`. A 0.12.2 reutiliza conexões HLS ociosas e
+mostra a duração dessas esperas. Atualize pelo menu do Nplay e confirme a versão.
 
-1. Em Configurações, confirme **Versão 0.12.1**. Compare a Home com a TV:
+1. Em Configurações, confirme **Versão 0.12.2**. Compare a Home com a TV:
    cabeçalho de 95 px, logo nova, destaque panorâmico, cinco cards por fileira
    e contorno branco no foco. Navegue com D-pad e analógico; segure a direção
    por alguns segundos em uma fileira longa.
@@ -22,6 +23,9 @@ Guarde uma cópia do NRO atual e abra o candidato pelo hbmenu em modo aplicativo
    no site. Conte pausas perceptíveis e observe se o vídeo pula trechos após
    uma pausa. Teste também Continuar assistindo, pausa, busca para o meio do
    vídeo, áudio/legenda e retorno ao catálogo.
+   Depois de sair, em Configurações > X, anote `descartados`, `HW`, `Pausas`,
+   `leituras lentas` e `max ms`. `Pausas` conta intervalos de pelo menos 250 ms
+   entre quadros; `leituras lentas` separa espera de HLS de queda do decoder.
 6. Se surgir o HTTP
    404, abra **Configurações > X** e anote a linha de rede com método e caminho
    (GET ou POST, `/api/...`) e o ID do título/episódio. Não copie token, senha

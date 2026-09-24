@@ -24,6 +24,7 @@
 #include "diag.h"
 #include "catalog_fetch.h"
 #include "brand_bin.h"
+#include "curl_avio.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -2750,14 +2751,18 @@ static void draw_player_diagnostics(void) {
     text_draw(gRen, "DIAGNOSTICO DA ULTIMA REPRODUCAO", 252, 92, C_ACC2, 0);
     char summary[180];
     if (has_stats) {
-        snprintf(summary, sizeof(summary), "Video %dx%d  |  frames %d  |  buffer %d  |  resultado %d",
-                 stats.width, stats.height, stats.decoded_frames,
-                 stats.buffering_events, stats.playback_error);
+        snprintf(summary, sizeof(summary), "Video %dx%d  |  frames %d  |  descartados %d  |  HW %s",
+                 stats.width, stats.height, stats.decoded_frames, stats.dropped_frames,
+                 stats.hardware_decode ? "sim" : "nao");
         text_clip(summary, 252, 132, stats.playback_error < 0 ? C_ROSE : C_GREEN, 0, 776);
+        snprintf(summary, sizeof(summary), "Pausas %d  |  leituras lentas %d (max %u ms)  |  buffer %d  |  erro %d",
+                 stats.present_gaps, stats.slow_reads, stats.worst_read_ms,
+                 stats.buffering_events, stats.playback_error);
+        text_clip(summary, 252, 157, C_ACC2, 0, 776);
     } else text_draw(gRen, "O trace abaixo sobrevive mesmo quando o aplicativo fecha.", 252, 132, C_TEXT, 0);
     if (has_boot_stage) {
         snprintf(summary, sizeof(summary), "Ultima etapa simples: %s", boot_stage);
-        text_clip(summary, 252, 166, C_ACC, 0, 776);
+        text_clip(summary, 252, 184, C_ACC, 0, 776);
     }
 
     text_draw(gRen, "RASTRO DO PLAYER", 252, 204, C_MUT, 0);
@@ -3250,7 +3255,7 @@ int main(int argc, char **argv) {
     SDL_DestroyMutex(g_ready_mtx);
     SDL_DestroyMutex(g_q_mtx);
     SDL_DestroyMutex(g_cov_mtx);
-    text_exit(); net_exit();
+    text_exit(); nplay_curl_avio_pool_clear(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
     if (g_brand) SDL_DestroyTexture(g_brand);
     SDL_DestroyRenderer(gRen); SDL_DestroyWindow(win);

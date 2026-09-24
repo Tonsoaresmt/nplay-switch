@@ -24,11 +24,15 @@ void store_save_player_volume(int volume);
 void store_save_player_stats(int width, int height, int decoded_frames,
                              int dropped_frames, int buffering_events,
                              unsigned max_audio_bytes, int playback_error,
-                             int hardware_decode);
+                             int hardware_decode, int slow_reads,
+                             unsigned worst_read_ms, int present_gaps,
+                             unsigned worst_present_ms);
 struct player_stats {
     int width, height, decoded_frames, dropped_frames, buffering_events;
     unsigned max_audio_bytes;
     int playback_error, hardware_decode;
+    int slow_reads, present_gaps;
+    unsigned worst_read_ms, worst_present_ms;
 };
 int store_load_player_stats(struct player_stats *out);
 

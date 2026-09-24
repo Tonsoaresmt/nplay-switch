@@ -480,13 +480,17 @@ void store_save_player_volume(int volume) {
 void store_save_player_stats(int width, int height, int decoded_frames,
                              int dropped_frames, int buffering_events,
                              unsigned max_audio_bytes, int playback_error,
-                             int hardware_decode) {
+                             int hardware_decode, int slow_reads,
+                             unsigned worst_read_ms, int present_gaps,
+                             unsigned worst_present_ms) {
     FILE *f = fopen(PLAYER_STATS_F, "wb");
     if (!f) return;
     fprintf(f, "resolution=%dx%d\nhardware_decode=%d\ndecoded_frames=%d\ndropped_frames=%d\n"
-               "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n",
+               "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n"
+               "slow_reads=%d\nworst_read_ms=%u\npresent_gaps=%d\nworst_present_ms=%u\n",
             width, height, hardware_decode, decoded_frames, dropped_frames,
-            buffering_events, max_audio_bytes, playback_error);
+            buffering_events, max_audio_bytes, playback_error,
+            slow_reads, worst_read_ms, present_gaps, worst_present_ms);
     fclose(f);
 }
 
@@ -504,6 +508,10 @@ int store_load_player_stats(struct player_stats *out) {
         else if (sscanf(line, "dropped_frames=%d", &out->dropped_frames) == 1) { }
         else if (sscanf(line, "buffering_events=%d", &out->buffering_events) == 1) { }
         else if (sscanf(line, "max_audio_queue_bytes=%u", &out->max_audio_bytes) == 1) { }
+        else if (sscanf(line, "slow_reads=%d", &out->slow_reads) == 1) { }
+        else if (sscanf(line, "worst_read_ms=%u", &out->worst_read_ms) == 1) { }
+        else if (sscanf(line, "present_gaps=%d", &out->present_gaps) == 1) { }
+        else if (sscanf(line, "worst_present_ms=%u", &out->worst_present_ms) == 1) { }
         else if (sscanf(line, "error=%d", &out->playback_error) == 1) found_result = 1;
     }
     fclose(f);
