@@ -1,5 +1,21 @@
 # Continuidade para agentes
 
+## Rodada 0.12.10 (24/09/2026)
+
+- A retomada continua ativa: o ponto salvo e buscado no HLS/R2. A 0.12.9
+  apenas iniciava desde zero quando a tentativa de seek nao exibia quadro.
+- Em X-Men '97 T1E1, sondagens de leitura do R2 nos segundos 48 e 600
+  entregaram os segmentos, mas havia cerca de 90 pacotes de video de preroll
+  antes de cada quadro alvo. FFmpeg 7.1 usa a faixa indicada para o seek HLS e depende do primeiro
+  timestamp lido para mapear o segmento. O cliente agora le um pacote para
+  estabelecer essa linha do tempo e busca na faixa de video explicitamente.
+- Durante o preroll, o audio nao toca antes do ponto salvo; quadros anteriores
+  sao decodificados sem contar como atrasados. O relogio de apresentacao comeca
+  no primeiro quadro no ponto alvo, em vez de correr enquanto a rede carrega.
+- Validar no console ainda e necessario para concluir se o hardware apresenta
+  e sincroniza a retomada. Os testes locais confirmam build e acesso/decodificacao
+  do R2, mas nao executam o NRO em um Switch.
+
 ## Rodada 0.12.9 (24/09/2026)
 
 - Relato no hardware: começar do início reproduziu sem travar; a espera em

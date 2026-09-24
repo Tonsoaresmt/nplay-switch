@@ -511,7 +511,21 @@ static void draw_timeline_seek(SDL_Renderer *ren, AVFormatContext *fmt,
     text_draw(ren, "B Cancelar", x + 382, y + 176, PC_MUT, 0);
 }
 
-static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
+static int seek_video_time(AVFormatContext *fmt, int video_index, int is_hls,
+                           double target, double timeline_origin, int flags) {
+    int64_t global_ts = (int64_t)((target + timeline_origin) * AV_TIME_BASE);
+    if (is_hls && video_index >= 0 &&
+        fmt->streams[video_index]->time_base.num > 0 &&
+        fmt->streams[video_index]->time_base.den > 0) {
+        int64_t video_ts = av_rescale_q(global_ts, AV_TIME_BASE_Q,
+                                        fmt->streams[video_index]->time_base);
+        return av_seek_frame(fmt, video_index, video_ts, flags);
+    }
+    return av_seek_frame(fmt, -1, global_ts, flags);
+}
+
+static int apply_player_seek(AVFormatContext *fmt, int video_index, int is_hls,
+                             AVCodecContext *vctx,
                              AVCodecContext *actx, AVCodecContext *sctx,
                              SDL_AudioDeviceID adev, double target,
                              double timeline_origin, double *wall_start,
@@ -519,7 +533,8 @@ static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
                              double *last_ac, double *last_ac_wall,
                              char *sub_text, double *sub_end) {
     int flags = target < *cur_pos ? AVSEEK_FLAG_BACKWARD : 0;
-    if (av_seek_frame(fmt, -1, (int64_t)((target + timeline_origin) * AV_TIME_BASE), flags) < 0)
+    if (seek_video_time(fmt, video_index, is_hls, target,
+                        timeline_origin, flags) < 0)
         return -1;
     avcodec_flush_buffers(vctx);
     if (actx) avcodec_flush_buffers(actx);
@@ -1078,39 +1093,80 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double timeline_seek_from = 0, timeline_seek_target = 0;
     Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
     Uint32 first_frame_started = SDL_GetTicks();
+    Uint32 first_frame_budget_ms = 30000u;
+    int resume_preroll = 0, resume_preroll_frames = 0;
+    double resume_target = 0;
     SDL_Event e;
 
     // Retoma de onde parou somente quando ha margem suficiente ate o fim.
     if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
-        player_boot_stage("08 retomando posicao");
-        diag_player_event("seek", "resume-begin", "pos=%.1f", start_sec);
-        Uint32 seek_started = SDL_GetTicks();
-        int seek_rc = av_seek_frame(fmt, -1,
-                                   (int64_t)((start_sec + timeline_origin) * AV_TIME_BASE),
-                                   AVSEEK_FLAG_BACKWARD);
-        diag_player_event("seek", "resume-end", "rc=%d ms=%u", seek_rc,
-                          SDL_GetTicks() - seek_started);
-        if (seek_rc >= 0) {
-            if (out_resume_seeked) *out_resume_seeked = 1;
-            audio_clock = start_sec; cur_pos = start_sec;
-            wall_start = av_gettime() / 1000000.0 - start_sec;
-            // Um seek HLS pode retornar sucesso mas nao entregar o primeiro
-            // quadro. Nao deixe a retomada prender a tela de preparacao: o
-            // supervisor pode reabrir a mesma fonte desde o inicio.
-            if (native_hls) {
-                int64_t resume_deadline = av_gettime_relative() + 12000000LL;
-                if (open_watch.deadline_us > resume_deadline)
-                    open_watch.deadline_us = resume_deadline;
-                nplay_curl_avio_set_startup_window(12000u);
-                first_frame_started = SDL_GetTicks();
+        if (native_hls) {
+            // hls_read_seek calcula o segmento usando first_timestamp. Com o
+            // probe de cabecalhos pulado, ele ainda nao existe ate o primeiro
+            // pacote. Leia um pacote (sem decodificar) para fixar a linha do
+            // tempo antes de buscar a posicao salva.
+            player_boot_stage("08 fixando linha do tempo");
+            Uint32 warm_started = SDL_GetTicks();
+            int warm_rc = AVERROR(EAGAIN);
+            while (SDL_GetTicks() - warm_started < 8000u && !open_watch.cancelled &&
+                   !open_watch.timed_out) {
+                warm_rc = av_read_frame(fmt, pkt);
+                if (warm_rc != AVERROR(EAGAIN)) break;
+                SDL_Delay(25);
+            }
+            diag_player_event("seek", "timeline-warm",
+                              "rc=%d ms=%u stream=%d", warm_rc,
+                              SDL_GetTicks() - warm_started,
+                              warm_rc >= 0 ? pkt->stream_index : -1);
+            av_packet_unref(pkt);
+            if (warm_rc < 0 || open_watch.cancelled || open_watch.timed_out) {
+                if (out_resume_seeked) *out_resume_seeked = 1;
+                if (open_watch.cancelled) running = 0;
+                else {
+                    player_error_message("Nao foi possivel preparar a retomada HLS");
+                    playback_error = -5;
+                    running = 0;
+                }
             }
         }
-        if (open_watch.timed_out && out_resume_seeked) *out_resume_seeked = 1;
-        if (open_watch.cancelled) running = 0;
-        if (open_watch.timed_out) {
-            player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
-            playback_error = -5;
-            running = 0;
+        if (running) {
+            player_boot_stage("08 retomando posicao");
+            diag_player_event("seek", "resume-begin", "pos=%.1f video=%d", start_sec, vidx);
+            Uint32 seek_started = SDL_GetTicks();
+            int seek_rc = seek_video_time(fmt, vidx, native_hls, start_sec,
+                                          timeline_origin, AVSEEK_FLAG_BACKWARD);
+            diag_player_event("seek", "resume-end", "rc=%d ms=%u", seek_rc,
+                              SDL_GetTicks() - seek_started);
+            if (seek_rc >= 0) {
+                if (out_resume_seeked) *out_resume_seeked = 1;
+                audio_clock = start_sec; cur_pos = start_sec;
+                wall_start = av_gettime() / 1000000.0 - start_sec;
+                if (native_hls) {
+                    resume_preroll = 1;
+                    resume_target = start_sec;
+                    if (adev) {
+                        SDL_ClearQueuedAudio(adev);
+                        SDL_PauseAudioDevice(adev, 1);
+                    }
+                }
+                // Um seek HLS pode retornar sucesso mas nao entregar o primeiro
+                // quadro. O supervisor preserva o progresso e recupera a fonte.
+                if (native_hls) {
+                    int64_t resume_deadline = av_gettime_relative() + 20000000LL;
+                    if (open_watch.deadline_us > resume_deadline)
+                        open_watch.deadline_us = resume_deadline;
+                    nplay_curl_avio_set_startup_window(20000u);
+                    first_frame_started = SDL_GetTicks();
+                    first_frame_budget_ms = 20000u;
+                }
+            }
+            if (open_watch.timed_out && out_resume_seeked) *out_resume_seeked = 1;
+            if (open_watch.cancelled) running = 0;
+            if (open_watch.timed_out) {
+                player_error_message("Video nao iniciou no tempo esperado");
+                playback_error = -5;
+                running = 0;
+            }
         }
     }
 
@@ -1124,9 +1180,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
         if (native_hls && !logged_first_present &&
-            now_ticks - first_frame_started >= 30000u) {
+            now_ticks - first_frame_started >= first_frame_budget_ms) {
             diag_player_event("player", "first-frame-timeout", "elapsed=%u", now_ticks - first_frame_started);
-            player_error_message("Video nao iniciou em 30 segundos; tentando outra fonte");
+            player_error_message("Video nao iniciou no tempo esperado");
             playback_error = -5;
             break;
         }
@@ -1142,10 +1198,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN) {
                 int b = e.jbutton.button;
+                // Antes do primeiro quadro, so cancelar faz sentido. Pausa,
+                // menus e novo seek poderiam deixar a retomada parada.
+                if (native_hls && !have_video_frame &&
+                    b != JOY_B && b != JOY_MINUS) continue;
                 hud_until = SDL_GetTicks() + 4000;
                 if (timeline_seek) {
                     if (b == JOY_A) {
-                        if (apply_player_seek(fmt, vctx, actx, sctx, adev,
+                        if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx, adev,
                                               timeline_seek_target, timeline_origin,
                                               &wall_start, &audio_clock, &cur_pos,
                                               &last_ac, &last_ac_wall, sub_text, &sub_end) == 0) {
@@ -1267,7 +1327,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     double t = cur_pos + (forward ? step : -step);
                     if (t < 0) t = 0;
                     if (dur > 0 && t > dur - 1) t = dur - 1;
-                    if (apply_player_seek(fmt, vctx, actx, sctx, adev, t,
+                    if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx, adev, t,
                                           timeline_origin, &wall_start, &audio_clock,
                                           &cur_pos, &last_ac, &last_ac_wall,
                                           sub_text, &sub_end) == 0) {
@@ -1482,7 +1542,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (!swr) continue;
                     int64_t ats = frame->best_effort_timestamp != AV_NOPTS_VALUE
                         ? frame->best_effort_timestamp : frame->pts;
-                    if (ats != AV_NOPTS_VALUE) audio_clock = ats * av_q2d(atb) - timeline_origin;
                     int os = swr_get_out_samples(swr, frame->nb_samples);
                     int bytes = av_samples_get_buffer_size(NULL, OCH, os, AV_SAMPLE_FMT_S16, 0);
                     if (bytes > 0) av_fast_malloc(&audio_buf, &audio_buf_cap, (size_t)bytes);
@@ -1492,8 +1551,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             int16_t *sm = (int16_t *)audio_buf; int cnt = n * OCH;
                             for (int i = 0; i < cnt; i++) { int v = sm[i] * vol / 100; sm[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v); }
                         }
-                        if (n > 0 && adev) {
+                        double audio_pts = ats != AV_NOPTS_VALUE
+                            ? ats * av_q2d(atb) - timeline_origin : -1;
+                        int queue_during_resume = !resume_preroll ||
+                            (adev && audio_pts >= resume_target - 0.15 &&
+                             SDL_GetQueuedAudioSize(adev) < (unsigned)(bps * 0.35));
+                        if (n > 0 && adev && queue_during_resume) {
                             SDL_QueueAudio(adev, audio_buf, n * OCH * 2);
+                            if (audio_pts >= 0) audio_clock = audio_pts;
                             unsigned queued = SDL_GetQueuedAudioSize(adev);
                             if (queued > max_audio_queue) max_audio_queue = queued;
                         }
@@ -1518,12 +1583,38 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         ? frame->best_effort_timestamp : frame->pts;
                     double vpts = (vts != AV_NOPTS_VALUE) ? vts * av_q2d(vtb) - timeline_origin : cur_pos;
                     double now = av_gettime() / 1000000.0;
+                    int resume_first_frame = 0;
+                    if (resume_preroll) {
+                        // O seek HLS volta ao segmento/chave anterior. Decodifique
+                        // esse trecho sem tocar audio nem usar o relogio de parede
+                        // que envelheceu durante a transferencia de rede.
+                        if (resume_preroll_frames == 0)
+                            diag_player_event("seek", "preroll-first",
+                                              "pts=%.2f target=%.2f", vpts, resume_target);
+                        if (vpts < resume_target - 0.15) {
+                            resume_preroll_frames++;
+                            continue;
+                        }
+                        resume_preroll = 0;
+                        resume_first_frame = 1;
+                        wall_start = now - vpts;
+                        cur_pos = vpts;
+                        last_ac = audio_clock;
+                        last_ac_wall = now;
+                        diag_player_event("seek", "resume-frame",
+                                          "wanted=%.2f actual=%.2f preroll=%d audioq=%u",
+                                          resume_target, vpts, resume_preroll_frames,
+                                          adev ? SDL_GetQueuedAudioSize(adev) : 0);
+                        if (adev) SDL_PauseAudioDevice(adev, 0);
+                    }
                     // Se o relogio de AUDIO parou de avancar (decode travando), o video
                     // NAO fica esperando: segue pelo relogio de parede (nao congela).
                     if (audio_clock != last_ac) { last_ac = audio_clock; last_ac_wall = now; }
-                    int audio_ok = adev && (now - last_ac_wall < 0.7);
+                    unsigned audio_queued = adev ? SDL_GetQueuedAudioSize(adev) : 0;
+                    int audio_ok = adev && audio_queued > 0 && (now - last_ac_wall < 0.7);
                     double master;
-                    if (audio_ok) { master = audio_clock - SDL_GetQueuedAudioSize(adev) / bps; wall_start = now - master; }
+                    if (resume_first_frame) master = vpts;
+                    else if (audio_ok) { master = audio_clock - audio_queued / bps; wall_start = now - master; }
                     else master = now - wall_start;   // audio travado / sem audio: video toca sozinho
                     cur_pos = master;
                     double delay = vpts - master;
