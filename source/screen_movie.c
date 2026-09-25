@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "text.h"
 #include "api.h"
+#include "genre_label.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -166,7 +167,9 @@ void draw_movie(void) {
     char meta[320] = {0};
     if (year > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%d", year);
     if (duration > 0) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%d min", meta[0] ? "  |  " : "", duration);
-    if (genre && genre[0]) snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%s", meta[0] ? "  |  " : "", genre);
+    char genres[240];
+    movie_genre_label(genre, genres, sizeof(genres));
+    snprintf(meta + strlen(meta), sizeof(meta) - strlen(meta), "%s%s", meta[0] ? "  |  " : "", genres);
     text_clip(meta[0] ? meta : "Informacoes ainda nao disponiveis", dx, 180, C_ACC2, 0, WIN_W - dx - 60);
     int max_scroll = g_plot_line_count > PLOT_LINES ? g_plot_line_count - PLOT_LINES : 0;
     if (g_plot_scroll > max_scroll) g_plot_scroll = max_scroll;

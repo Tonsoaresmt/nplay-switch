@@ -60,7 +60,7 @@ Assert-True ($diagSource -notmatch 'play_url|Authorization|Bearer') 'Trace diagn
 
 $mainSource = Get-Content source/main.c -Raw
 Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
-Assert-True ($mainSource -match 'g_land_cache\[6\]') 'Troca de aba perdeu o cache de catalogo.'
+Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
 Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
 Assert-True ($mainSource -notmatch 'prefetch_order\[\] = \{ 1, 2, 3, 4 \}') 'Catalogos voltaram a ocupar heap automaticamente antes do player.'
 Assert-True ($mainSource -match 'playback_memory_enter') 'Player nao reserva memoria antes de abrir HLS.'
@@ -99,6 +99,25 @@ if (-not $SkipBuild) {
 
 Assert-True (Test-Path Nplay.nro) 'Nplay.nro nao foi gerado.'
 Assert-True (Test-Path Nplay.elf) 'Nplay.elf nao foi gerado.'
+$hostGcc = 'C:\devkitPro\msys2\usr\bin\gcc.exe'
+Assert-True (Test-Path $hostGcc) 'GCC host nao encontrado para as simulacoes.'
+& $hostGcc -std=c11 -Wall -Wextra -Iinclude source/genre_label.c tools/test_genre_label.c -o build/test_genre_label.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou ao compilar.' }
+& .\build\test_genre_label.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
+& .\build\test_hot_stream_api.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Iinclude source/episode_flow.c source/cJSON.c tools/test_episode_flow.c -lm -o build/test_episode_flow.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
+& .\build\test_episode_flow.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
+if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
+    (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+    & node tools/test_chunked_remux.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Simulacao local do remux chunked falhou.' }
+}
 $nm = 'C:\devkitPro\devkitA64\bin\aarch64-none-elf-nm.exe'
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"

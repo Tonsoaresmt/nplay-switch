@@ -3,8 +3,9 @@
 #include "diag.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
-static char g_api_last_error[192] = "";
+static _Thread_local char g_api_last_error[192] = "";
 
 const char *api_last_error(void) { return g_api_last_error; }
 
@@ -84,6 +85,75 @@ cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeou
     return j;
 }
 
+static int hot_sequential_file(const char *name) {
+    if (!name) return 0;
+    const char *ext = strrchr(name, '.');
+    if (!ext) return 0;
+    static const char *const remux[] = {
+        ".mkv", ".avi", ".wmv", ".flv", ".ts", ".mpeg", ".mpg", ".m2ts", ".vob"
+    };
+    for (size_t i = 0; i < sizeof(remux) / sizeof(remux[0]); i++)
+        if (!strcasecmp(ext, remux[i])) return 1;
+    return 0;
+}
+
+int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
+                           HotStreamResult *out) {
+    if (!out || item_id <= 0) return -1;
+    memset(out, 0, sizeof(*out));
+    char path[96], url[1024], body[80];
+    snprintf(path, sizeof(path), "/api/stream/hot/%d", item_id);
+    snprintf(url, sizeof(url), "%s%s", BASE, path);
+    snprintf(body, sizeof(body), "{\"source_id\":%d}", source_id);
+    struct membuf resp = {0};
+    const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
+    long code = net_request_timeout_cancel(url, "POST", body,
+                    g_token[0] ? g_token : NULL, &resp, &err, 5L, 30L, cancel);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
+    cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
+    if (code != 200 || !json) {
+        api_set_error(code, err, json);
+        cJSON_Delete(json); membuf_free(&resp);
+        return -1;
+    }
+    const char *status = jstr(json, "status");
+    if (status && !strcmp(status, "r2_ready")) out->status = HOT_R2_READY;
+    else if (status && !strcmp(status, "streaming")) out->status = HOT_STREAMING;
+    else if (status && !strcmp(status, "preparing")) out->status = HOT_PREPARING;
+    else {
+        snprintf(g_api_last_error, sizeof(g_api_last_error), "Resposta de preparo desconhecida");
+        cJSON_Delete(json); membuf_free(&resp);
+        return -1;
+    }
+    out->poll_after_ms = jint(json, "poll_after_ms");
+    if (out->poll_after_ms < 1200) out->poll_after_ms = 1200;
+    if (out->poll_after_ms > 5000) out->poll_after_ms = 5000;
+    cJSON *ready = cJSON_GetObjectItem(json, "stream_ready_bytes");
+    cJSON *target = cJSON_GetObjectItem(json, "target_bytes");
+    if (cJSON_IsNumber(ready) && cJSON_IsNumber(target) && target->valuedouble > 0)
+        out->progress = (int)(100 * ready->valuedouble / target->valuedouble);
+    if (out->progress > 100) out->progress = 100;
+    out->source.item_id = item_id;
+    out->source.source_id = jint(json, "source_id");
+    const char *delivery = jstr(json, "delivery");
+    if (delivery) snprintf(out->source.delivery_str, sizeof(out->source.delivery_str), "%s", delivery);
+    snprintf(out->source.container, sizeof(out->source.container), "mp4");
+    const char *name = jstr(json, "file_name");
+    out->source.sequential_stream = hot_sequential_file(name);
+    absolute_play_url(jstr(json, "play_url"), out->source.play_url,
+                      sizeof(out->source.play_url));
+    if (strstr(out->source.play_url, "/api/media/debrid/"))
+        out->source.sequential_stream = 1;
+    if (out->status == HOT_STREAMING && !out->source.play_url[0]) {
+        snprintf(g_api_last_error, sizeof(g_api_last_error), "Preparo sem URL de video");
+        cJSON_Delete(json); membuf_free(&resp);
+        return -1;
+    }
+    cJSON_Delete(json); membuf_free(&resp);
+    return 0;
+}
+
 cJSON *api_get(const char *path) {
     return api_get_timeout(path, 5L, 15L);
 }
@@ -117,6 +187,7 @@ int arr_len(cJSON *a) {
 
 static int resolve_playback_with_timeout(int item_id, const char *quality,
                                          long connect_timeout, long total_timeout,
+                                         SDL_atomic_t *cancel,
                                          PlaybackSource *out) {
     if (!out) return -1;
     memset(out, 0, sizeof(PlaybackSource));
@@ -145,8 +216,8 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
     struct membuf resp = { 0 };
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
-                                    &resp, &err, connect_timeout, total_timeout);
+    long code = net_request_timeout_cancel(url, "POST", body, g_token[0] ? g_token : NULL,
+                                           &resp, &err, connect_timeout, total_timeout, cancel);
     char trace_path[96]; snprintf(trace_path, sizeof(trace_path), "/api/stream/%d", item_id);
     diag_network_event("POST", trace_path, code, SDL_GetTicks() - started, resp.len);
     cJSON_free(body);
@@ -166,11 +237,16 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
 }
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, out);
+    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, NULL, out);
+}
+
+int api_resolve_playback_cancel(int item_id, const char *quality,
+                                SDL_atomic_t *cancel, PlaybackSource *out) {
+    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, cancel, out);
 }
 
 int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, out);
+    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, NULL, out);
 }
 
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {

@@ -42,9 +42,23 @@ typedef struct {
     int episode;
     long long source_bytes;
     int is_cam;
+    int sequential_stream; // fMP4 gerado na hora: sem seek nem retomada
 } PlaybackSource;
 
+typedef enum { HOT_PREPARING, HOT_STREAMING, HOT_R2_READY } HotStatus;
+typedef struct {
+    HotStatus status;
+    PlaybackSource source;
+    int poll_after_ms;
+    int progress;
+} HotStreamResult;
+
+int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
+                           HotStreamResult *out);
+
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out);
+int api_resolve_playback_cancel(int item_id, const char *quality,
+                                SDL_atomic_t *cancel, PlaybackSource *out);
 int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out);
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out);
 int api_fail_playback(const PlaybackSource *current, PlaybackSource *out);

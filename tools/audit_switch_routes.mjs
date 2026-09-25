@@ -31,6 +31,7 @@ const modules = {
   search: ['catalogSearchRoutes', '/api/catalog', 'src/routes/catalog-search.js'],
   sync: ['syncRoutes', '/api/sync', 'src/routes/sync.js'],
   stream: ['streamRoutes', '/api', 'src/routes/stream.js'],
+  hot: ['hotStreamRoutes', '/api', 'src/routes/hot-stream.js'],
   accel: ['accelRoutes', '/api', 'src/routes/accelerator.js'],
 };
 const sources = {};
@@ -51,7 +52,6 @@ const routes = [
   ['Filmes', '/api/catalog/tab-home?tab=movie', 'catalog', 'get', '/tab-home'],
   ['Series', '/api/catalog/tab-home?tab=series', 'catalog', 'get', '/tab-home'],
   ['Animes', '/api/catalog/anime-home', 'catalog', 'get', '/anime-home'],
-  ['Doramas', '/api/catalog/tab-home?tab=dorama', 'catalog', 'get', '/tab-home'],
   ['Sagas', '/api/catalog/sagas', 'catalog', 'get', '/sagas'],
   ['Sagas', '/api/catalog/sagas/%.200s', 'catalog', 'get', '/sagas/:slug'],
   ['Busca', '/api/catalog/search-v2?q=', 'search', 'get', '/search-v2'],
@@ -74,6 +74,7 @@ const routes = [
   ['Preparados', '/api/accel/download/%d', 'accel', 'post', '/accel/download/:itemId'],
   ['Preparados', '/api/accel/download-batch', 'accel', 'post', '/accel/download-batch'],
   ['Player', '/api/stream/%d', 'stream', 'post', '/stream/:itemId'],
+  ['Player TorBox', '/api/stream/hot/%d', 'hot', 'post', '/stream/hot/:itemId'],
   ['Player', '/api/stream/%d/variants', 'stream', 'get', '/stream/:itemId/variants'],
   ['Player', '/api/stream/session/%d/heartbeat', 'stream', 'post', '/stream/session/:sessionId/heartbeat'],
   ['Player', '/api/stream/session/%d/refresh', 'stream', 'post', '/stream/session/:sessionId/refresh'],
@@ -87,6 +88,11 @@ for (const [area, needle, module, method, route] of routes) {
 }
 
 const main = readFileSync(join(root, 'source/main.c'), 'utf8');
+assert.ok(main.includes('#define TAB_SAGAS 4') && main.includes('#define TAB_DOWNLOADS 5') &&
+  main.includes('#define NTABS 6') && main.includes('#define SEARCH_FILTERS 4') &&
+  !main.includes('/api/catalog/tab-home?tab=dorama') &&
+  !main.includes('"Doramas"'),
+  'Dorama reapareceu na navegacao ou os indices de aba/filtro divergiram');
 const ui = readFileSync(join(root, 'source/ui.h'), 'utf8');
 const player = readFileSync(join(root, 'source/player.c'), 'utf8');
 const screens = [...ui.matchAll(/\bSC_[A-Z]+\b/g)].map((match) => match[0]);

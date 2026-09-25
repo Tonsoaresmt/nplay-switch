@@ -1,6 +1,6 @@
 // Nplay Switch - app homebrew do Nplay para Nintendo Switch.
 // Abas com RAILS por secao (como o app de PC): Inicio, Filmes, Series, Animes,
-// Doramas (todas com hero + Lancamentos + Minha lista + prateleiras por genero),
+// Catalogos ativos com hero + Lancamentos + Minha lista + prateleiras por genero,
 // Historico, biblioteca de itens preparados e Config. Busca global (Y),
 // favoritar (X -> Minha lista). Capas em THREADS de fundo (navegacao fluida).
 // Player de video via ffmpeg + libcurl (TLS), tocando https direto.
@@ -284,15 +284,16 @@ static Screen g_detail_return = SC_MAIN;
 // Config saiu da barra de abas -> abre pelo botao (-). Assim L a partir do
 // Inicio ja cai em Baixados (ultima aba).
 #define TAB_HOME 0
-#define TAB_SAGAS 5
-#define TAB_DOWNLOADS 6
-#define NTABS 7
-static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Doramas", "Sagas", "Historico" };
+#define TAB_SAGAS 4
+#define TAB_DOWNLOADS 5
+#define NTABS 6
+#define SEARCH_FILTERS 4
+static const char *TAB_NAME[] = { "Inicio", "Filmes", "Series", "Animes", "Sagas", "Historico" };
 static int g_tab = 0;
 
 // --- landing (rails) das abas 0..4 ---
 static cJSON *g_land = NULL;          // root JSON da aba atual (home / tab-home / anime-home)
-static cJSON *g_land_cache[6] = {0};  // troca de aba instantanea depois do 1o carregamento
+static cJSON *g_land_cache[5] = {0};  // troca de aba instantanea depois do 1o carregamento
 static cJSON *g_land_pending = NULL;
 static SDL_Thread *g_land_thread = NULL;
 static SDL_atomic_t g_land_done;
@@ -311,7 +312,7 @@ static int g_saga_item_sel = 0;
 
 // --- busca ---
 static cJSON *g_search = NULL;
-static int g_search_counts[5] = {0};
+static int g_search_counts[SEARCH_FILTERS] = {0};
 static int g_search_counts_valid = 0;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
@@ -397,6 +398,8 @@ static void load_history(void);
 static cJSON *history_items(void);
 static int accel_start(int itemId);
 static int accel_wait_and_play(int itemId, const char *title);
+static int hot_wait_for_stream(int itemId, int sourceId, const char *title,
+                               PlaybackSource *out);
 static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
@@ -565,7 +568,7 @@ static void landing_apply(int tab, cJSON *land) {
         add_rail("Filmes de anime",   cJSON_GetObjectItem(g_land, "filmes"), 1);
         cJSON *gs = cJSON_GetObjectItem(g_land, "genreShelves"), *e;
         cJSON_ArrayForEach(e, gs) add_rail(jstr(e, "genre"), cJSON_GetObjectItem(e, "items"), 1);
-    } else {                 // tab-home (movie/series/dorama)
+    } else {                 // tab-home (movie/series)
         int is_series = (tab != 1);
         cJSON_DeleteItemFromObject(g_land, "_switchHeroes");
         g_heroesArr = cJSON_CreateArray();
@@ -590,7 +593,6 @@ static const char *landing_path(int tab) {
         case 1: return "/api/catalog/tab-home?tab=movie";
         case 2: return "/api/catalog/tab-home?tab=series";
         case 3: return "/api/catalog/anime-home";
-        case 4: return "/api/catalog/tab-home?tab=dorama";
         case TAB_SAGAS: return "/api/catalog/sagas";
         default: return "/api/catalog/home";
     }
@@ -839,7 +841,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     double start = 0;
     int completed = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
-    cJSON *pr = api_get(p);
+    cJSON *pr = api_get_timeout(p, 2L, 5L);
     if (pr) {
         cJSON *prog = cJSON_GetObjectItem(pr, "progress");
         cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
@@ -893,37 +895,135 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     return (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
 }
 
+typedef struct {
+    int item_id, rc;
+    PlaybackSource source;
+    char error[192];
+    SDL_atomic_t done, cancel;
+} ResolvePoll;
+
+static int resolve_open_thread(void *userdata) {
+    ResolvePoll *poll = (ResolvePoll *)userdata;
+    poll->rc = api_resolve_playback_cancel(poll->item_id, NULL,
+                                            &poll->cancel, &poll->source);
+    if (poll->rc != 0) snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
+    SDL_AtomicSet(&poll->done, 1);
+    return 0;
+}
+
+// O remux em tempo real nao oferece Range. Se a pessoa voltar antes de o R2
+// ficar pronto, deixe claro que esta fonte so consegue recomecar.
+static int prompt_sequential_restart(const char *title) {
+    Uint32 deadline = SDL_GetTicks() + 4000u;
+    while (g_running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; return 0; }
+            if (event.type == SDL_JOYBUTTONDOWN) {
+                if (event.jbutton.button == JOY_A) return 1;
+                if (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS) return 0;
+            }
+            if (event.type == SDL_FINGERDOWN) {
+                if (event.tfinger.y > 0.52f && event.tfinger.y < 0.67f) return 1;
+                if (event.tfinger.x > 0.80f && event.tfinger.y < 0.15f) return 0;
+            }
+        }
+        Uint32 now = SDL_GetTicks();
+        if ((Sint32)(deadline - now) <= 0) return 1;
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
+        SDL_RenderClear(gRen);
+        ui_header("NPLAY PLAYER", "Retomada indisponivel nesta fonte", "B Voltar");
+        ui_panel(238, 188, WIN_W - 476, 300, C_ACC2);
+        text_clip(title && title[0] ? title : "Sua obra", 282, 240, C_TEXT, 1, WIN_W - 564);
+        text_clip("Esta fonte ainda esta sendo preparada. A retomada volta quando chegar ao R2.",
+                  282, 310, C_MUT, 0, WIN_W - 564);
+        fill_rect(282, 375, 320, 58, C_ACC);
+        text_center_at("A  Comecar do inicio", 282, 320, 390, C_TEXT, 0);
+        text_draw(gRen, "B  Voltar", 650, 391, C_MUT, 0);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    return 0;
+}
+
+// A resolucao da API pode incluir uma fonte externa. Renderiza a espera e
+// permite cancelar sem deixar a tela de abertura congelada por ate 20 s.
+static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out) {
+    ResolvePoll poll = { .item_id = itemId };
+    SDL_Thread *thread = SDL_CreateThread(resolve_open_thread, "resolve-play", &poll);
+    if (!thread) { toast("Nao foi possivel abrir a fonte"); return -1; }
+    int cancelled = 0;
+    appletSetMediaPlaybackState(true);
+    while (g_running && !SDL_AtomicGet(&poll.done)) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; cancelled = 1; break; }
+            if (event.type == SDL_JOYBUTTONDOWN &&
+                (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS)) {
+                cancelled = 1; break;
+            }
+            if (event.type == SDL_FINGERDOWN && event.tfinger.x > 0.80f &&
+                event.tfinger.y < 0.15f) { cancelled = 1; break; }
+        }
+        if (cancelled) { SDL_AtomicSet(&poll.cancel, 1); break; }
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
+        SDL_RenderClear(gRen);
+        ui_header("NPLAY", "Abrindo video", "B Cancelar");
+        ui_popcorn_draw(gRen, WIN_W / 2, 110, 170);
+        text_center_at(title && title[0] ? title : "Video", 160, WIN_W - 320, 338, C_TEXT, 1);
+        text_center("Buscando a melhor fonte...", 394, C_MUT, 0);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    SDL_WaitThread(thread, NULL);
+    appletSetMediaPlaybackState(false);
+    if (!g_running || cancelled || SDL_AtomicGet(&poll.cancel)) return -2;
+    if (poll.rc != 0) {
+        toast(poll.error[0] ? poll.error : "Falha ao abrir a fonte");
+        return -1;
+    }
+    *out = poll.source;
+    return 0;
+}
+
 // Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play(int itemId, const char *title) {
     char stable_title[256];
     snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
-    SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
-    ui_header("NPLAY", "Abrindo video", "");
-    ui_panel(260, 210, WIN_W - 520, 250, C_ACC2);
-    text_draw(gRen, "PREPARANDO", 300, 244, C_ACC2, 0);
-    text_center_at(stable_title, 300, WIN_W - 600, 286, C_TEXT, 1);
-    text_center_at("Organizando tudo para comecar...", 300, WIN_W - 600, 354, C_MUT, 0);
-    for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
-    SDL_RenderPresent(gRen);
-    
     PlaybackSource src = {0};
-    if (api_resolve_playback(itemId, NULL, &src) < 0) {
-        const char *detail = api_last_error();
-        toast(detail && detail[0] ? detail : "Falha de rede ou de acesso ao abrir o video");
-        return 0;
-    }
+    int resolved = resolve_open_with_animation(itemId, stable_title, &src);
+    if (resolved == -2) return 0;
+    if (resolved < 0) return 0;
     
     int rc = 0;
     if (src.container[0] && !strcmp(src.container, "torrent")) {
-        // Para torrent, o fluxo e separado (usa accel_wait_and_play que tem I/O diferente)
-        rc = accel_wait_and_play(itemId, stable_title);
-    } else if (src.container[0] && !strcmp(src.container, "embed")) {
+        // /stream devolve um magnet para clientes nativos. No Switch a rota
+        // reproduzivel e a mesma usada pelo navegador: TorBox/hot-stream.
+        // /stream pode escolher uma fonte que o hot-stream considera nao
+        // confiavel. Sem escolha manual de variante, deixe o endpoint selecionar
+        // a melhor fonte validada para TorBox.
+        if (src.session_id > 0) api_stop_playback(itemId);
+        src.session_id = 0;
+        int hot = hot_wait_for_stream(itemId, 0, stable_title, &src);
+        if (hot == 2) {
+            if (api_reresolve_playback(itemId, NULL, &src) < 0 || !src.play_url[0]) {
+                toast("Video preparado, mas a fonte R2 nao abriu");
+                return 0;
+            }
+        } else if (hot == -2) {
+            // Instalacoes antigas sem hot-stream mantem a preparacao existente.
+            return accel_wait_and_play(itemId, stable_title);
+        } else if (hot != 1) {
+            return 0;
+        }
+    }
+    if (src.container[0] && !strcmp(src.container, "embed")) {
         toast("Este conteudo ainda nao esta disponivel neste dispositivo");
     } else if (src.play_url[0]) {
         double start = 0;
         int completed = 0;
         char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
-        cJSON *pr = api_get(p);
+        cJSON *pr = api_get_timeout(p, 2L, 5L);
         if (pr) {
             cJSON *prog = cJSON_GetObjectItem(pr, "progress");
             cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
@@ -931,7 +1031,10 @@ int resolve_and_play(int itemId, const char *title) {
             completed = prog ? jint(prog, "completed") : 0;
             cJSON_Delete(pr);
         }
-        if (!completed && start > 10) {
+        if (!completed && start > 10 && src.sequential_stream) {
+            if (!prompt_sequential_restart(stable_title)) return 0;
+            start = 0;
+        } else if (!completed && start > 10) {
             int choice = prompt_resume_playback(stable_title, (int)start);
             if (choice < 0) { if (src.session_id > 0) api_stop_playback(itemId); return 0; }
             if (choice == 0) start = 0;
@@ -950,10 +1053,15 @@ int resolve_and_play(int itemId, const char *title) {
         req.season = src.season;
         req.episode = src.episode;
         req.start_sec = start;
+        if (src.sequential_stream) req.start_sec = 0;
         req.progress_cb = on_player_progress;
-        req.renew_cb = on_player_renew;
-        req.fallback_cb = on_player_fallback;
-        req.heartbeat_cb = on_player_heartbeat;
+        // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
+        // /stream poderia entregar magnet ao demuxer e repetir a falha.
+        req.renew_cb = src.delivery_str[0] &&
+            (!strcmp(src.delivery_str, "hot") || !strcmp(src.delivery_str, "debrid"))
+            ? NULL : on_player_renew;
+        req.fallback_cb = req.renew_cb ? on_player_fallback : NULL;
+        req.heartbeat_cb = src.session_id > 0 ? on_player_heartbeat : NULL;
         PlaybackSyncStatus sync = {0};
         req.userdata = &sync;
 
@@ -1209,6 +1317,94 @@ static void update_download_awake(void) {
     if (want == g_download_awake) return;
     appletSetMediaPlaybackState(want);
     g_download_awake = want;
+}
+
+typedef struct {
+    int item_id, source_id, rc;
+    HotStreamResult result;
+    char error[192];
+    SDL_atomic_t done, cancel;
+} HotPoll;
+
+static int hot_poll_thread(void *userdata) {
+    HotPoll *poll = (HotPoll *)userdata;
+    poll->rc = api_hot_stream_attempt(poll->item_id, poll->source_id,
+                                      &poll->cancel, &poll->result);
+    if (poll->rc != 0) snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
+    SDL_AtomicSet(&poll->done, 1);
+    return 0;
+}
+
+// Retorna 1 para stream, 2 para R2 publicado, -2 quando a rota nao existe.
+// A requisicao roda em thread para a tela e o botao B continuarem responsivos.
+static int hot_wait_for_stream(int itemId, int sourceId, const char *title,
+                               PlaybackSource *out) {
+    Uint32 deadline = SDL_GetTicks() + 60000u;
+    Uint32 next_poll = 0;
+    int progress = 0, result = 0;
+    HotPoll poll = { .item_id = itemId, .source_id = sourceId };
+    SDL_Thread *thread = NULL;
+    appletSetMediaPlaybackState(true);
+    while (g_running && (Sint32)(deadline - SDL_GetTicks()) > 0) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; result = 0; goto done; }
+            if (event.type == SDL_JOYBUTTONDOWN &&
+                (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS)) {
+                result = 0; goto done;
+            }
+            if (event.type == SDL_FINGERDOWN && event.tfinger.x > 0.80f &&
+                event.tfinger.y < 0.15f) { result = 0; goto done; }
+        }
+        Uint32 now = SDL_GetTicks();
+        if (thread && SDL_AtomicGet(&poll.done)) {
+            SDL_WaitThread(thread, NULL); thread = NULL;
+            if (poll.rc != 0) {
+                const char *error = poll.error;
+                result = error && (strstr(error, "HTTP 404") || strstr(error, "HTTP 501")) ? -2 : -1;
+                if (result == -1) toast(error && error[0] ? error : "Falha ao preparar o video");
+                goto done;
+            }
+            if (poll.result.status == HOT_STREAMING) {
+                *out = poll.result.source;
+                result = 1; goto done;
+            }
+            if (poll.result.status == HOT_R2_READY) {
+                result = 2; goto done;
+            }
+            progress = poll.result.progress;
+            next_poll = now + (Uint32)poll.result.poll_after_ms;
+        }
+        if (!thread && now >= next_poll) {
+            SDL_AtomicSet(&poll.done, 0);
+            SDL_AtomicSet(&poll.cancel, 0);
+            thread = SDL_CreateThread(hot_poll_thread, "hot-stream", &poll);
+            if (!thread) { toast("Nao foi possivel consultar o preparo do video"); result = -1; goto done; }
+        }
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
+        SDL_RenderClear(gRen);
+        ui_header("NPLAY", "Preparando reproducao", "B Cancelar");
+        ui_popcorn_draw(gRen, WIN_W / 2, 110, 170);
+        text_center_at(title && title[0] ? title : "Video", 150, WIN_W - 300, 330, C_TEXT, 1);
+        text_center(progress > 0 ? "Preparando os primeiros segundos..." :
+                    "Conectando a melhor fonte...", 385, C_MUT, 0);
+        int bx = 260, by = 455, bw = WIN_W - 520;
+        fill_rect(bx, by, bw, 8, C_CARD);
+        int shown = progress > 0 ? (bw * progress / 100) : (int)((now / 8) % bw);
+        fill_rect(bx, by, shown, 8, C_ACC2);
+        text_center("O video comeca assim que o buffer estiver pronto.", 510, C_MUT, 0);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    toast("O video ainda esta sendo preparado. Tente novamente em instantes.");
+    result = -1;
+done:
+    if (thread) {
+        SDL_AtomicSet(&poll.cancel, 1);
+        SDL_WaitThread(thread, NULL);
+    }
+    appletSetMediaPlaybackState(false);
+    return result;
 }
 
 static int accel_start(int itemId) {
@@ -1700,12 +1896,11 @@ static int srch_matches(cJSON *item, int is_series, int filter) {
     if (filter == 0) return 1;
     const char *scope = jstr(item, "search_scope");
     if (filter == 3) return scope && !strcmp(scope, "anime");
-    if (filter == 4) return scope && !strcmp(scope, "dorama");
     if (filter == 2) return is_series && (!scope || !strcmp(scope, "series"));
     return !is_series && (!scope || !strcmp(scope, "movie"));
 }
 static int srch_count_for(int filter) {
-    if (!g_search || filter < 0 || filter >= 5) return 0;
+    if (!g_search || filter < 0 || filter >= SEARCH_FILTERS) return 0;
     if (!g_search_counts_valid) {
         memset(g_search_counts, 0, sizeof(g_search_counts));
         for (int group = 0; group < 2; group++) {
@@ -1713,7 +1908,7 @@ static int srch_count_for(int filter) {
             cJSON *array = cJSON_GetObjectItem(g_search, is_series ? "series" : "items");
             cJSON *it;
             cJSON_ArrayForEach(it, array) {
-                for (int f = 0; f < 5; f++)
+                for (int f = 0; f < SEARCH_FILTERS; f++)
                     if (srch_matches(it, is_series, f)) g_search_counts[f]++;
             }
         }
@@ -1753,7 +1948,7 @@ static void url_encode_utf8(const char *input, char *output, size_t capacity) {
 }
 static void do_search(void) {
     char q[128];
-    if (prompt_text("Buscar filme, serie, anime, dorama...", q, sizeof(q), 0) != 0) return;
+    if (prompt_text("Buscar filme, serie ou anime...", q, sizeof(q), 0) != 0) return;
     char enc[400]; url_encode_utf8(q, enc, sizeof(enc));
     char path[460]; snprintf(path, sizeof(path), "/api/catalog/search-v2?q=%s", enc);
     begin_catalog_fetch(FETCH_SEARCH, path, q);
@@ -1871,7 +2066,6 @@ static void draw_landing(void) {
         const char *prompt = g_tab == 1 ? "Procurando outro filme?" :
                              g_tab == 2 ? "Procurando outra serie?" :
                              g_tab == 3 ? "Procurando outro anime?" :
-                             g_tab == 4 ? "Procurando outro dorama?" :
                                           "Quer encontrar uma obra especifica?";
         text_draw(gRen, prompt, 68, search_y + 48, C_TEXT, 1);
         text_draw(gRen, "Busque pelo nome ou por parte do titulo.", 68, search_y + 80, C_MUT, 0);
@@ -1903,9 +2097,9 @@ static void draw_search(void) {
     text_clip(hd, 54, 111, C_TEXT, 1, 850);
     char count[64]; snprintf(count, sizeof(count), "%d resultado%s", n, n == 1 ? "" : "s");
     text_right(count, WIN_W - 54, 119, C_MUT, 0);
-    static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes", "Doramas" };
+    static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes" };
     int chip_x = 54;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < SEARCH_FILTERS; i++) {
         int count = srch_count_for(i); char label[48];
         snprintf(label, sizeof(label), "%s  %d", filters[i], count);
         int tw = 0, th = 0; text_cached(gRen, label, C_TEXT, 0, &tw, &th);
@@ -2162,8 +2356,7 @@ static void draw_series(void) {
     int fav = is_fav_series(sid);
     const char *title = jstr(s, "title"); if (!title) title = "Serie";
     const char *section = jstr(s, "section");
-    const char *area = section && !strcmp(section, "anime") ? "NPLAY / ANIME" :
-                       section && !strcmp(section, "dorama") ? "NPLAY / DORAMA" : "NPLAY / SERIE";
+    const char *area = section && !strcmp(section, "anime") ? "NPLAY / ANIME" : "NPLAY / SERIE";
     ui_header(area, NULL, "B Voltar");
 
     SDL_Rect hero = { 52, 110, WIN_W - 104, 306 };
@@ -2774,7 +2967,7 @@ static void input_search(int b) {
     if (b == JOY_Y) { do_search(); return; }
     if (b == JOY_ZL || b == JOY_ZR) {
         int step = b == JOY_ZR ? 1 : -1;
-        g_srchFilter = (g_srchFilter + step + 5) % 5;
+        g_srchFilter = (g_srchFilter + step + SEARCH_FILTERS) % SEARCH_FILTERS;
         g_srchSel = 0; g_srchScroll = 0;
         return;
     }
@@ -3717,9 +3910,9 @@ static void handle_touch_tap(int x, int y) {
         }
         if (g_screen == SC_SEARCH) {
             if (y >= 161 && y < 197) {
-                static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes", "Doramas" };
+                static const char *filters[] = { "Tudo", "Filmes", "Series", "Animes" };
                 int chip_x = 54;
-                for (int i = 0; i < 5; i++) {
+                for (int i = 0; i < SEARCH_FILTERS; i++) {
                     char label[48];
                     snprintf(label, sizeof(label), "%s  %d", filters[i], srch_count_for(i));
                     int tw = 0, th = 0;
@@ -3997,7 +4190,7 @@ int main(int argc, char **argv) {
         Uint32 ui_frame_start = SDL_GetTicks();
 
         // destaque rotativo nas abas 0..4 (a cada ~6s)
-        if (!g_pref_reduce_motion && g_screen == SC_MAIN && g_tab <= 4 && g_land && SDL_GetTicks() > g_hero_next) {
+        if (!g_pref_reduce_motion && g_screen == SC_MAIN && g_tab < TAB_SAGAS && g_land && SDL_GetTicks() > g_hero_next) {
             int nh = hero_count();
             if (nh > 0) g_heroIdx = (g_heroIdx + 1) % nh;
             g_hero_next = SDL_GetTicks() + 6000;

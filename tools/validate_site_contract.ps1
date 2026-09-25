@@ -15,7 +15,6 @@ foreach ($endpoint in @(
     '/api/catalog/tab-home\?tab=movie',
     '/api/catalog/tab-home\?tab=series',
     '/api/catalog/anime-home',
-    '/api/catalog/tab-home\?tab=dorama',
     '/api/catalog/sagas',
     '/api/catalog/sagas/%.200s',
     '/api/catalog/search-v2\?q='
@@ -23,6 +22,7 @@ foreach ($endpoint in @(
     Assert-Contains $switchMain $endpoint "Endpoint ausente no Switch: $endpoint"
 }
 Assert-Contains $switchApi '/api/stream/session/%d/refresh' 'Refresh de sessao ausente no Switch.'
+Assert-Contains $switchApi '/api/stream/hot/%d' 'Rota TorBox/hot-stream ausente no Switch.'
 Assert-Contains $switchApi '/api/stream/session/%d/fail' 'Failover de fonte ausente no Switch.'
 Assert-Contains $switchApi '/api/stream/session/%d/heartbeat' 'Heartbeat ausente no Switch.'
 Assert-Contains $switchPlayer 'fallback_cb' 'Supervisor do player nao usa failover.'
@@ -37,6 +37,7 @@ if (-not (Test-Path $BackendRoot)) {
 $catalog = Get-Content (Join-Path $BackendRoot 'src/routes/catalog.js') -Raw
 $search = Get-Content (Join-Path $BackendRoot 'src/routes/catalog-search.js') -Raw
 $stream = Get-Content (Join-Path $BackendRoot 'src/routes/stream.js') -Raw
+$hot = Get-Content (Join-Path $BackendRoot 'src/routes/hot-stream.js') -Raw
 Assert-Contains $catalog "app\.get\('/tab-home'" 'Backend nao possui tab-home.'
 Assert-Contains $catalog "app\.get\('/anime-home'" 'Backend nao possui anime-home.'
 Assert-Contains $catalog "app\.get\('/series/:id'" 'Backend nao possui detalhe de series.'
@@ -44,10 +45,10 @@ Assert-Contains $catalog "app\.get\('/sagas'" 'Backend nao possui lista de sagas
 Assert-Contains $catalog "app\.get\('/sagas/:slug'" 'Backend nao possui detalhe de saga.'
 Assert-Contains $search "app\.get\('/search-v2'" 'Backend nao possui busca v2.'
 Assert-Contains $search "WHEN c\.section='anime' THEN 'anime'" 'Busca v2 nao classifica anime.'
-Assert-Contains $search "WHEN c\.section='dorama' THEN 'dorama'" 'Busca v2 nao classifica dorama.'
 Assert-Contains $stream "'/stream/session/:sessionId/refresh'" 'Backend nao possui refresh de sessao.'
 Assert-Contains $stream "'/stream/session/:sessionId/fail'" 'Backend nao possui failover de fonte.'
 Assert-Contains $stream "'/stream/session/:sessionId/heartbeat'" 'Backend nao possui heartbeat.'
+Assert-Contains $hot "app\.post\('/stream/hot/:itemId'" 'Backend nao possui hot-stream.'
 foreach ($field in @('delivery:', 'container:', 'play_url:')) {
     Assert-Contains $stream ([regex]::Escape($field)) "Descritor de stream sem campo $field"
 }

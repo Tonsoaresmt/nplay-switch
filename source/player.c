@@ -393,25 +393,29 @@ static void draw_track_menu(SDL_Renderer *ren, AVFormatContext *fmt, int menu,
 static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur,
                      int paused, int vol, AVFormatContext *fmt, int aidx,
                      int acur, int naud, int nsub, int scur, int sidx,
-                     int hud_pinned) {
+                     int hud_pinned, int seekable) {
     const int expanded = paused || hud_pinned;
-    pfill(ren, 0, 0, PWIN_W, 86, PC_DARK, 205);
-    pfill(ren, 0, 0, 6, 86, PC_ACC, 255);
-    text_draw(ren, "NPLAY PLAYER", 46, 10, PC_ACC, 0);
-    draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao", 46, 39, 970, PC_TEXT, 1);
-    text_draw(ren, paused ? "PAUSADO" : "REPRODUZINDO", 1060, 30,
+    // Faixas translucidas deixam a obra visivel, seguindo o player do site.
+    pfill(ren, 0, 0, PWIN_W, 72, PC_DARK, 165);
+    pfill(ren, 0, 72, PWIN_W, 18, PC_DARK, 70);
+    pfill(ren, 40, 21, 4, 42, PC_ACC, 255);
+    text_draw(ren, "NPLAY", 58, 8, PC_ACC2, 0);
+    draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao", 58, 35, 945, PC_TEXT, 1);
+    text_draw(ren, paused ? "PAUSADO" : "REPRODUZINDO", 1050, 31,
               paused ? PC_ACC : PC_ACC2, 0);
 
-    const int panel_y = expanded ? 438 : 584;
-    pfill(ren, 0, panel_y, PWIN_W, PWIN_H - panel_y, PC_DARK, 222);
-    int bx = 48, by = panel_y + 27, bw = PWIN_W - 96, bh = 6;
+    const int panel_y = expanded ? 456 : 572;
+    pfill(ren, 0, panel_y - 28, PWIN_W, 28, PC_DARK, 38);
+    pfill(ren, 0, panel_y, PWIN_W, 45, PC_DARK, 115);
+    pfill(ren, 0, panel_y + 45, PWIN_W, PWIN_H - panel_y - 45, PC_DARK, 205);
+    int bx = 48, by = panel_y + 26, bw = PWIN_W - 96, bh = 5;
     pfill(ren, bx, by, bw, bh, PC_CARD, 255);
     int fw = 0;
     if (dur > 0) fw = (int)(bw * (pos / dur));
     if (fw < 0) fw = 0;
     if (fw > bw) fw = bw;
     if (fw > 0) pfill(ren, bx, by, fw, bh, PC_ACC, 255);
-    pfill(ren, bx + fw - 3, by - 4, 6, bh + 8, PC_TEXT, 255);
+    if (dur > 0) pfill(ren, bx + fw - 4, by - 5, 8, bh + 10, PC_TEXT, 255);
 
     char now[16], total[16];
     fmt_time(pos, now, sizeof(now));
@@ -422,11 +426,11 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
     if (tt) { SDL_Rect d = { PWIN_W - 48 - tw, by + 12, tw, th }; SDL_RenderCopy(ren, tt, NULL, &d); }
 
     if (expanded) {
-        int y = panel_y + 86;
+        int y = panel_y + 76;
         draw_control(ren, 48,   y, 190, "A", paused ? "Continuar" : "Pausar", paused);
-        draw_control(ren, 254,  y, 210, "L/R", "- / + 10s", 0);
-        draw_control(ren, 480,  y, 232, "ZL/ZR", "- / + 60s", 0);
-        draw_control(ren, 728,  y, 270, "LS", "Buscar na timeline", 0);
+        draw_control(ren, 254,  y, 210, "L/R", seekable ? "- / + 10s" : "Apos preparo", 0);
+        draw_control(ren, 480,  y, 232, "ZL/ZR", seekable ? "- / + 60s" : "Apos preparo", 0);
+        draw_control(ren, 728,  y, 270, "LS", seekable ? "Buscar na timeline" : "Busca indisponivel", 0);
         draw_control(ren, 1014, y, 218, "B", "Voltar", 0);
 
         char volume_value[24], audio_value[48], subtitle_value[48];
@@ -440,18 +444,18 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
         snprintf(audio_label, sizeof(audio_label), "AUDIO  %d/%d", naud ? acur + 1 : 0, naud);
         snprintf(subtitle_label, sizeof(subtitle_label), "LEGENDAS  %d/%d", scur >= 0 ? scur + 1 : 0, nsub);
 
-        int cy = panel_y + 164;
+        int cy = panel_y + 155;
         draw_setting_card(ren, 48,  cy, 284, "UP/DN", "VOLUME", volume_value, 0);
         draw_setting_card(ren, 348, cy, 284, "Y", audio_label, audio_value, 0);
         draw_setting_card(ren, 648, cy, 284, "X", subtitle_label, subtitle_value, sidx >= 0);
         draw_setting_card(ren, 948, cy, 284, "+", "MODO DO PAINEL",
                           hud_pinned ? "Fixo" : "Automatico", hud_pinned);
     } else {
-        int y = panel_y + 91;
+        int y = panel_y + 89;
         draw_control(ren, 48,   y, 190, "A", "Pausar", 0);
-        draw_control(ren, 258,  y, 190, "L/R", "10s", 0);
-        draw_control(ren, 468,  y, 220, "ZL/ZR", "60s", 0);
-        draw_control(ren, 708,  y, 280, "LS/+", "Buscar / Opcoes", 0);
+        draw_control(ren, 258,  y, 190, "L/R", seekable ? "10s" : "Sem busca", 0);
+        draw_control(ren, 468,  y, 220, "ZL/ZR", seekable ? "60s" : "Sem busca", 0);
+        draw_control(ren, 708,  y, 280, "LS/+", seekable ? "Buscar / Opcoes" : "Opcoes", 0);
         draw_control(ren, 1008, y, 224, "B", "Voltar", 0);
     }
 }
@@ -703,6 +707,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     
     const char *url = req->url;
     int is_hls = (req->container && !strcmp(req->container, "m3u8"));
+    int sequential_stream = req->playback.sequential_stream;
     const char *title = req->title;
     // Tela de preparacao enquanto abre a conexao e le os metadados.
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
@@ -821,8 +826,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         req->delivery == DELIVERY_R2 ? "1" : "0", 0);
             av_dict_set(&open_opts, "seg_max_retry", "3", 0);
         } else {
-            av_dict_set(&open_opts, "seekable", "1", 0);
-            av_dict_set(&open_opts, "multiple_requests", "1", 0);
+            av_dict_set(&open_opts, "seekable", sequential_stream ? "0" : "1", 0);
+            av_dict_set(&open_opts, "multiple_requests", sequential_stream ? "0" : "1", 0);
         }
     }
     player_boot_stage("03 abrindo fonte");
@@ -1131,7 +1136,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_Event e;
 
     // Retoma de onde parou somente quando ha margem suficiente ate o fim.
-    if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
+    if (!sequential_stream && start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
         if (native_hls) {
             // hls_read_seek calcula o segmento usando first_timestamp. Com o
             // probe de cabecalhos pulado, ele ainda nao existe ate o primeiro
@@ -1363,6 +1368,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     snprintf(notice, sizeof(notice), "Volume  %d%%", vol);
                     notice_until = SDL_GetTicks() + 1800;
                 }
+                else if (sequential_stream &&
+                         (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL)) {
+                    snprintf(notice, sizeof(notice), "Busca disponivel apos o preparo completo");
+                    notice_until = SDL_GetTicks() + 2200;
+                }
                 else if (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL) {
                     double step = (b == JOY_ZR || b == JOY_ZL) ? 60 : 10;
                     int forward = (b == JOY_R || b == JOY_ZR);
@@ -1406,7 +1416,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             seek_arm_dir = 0;
             seek_arm_since = 0;
         }
-        if (!track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
+        if (!sequential_stream && !track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
             if (stick_abs >= SEEK_ENTER_AXIS) {
                 int direction = stick_x > 0 ? 1 : -1;
                 if (seek_arm_dir != direction) {
@@ -1446,7 +1456,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
             draw_hud(ren, title, timeline_seek_target, dur, 1, vol, fmt, aidx,
-                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, 1);
+                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, 1, !sequential_stream);
             draw_timeline_seek(ren, fmt, timeline_seek_from, timeline_seek_target, dur, timeline_origin);
             SDL_RenderPresent(ren);
             SDL_Delay(16);
@@ -1471,7 +1481,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
             if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
             draw_hud(ren, title, cur_pos, dur, 1, vol, fmt, aidx,
-                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
+                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned, !sequential_stream);
             if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
             SDL_RenderPresent(ren);
             SDL_Delay(30);
@@ -1527,7 +1537,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 else snprintf(dots, sizeof(dots), "Conexao lenta  |  B para voltar");
                 draw_center_state(ren, stalled < 8000 ? "CARREGANDO" : "RECUPERANDO", dots, stalled >= 30000);
                 draw_hud(ren, title, cur_pos, dur, 0, vol, fmt, aidx,
-                         acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
+                         acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned, !sequential_stream);
                 if (now_ticks < notice_until) draw_notice(ren, notice);
                 SDL_RenderPresent(ren);
             }
@@ -1742,7 +1752,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
                     if (hud_pinned || SDL_GetTicks() < hud_until)
                         draw_hud(ren, title, cur_pos, dur, 0, vol, fmt, aidx,
-                                 acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
+                                 acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned, !sequential_stream);
                     if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
                     SDL_RenderPresent(ren);
                     Uint32 present_tick = SDL_GetTicks();
