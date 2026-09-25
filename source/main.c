@@ -520,10 +520,17 @@ static void landing_apply(int tab, cJSON *land) {
         add_rail("Filmes recentes",     cJSON_GetObjectItem(g_land, "recentMovies"), 0);
         add_rail("Series atualizadas",  cJSON_GetObjectItem(g_land, "recentSeries"), 1);
         add_rail("Animes recentes",     cJSON_GetObjectItem(g_land, "recentAnimes"), 1);
-        cJSON *sh = cJSON_GetObjectItem(g_land, "movieShelves"), *e;
-        cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
-        sh = cJSON_GetObjectItem(g_land, "liveShelves");
-        cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), 0);
+        cJSON *sh = cJSON_GetObjectItem(g_land, "readyMovieShelves"), *e;
+        if (!sh) sh = cJSON_GetObjectItem(g_land, "movieShelves");
+        cJSON_ArrayForEach(e, sh) {
+            char label[48]; snprintf(label, sizeof(label), "Filmes: %s", jstr(e, "title") ? jstr(e, "title") : "Outros");
+            add_rail(label, cJSON_GetObjectItem(e, "items"), 0);
+        }
+        sh = cJSON_GetObjectItem(g_land, "readySeriesShelves");
+        cJSON_ArrayForEach(e, sh) {
+            char label[48]; snprintf(label, sizeof(label), "Series: %s", jstr(e, "title") ? jstr(e, "title") : "Outras");
+            add_rail(label, cJSON_GetObjectItem(e, "items"), 1);
+        }
     } else if (tab == 3) {   // anime-home
         cJSON_DeleteItemFromObject(g_land, "_switchHeroes");
         g_heroesArr = cJSON_CreateArray();
@@ -2127,7 +2134,12 @@ static void input_dlmenu(int b) {
         }
         k += snprintf(body + k, sizeof(body) - k, "]}");
         if (cnt == 0) { toast("Selecione ao menos um episodio (A)"); return; }
-        api_send("/api/accel/download-batch", "POST", body);
+        long code = api_send("/api/accel/download-batch", "POST", body);
+        if (code != 200) {
+            toast(code == 503 ? "Preparacao indisponivel no servidor agora" :
+                 "Nao foi possivel preparar os episodios selecionados");
+            return;
+        }
         char m[64]; snprintf(m, sizeof(m), "%d episodio(s) adicionado(s) a biblioteca", cnt);
         toast(m); g_dlmenu = 0; g_screen = SC_MAIN; enter_tab(TAB_DOWNLOADS);
     }
@@ -3348,6 +3360,80 @@ static void handle_button(int b) {
     }
 }
 
+// Hit-tests da aba Historico seguem as mesmas coordenadas usadas no desenho.
+// Um toque fora de um card nao deve confirmar a selecao antiga (e abrir outro
+// video sem que o usuario o tenha escolhido).
+static void handle_history_touch(int x, int y) {
+    if (g_dlView == 0) {
+        if (g_history_menu) {
+            if (x >= 324 && x < 956 && y >= 278 && y < 520) {
+                int row = (y - 278) / 64;
+                if ((y - 278) % 64 < 50 && row < 4) {
+                    g_history_menu_sel = row;
+                    input_downloads(JOY_A);
+                }
+            }
+            return;
+        }
+        int nh = arr_len(history_items());
+        if (y >= 152 && y < 152 + HIST_CH + 52) {
+            int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
+            int relative = x - 54 + scroll;
+            if (relative >= 0) {
+                int index = relative / (HIST_CW + HIST_GAP);
+                if (index < nh && relative % (HIST_CW + HIST_GAP) < HIST_CW) {
+                    g_history_zone = 0;
+                    g_history_sel = index;
+                    input_downloads(JOY_A);
+                }
+            }
+            return;
+        }
+        if (y >= 481 && y < 639) {
+            int scroll = horizontal_scroll(g_list_sel, 270, 18);
+            int relative = x - 54 + scroll;
+            if (relative >= 0) {
+                int index = relative / 288;
+                if (index < store_media_list_count() + 2 && relative % 288 < 270) {
+                    g_history_zone = 1;
+                    g_list_sel = index;
+                    input_downloads(JOY_A);
+                }
+            }
+        }
+        return;
+    }
+    if (g_dlView == 1) {
+        if (g_dlGroup < 0 || g_dlGroup >= g_dlgN) return;
+        if (x < 32 || x >= WIN_W - 32 || y < 195 || y >= WIN_H - 52) return;
+        int visible = (WIN_H - 195 - 56) / 46;
+        int index = g_dlDetScroll + (y - 195) / 46;
+        if (index < g_dlg[g_dlGroup].nJobs && index < g_dlDetScroll + visible) {
+            g_dlDetSel = index;
+            input_downloads(JOY_A);
+        }
+        return;
+    }
+    if (x < GMX || y >= WIN_H - 52) return;
+    int top = g_dlView == 2 ? 184 : 194;
+    int scroll = g_dlScroll;
+    if (g_dlView == 3) {
+        int selected_bottom = top + (g_list_item_sel / GCOLS) * (GCH + GGAP) + GCH;
+        scroll = selected_bottom > WIN_H - 52 ? selected_bottom - (WIN_H - 52) + 16 : 0;
+    }
+    int relative_x = x - GMX, relative_y = y + scroll - top;
+    if (relative_y < 0) return;
+    int col = relative_x / (GCW + GGAP), row = relative_y / (GCH + GGAP);
+    if (col >= GCOLS || relative_x % (GCW + GGAP) >= GCW ||
+        relative_y % (GCH + GGAP) >= GCH) return;
+    int index = row * GCOLS + col;
+    int count = g_dlView == 2 ? g_dlgN : store_media_list_item_count(g_open_list);
+    if (index >= count) return;
+    if (g_dlView == 2) g_dlSel = index;
+    else g_list_item_sel = index;
+    input_downloads(JOY_A);
+}
+
 static void handle_touch_tap(int x, int y) {
     if (g_screen == SC_LOGIN) { if (y >= 300 && y < 395) handle_button(JOY_A); return; }
     if (g_screen == SC_LOADING) { if (y < 92) handle_button(JOY_B); return; }
@@ -3409,7 +3495,7 @@ static void handle_touch_tap(int x, int y) {
             }
             return;
         }
-        if (g_tab == TAB_DOWNLOADS) { input_downloads(JOY_A); return; }
+        if (g_tab == TAB_DOWNLOADS) { handle_history_touch(x, y); return; }
         int nh = hero_count(), hy = 110 - g_homeScroll;
         if (nh > 0 && y >= hy && y < hy + HERO_H && x >= 52 && x < WIN_W - 52) {
             g_railSel = -1; input_landing(JOY_A); return;
@@ -3439,6 +3525,32 @@ static void handle_touch_tap(int x, int y) {
         return;
     }
     if (y < 95 && x < 260) { handle_button(JOY_B); return; }
+    if (g_screen == SC_PROFILES) {
+        cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+        int count = arr_len(profiles);
+        if (count > 4) count = 4;
+        int left = (WIN_W - (count * 240 - 20)) / 2;
+        if (y >= 227 && y < 467 && x >= left) {
+            int relative = x - left, index = relative / 240;
+            if (index < count && relative % 240 < 220) {
+                g_profile_sel = index;
+                input_profiles(JOY_A);
+            }
+        } else if (count <= 0 && y >= 220 && y < 540) input_profiles(JOY_A);
+        return;
+    }
+    if (g_screen == SC_CONFIG) {
+        if (g_diag_open) { if (y >= 66 && y < 652) input_settings(JOY_X); return; }
+        if (g_prefs_open) return;
+        if (x >= 260 && x < 1020 && y >= 382 && y < 619) {
+            int index = (y - 382) / 40;
+            if (index < NSET && (y - 382) % 40 < 37) {
+                g_setSel = index;
+                input_settings(JOY_A);
+            }
+        }
+        return;
+    }
     if (g_screen == SC_SERIES && !g_dlmenu) {
         if (y >= 424 && y < 468) {
             if (x >= 52 && x < 229) input_series(JOY_A);

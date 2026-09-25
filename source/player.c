@@ -53,6 +53,7 @@ static char g_player_last_error[160] = "";
 // thread que desenha os quadros. Depois do primeiro quadro, nao grave eventos
 // normais na microSD em toda troca de segmento.
 static int g_player_presented_frame = 0;
+static const SDL_Color PC_DARK = { 8, 10, 15, 255 };
 
 static void player_boot_stage(const char *stage) {
     // O caminho plano existe mesmo quando o NRO foi instalado fora de uma pasta.
@@ -77,6 +78,9 @@ static void player_error_message(const char *message) {
     snprintf(g_player_last_error, sizeof(g_player_last_error), "%s", message);
 }
 
+static void draw_center_state(SDL_Renderer *ren, const char *state,
+                              const char *detail, int accent);
+
 typedef struct {
     int64_t deadline_us;
     SDL_Joystick *joy;
@@ -86,6 +90,10 @@ typedef struct {
     Uint32 last_progress_tick;
     const char *phase;
     int native_hls;
+    SDL_Renderer *renderer;
+    SDL_threadID render_thread;
+    Uint32 last_render_tick;
+    const char *detail;
 } PlayerOpenDeadline;
 
 static int player_open_interrupted(void *userdata) {
@@ -97,19 +105,25 @@ static int player_open_interrupted(void *userdata) {
     // avformat_open_input/find_stream_info sao sincronas. Bombeie o controle
     // dentro do callback de interrupcao para B/- realmente funcionarem mesmo
     // enquanto FFmpeg espera rede ou uma rendition HLS.
-    SDL_PumpEvents();
-    SDL_Event queued[16];
-    int queued_count = SDL_PeepEvents(queued, 16, SDL_PEEKEVENT,
-                                      SDL_JOYBUTTONDOWN, SDL_JOYBUTTONDOWN);
-    for (int i = 0; i < queued_count; i++) {
-        if (queued[i].jbutton.button == JOY_B ||
-            queued[i].jbutton.button == JOY_MINUS) {
-            watch->cancelled = 1;
-            return 1;
+    // O AVIO de segmentos possui uma thread produtora. SDL events e renderer
+    // pertencem exclusivamente a thread que iniciou o player.
+    int on_render_thread = SDL_ThreadID() == watch->render_thread;
+    if (on_render_thread) {
+        SDL_PumpEvents();
+        SDL_Event queued[16];
+        int queued_count = SDL_PeepEvents(queued, 16, SDL_PEEKEVENT,
+                                          SDL_JOYBUTTONDOWN, SDL_JOYBUTTONDOWN);
+        for (int i = 0; i < queued_count; i++) {
+            if (queued[i].jbutton.button == JOY_B ||
+                queued[i].jbutton.button == JOY_MINUS) {
+                watch->cancelled = 1;
+                return 1;
+            }
         }
     }
-    if (watch->joy && (SDL_JoystickGetButton(watch->joy, JOY_B) ||
-                       SDL_JoystickGetButton(watch->joy, JOY_MINUS))) {
+    if (on_render_thread && watch->joy &&
+        (SDL_JoystickGetButton(watch->joy, JOY_B) ||
+         SDL_JoystickGetButton(watch->joy, JOY_MINUS))) {
         watch->cancelled = 1;
         return 1;
     }
@@ -118,6 +132,18 @@ static int player_open_interrupted(void *userdata) {
         return 1;
     }
     Uint32 now = SDL_GetTicks();
+    // avformat_open_input, find_stream_info e o seek de retomada bloqueiam
+    // o loop normal. O interrupt callback roda nessas esperas; redesenhe
+    // a pipoca aqui para que ela continue animada ate o primeiro quadro.
+    if (on_render_thread && watch->renderer && !g_player_presented_frame &&
+        now - watch->last_render_tick >= 80u) {
+        SDL_SetRenderDrawColor(watch->renderer, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255);
+        SDL_RenderClear(watch->renderer);
+        draw_center_state(watch->renderer, "PREPARANDO VIDEO",
+                          watch->detail ? watch->detail : "Conectando...  |  B para cancelar", 0);
+        SDL_RenderPresent(watch->renderer);
+        watch->last_render_tick = now;
+    }
     if (watch->native_hls && !g_player_presented_frame &&
         now - watch->last_progress_tick >= 5000u) {
         int active = 0, reserved_kb = 0;
@@ -195,7 +221,6 @@ static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
 static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
 static const SDL_Color PC_ACC  = { 139, 92, 246, 255 };
 static const SDL_Color PC_ACC2 = { 59, 130, 246, 255 };
-static const SDL_Color PC_DARK = { 8, 10, 15, 255 };
 static const SDL_Color PC_CARD = { 24, 29, 43, 255 };
 
 static void pfill(SDL_Renderer *r, int x, int y, int w, int h, SDL_Color c, int a) {
@@ -691,7 +716,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int native_hls = remote && is_hls;
     PlayerOpenDeadline open_watch = {
         av_gettime_relative() + 30000000LL, joy, 0, 0,
-        SDL_GetTicks(), SDL_GetTicks(), "abrindo", native_hls
+        SDL_GetTicks(), SDL_GetTicks(), "abrindo", native_hls,
+        ren, SDL_ThreadID(), SDL_GetTicks(), "Conectando...  |  B para cancelar"
     };
     nplay_curl_avio_set_abort_check(native_hls ? player_open_interrupted : NULL,
                                     native_hls ? &open_watch : NULL);
@@ -825,10 +851,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     diag_player_event("format", "open-ok", "streams=%u ms=%u", fmt->nb_streams,
                       open_elapsed_ms);
     open_watch.phase = "faixas";
+    open_watch.detail = native_hls ? "Playlist aberta. Lendo video e audio..." :
+                                     "Fonte aberta. Lendo video e audio...";
     player_boot_stage("04 fonte aberta");
     SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
-    draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
+    draw_center_state(ren, "PREPARANDO VIDEO", open_watch.detail, 0);
     SDL_RenderPresent(ren);
+    open_watch.last_render_tick = SDL_GetTicks();
     if (!native_hls) open_watch.deadline_us = av_gettime_relative() + 30000000LL;
     // Na abertura HLS, priorize video e um audio. Legendas e audios alternativos
     // continuam enumerados; suas playlists so sao lidas quando selecionadas.
@@ -884,8 +913,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     // Continue vigiando ate o primeiro quadro: playlists podem abrir sem que
     // o primeiro segmento tenha entregue bytes suficientes para reproduzir.
-    if (!native_hls) open_watch.deadline_us = 0;
+    // MP4 remoto tambem precisa de limite ate o primeiro quadro. Um servidor
+    // que devolve metadados mas nunca entrega media nao pode prender a tela.
+    if (!native_hls) open_watch.deadline_us = remote ? av_gettime_relative() + 45000000LL : 0;
     open_watch.phase = "quadro";
+    open_watch.detail = "Lendo os primeiros quadros...  |  B para cancelar";
 
     player_boot_stage("06 faixas prontas");
     diag_player_event("format", "probe-ok", "streams=%u ms=%u duration=%lld",
@@ -1093,7 +1125,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double timeline_seek_from = 0, timeline_seek_target = 0;
     Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
     Uint32 first_frame_started = SDL_GetTicks();
-    Uint32 first_frame_budget_ms = 30000u;
+    Uint32 first_frame_budget_ms = native_hls ? 30000u : 45000u;
     int resume_preroll = 0, resume_preroll_frames = 0;
     double resume_target = 0;
     SDL_Event e;
@@ -1106,12 +1138,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             // pacote. Leia um pacote (sem decodificar) para fixar a linha do
             // tempo antes de buscar a posicao salva.
             player_boot_stage("08 fixando linha do tempo");
+            open_watch.detail = "Preparando a retomada...  |  B para cancelar";
             Uint32 warm_started = SDL_GetTicks();
             int warm_rc = AVERROR(EAGAIN);
             while (SDL_GetTicks() - warm_started < 8000u && !open_watch.cancelled &&
                    !open_watch.timed_out) {
                 warm_rc = av_read_frame(fmt, pkt);
                 if (warm_rc != AVERROR(EAGAIN)) break;
+                player_open_interrupted(&open_watch);
                 SDL_Delay(25);
             }
             diag_player_event("seek", "timeline-warm",
@@ -1131,6 +1165,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
         if (running) {
             player_boot_stage("08 retomando posicao");
+            open_watch.detail = "Buscando o ponto salvo...  |  B para cancelar";
             diag_player_event("seek", "resume-begin", "pos=%.1f video=%d", start_sec, vidx);
             Uint32 seek_started = SDL_GetTicks();
             int seek_rc = seek_video_time(fmt, vidx, native_hls, start_sec,
@@ -1174,11 +1209,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 last_heartbeat = SDL_GetTicks();
     PlaybackHeartbeat *hb = heartbeat;
     player_boot_stage("09 reproduzindo");
-    ui_popcorn_release();
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
-        if (native_hls && !logged_first_present &&
+        // A retomada pode consumir muitos pacotes de preroll sem bloquear na
+        // rede. Continue redesenhando a animacao tambem nesse caminho de CPU.
+        if (!logged_first_present && player_open_interrupted(&open_watch)) {
+            if (open_watch.timed_out) {
+                player_error_message("Video nao iniciou no tempo esperado");
+                playback_error = -5;
+            }
+            break;
+        }
+        if (remote && !logged_first_present &&
             now_ticks - first_frame_started >= first_frame_budget_ms) {
             diag_player_event("player", "first-frame-timeout", "elapsed=%u", now_ticks - first_frame_started);
             player_error_message("Video nao iniciou no tempo esperado");
@@ -1722,6 +1765,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         open_watch.deadline_us = 0;
                         nplay_curl_avio_set_startup_window(0);
                         g_player_presented_frame = 1;
+                        ui_popcorn_release();
                         first_present_ms = SDL_GetTicks() - play_started_tick;
                         if (hb) {
                             SDL_AtomicSet(&hb->current_pos, (int)cur_pos);
