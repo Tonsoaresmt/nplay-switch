@@ -138,6 +138,7 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
     out->source.source_id = jint(json, "source_id");
     const char *delivery = jstr(json, "delivery");
     if (delivery) snprintf(out->source.delivery_str, sizeof(out->source.delivery_str), "%s", delivery);
+    out->source.delivery = DELIVERY_UPSTREAM;
     snprintf(out->source.container, sizeof(out->source.container), "mp4");
     const char *name = jstr(json, "file_name");
     out->source.sequential_stream = hot_sequential_file(name);

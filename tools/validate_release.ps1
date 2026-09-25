@@ -105,6 +105,10 @@ Assert-True (Test-Path $hostGcc) 'GCC host nao encontrado para as simulacoes.'
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou ao compilar.' }
 & .\build\test_genre_label.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Iinclude source/player_clock.c tools/test_player_clock.c -lm -o build/test_player_clock.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou ao compilar.' }
+& .\build\test_player_clock.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe

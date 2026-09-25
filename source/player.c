@@ -1,5 +1,6 @@
 // player.c - player de video: ffmpeg decodifica, SDL desenha (textura YUV) e toca
-// o audio (SDL Audio + swresample). Sincroniza o video pelo relogio do audio.
+// o audio (SDL Audio + swresample). O relogio de video e monotono e recebe
+// apenas pequenas correcoes do audio, inclusive em streams TorBox irregulares.
 // MP4/MKV remoto usa HTTPS nativo. HLS usa callbacks AVIO com libcurl para abrir
 // cada playlist e segmento sem depender do TLS interno do FFmpeg/libnx.
 // Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur) e mostra
@@ -24,6 +25,7 @@
 #include "store.h"
 #include "diag.h"
 #include "ui.h"
+#include "player_clock.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -259,22 +261,6 @@ static void draw_clipped_text(SDL_Renderer *ren, const char *text, int x, int y,
     SDL_RenderSetClipRect(ren, NULL);
 }
 
-static void draw_control(SDL_Renderer *ren, int x, int y, int w,
-                         const char *key, const char *label, int active) {
-    SDL_Color key_color = active ? PC_ACC : PC_ACC2;
-    int kw = 0, kh = 0;
-    SDL_Texture *kt = text_cached(ren, key, PC_TEXT, 0, &kw, &kh);
-    int key_w = kw + 12;
-    if (key_w < 38) key_w = 38;
-    pfill(ren, x, y + 3, key_w, 30, key_color, 245);
-    if (kt) {
-        SDL_Rect d = { x + (key_w - kw) / 2, y + 5, kw, kh };
-        SDL_RenderCopy(ren, kt, NULL, &d);
-    }
-    int label_x = x + key_w + 10;
-    draw_clipped_text(ren, label, label_x, y + 6, x + w - label_x, active ? PC_TEXT : PC_MUT, 0);
-}
-
 static const char *lang_name(const char *lang) {
     const char *code = lang_label(lang);
     if (!strcmp(code, "PT")) return "Portugues";
@@ -288,28 +274,6 @@ static void format_language(const char *lang, char *out, size_t cap) {
     snprintf(out, cap, "%s - %s", lang_label(lang), lang_name(lang));
 }
 
-static void draw_setting_card(SDL_Renderer *ren, int x, int y, int w,
-                              const char *key, const char *label,
-                              const char *value, int active) {
-    SDL_Color accent = active ? PC_ACC : PC_ACC2;
-    pfill(ren, x, y, w, 76, PC_CARD, 240);
-    pfill(ren, x, y, 4, 76, accent, 255);
-
-    int kw = 0, kh = 0;
-    SDL_Texture *kt = text_cached(ren, key, PC_TEXT, 0, &kw, &kh);
-    int key_w = kw + 18;
-    if (key_w < 48) key_w = 48;
-    pfill(ren, x + 14, y + 22, key_w, 34, accent, 245);
-    if (kt) {
-        SDL_Rect d = { x + 14 + (key_w - kw) / 2, y + 27, kw, kh };
-        SDL_RenderCopy(ren, kt, NULL, &d);
-    }
-
-    int tx = x + 28 + key_w;
-    draw_clipped_text(ren, label, tx, y + 8, x + w - tx - 12, PC_MUT, 0);
-    draw_clipped_text(ren, value, tx, y + 38, x + w - tx - 12, PC_TEXT, 0);
-}
-
 static void draw_notice(SDL_Renderer *ren, const char *message) {
     int texture_w = 0, h = 0;
     SDL_Texture *t;
@@ -320,10 +284,9 @@ static void draw_notice(SDL_Renderer *ren, const char *message) {
     int w = texture_w;
     if (w > 520) w = 520;
     int x = (PWIN_W - w) / 2;
-    pfill(ren, x - 22, 108, w + 44, h + 18, bg, 235);
-    pfill(ren, x - 22, 108, 4, h + 18, PC_ACC, 255);
+    pfill(ren, x - 24, 272, w + 48, h + 24, bg, 190);
     SDL_Rect src = { 0, 0, w, h };
-    SDL_Rect dst = { x, 116, w, h };
+    SDL_Rect dst = { x, 284, w, h };
     SDL_RenderCopy(ren, t, texture_w > w ? &src : NULL, &dst);
 }
 
@@ -389,88 +352,123 @@ static void draw_track_menu(SDL_Renderer *ren, AVFormatContext *fmt, int menu,
     text_draw(ren, "B cancela", x + 590, y + h - 44, PC_MUT, 0);
 }
 
-// HUD organizado em tres zonas: identidade, progresso/status e ferramentas.
+static void hud_line(SDL_Renderer *ren, int x1, int y1, int x2, int y2,
+                     SDL_Color color) {
+    SDL_SetRenderDrawColor(ren, color.r, color.g, color.b, 255);
+    SDL_RenderDrawLine(ren, x1, y1, x2, y2);
+    SDL_RenderDrawLine(ren, x1, y1 + 1, x2, y2 + 1);
+}
+
+static void hud_transport(SDL_Renderer *ren, int x, int y, int paused) {
+    if (paused) {
+        for (int row = 0; row < 34; row++)
+            hud_line(ren, x + 9, y + row, x + 9 + row * 4 / 5, y + row, PC_TEXT);
+    } else {
+        pfill(ren, x + 7, y, 9, 34, PC_TEXT, 255);
+        pfill(ren, x + 23, y, 9, 34, PC_TEXT, 255);
+    }
+}
+
+static void hud_skip(SDL_Renderer *ren, int x, int y, int forward) {
+    // A circular arrow and large 10 mirror the site's transport controls.
+    SDL_Color c = PC_TEXT;
+    hud_line(ren, x + 7, y + 18, x + 12, y + 7, c);
+    hud_line(ren, x + 12, y + 7, x + 27, y + 3, c);
+    hud_line(ren, x + 27, y + 3, x + 39, y + 10, c);
+    hud_line(ren, x + 39, y + 10, x + 43, y + 23, c);
+    hud_line(ren, x + 43, y + 23, x + 38, y + 35, c);
+    hud_line(ren, x + 38, y + 35, x + 25, y + 40, c);
+    hud_line(ren, x + 25, y + 40, x + 12, y + 35, c);
+    if (forward) {
+        hud_line(ren, x + 38, y + 17, x + 43, y + 23, c);
+        hud_line(ren, x + 43, y + 23, x + 49, y + 17, c);
+    } else {
+        hud_line(ren, x + 1, y + 12, x + 7, y + 18, c);
+        hud_line(ren, x + 7, y + 18, x + 14, y + 12, c);
+    }
+    text_draw(ren, "10", x + 13, y + 8, PC_TEXT, 0);
+}
+
+// Full-bleed video, back action above and one transport row below, following
+// the site player instead of a second screen of rectangular shortcut cards.
 static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur,
                      int paused, int vol, AVFormatContext *fmt, int aidx,
                      int acur, int naud, int nsub, int scur, int sidx,
                      int hud_pinned, int seekable) {
-    const int expanded = paused || hud_pinned;
-    // Faixas translucidas deixam a obra visivel, seguindo o player do site.
-    pfill(ren, 0, 0, PWIN_W, 72, PC_DARK, 165);
-    pfill(ren, 0, 72, PWIN_W, 18, PC_DARK, 70);
-    pfill(ren, 40, 21, 4, 42, PC_ACC, 255);
-    text_draw(ren, "NPLAY", 58, 8, PC_ACC2, 0);
-    draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao", 58, 35, 945, PC_TEXT, 1);
-    text_draw(ren, paused ? "PAUSADO" : "REPRODUZINDO", 1050, 31,
-              paused ? PC_ACC : PC_ACC2, 0);
+    (void)hud_pinned;
+    (void)fmt;
+    (void)aidx;
+    (void)acur;
+    (void)scur;
+    (void)sidx;
+    for (int band = 0; band < 12; band++)
+        pfill(ren, 0, 360 + band * 30, PWIN_W, 30, PC_DARK,
+              10 + band * 18);
+    pfill(ren, 0, 0, PWIN_W, 86, PC_DARK, 56);
+    hud_line(ren, 48, 40, 74, 40, PC_TEXT);
+    hud_line(ren, 48, 40, 59, 28, PC_TEXT);
+    hud_line(ren, 48, 40, 59, 52, PC_TEXT);
+    text_draw(ren, "B  Voltar", 88, 27, PC_TEXT, 0);
 
-    const int panel_y = expanded ? 456 : 572;
-    pfill(ren, 0, panel_y - 28, PWIN_W, 28, PC_DARK, 38);
-    pfill(ren, 0, panel_y, PWIN_W, 45, PC_DARK, 115);
-    pfill(ren, 0, panel_y + 45, PWIN_W, PWIN_H - panel_y - 45, PC_DARK, 205);
-    int bx = 48, by = panel_y + 26, bw = PWIN_W - 96, bh = 5;
-    pfill(ren, bx, by, bw, bh, PC_CARD, 255);
+    if (paused) {
+        text_draw(ren, "PAUSADO", 48, 477, PC_ACC, 0);
+        draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao",
+                          48, 508, 1080, PC_TEXT, 1);
+    }
+    const int bx = 48, by = 600, bw = 1080, bh = 6;
+    pfill(ren, bx, by, bw, bh, PC_CARD, 190);
     int fw = 0;
-    if (dur > 0) fw = (int)(bw * (pos / dur));
+    if (seekable && dur > 0) fw = (int)(bw * (pos / dur));
+    else if (!seekable) fw = bw;
     if (fw < 0) fw = 0;
     if (fw > bw) fw = bw;
     if (fw > 0) pfill(ren, bx, by, fw, bh, PC_ACC, 255);
-    if (dur > 0) pfill(ren, bx + fw - 4, by - 5, 8, bh + 10, PC_TEXT, 255);
+    if (seekable && dur > 0) pfill(ren, bx + fw - 5, by - 6, 11, bh + 12, PC_ACC, 255);
 
     char now[16], total[16];
     fmt_time(pos, now, sizeof(now));
     fmt_time(dur, total, sizeof(total));
-    text_draw(ren, now, bx, by + 12, PC_TEXT, 0);
-    int tw = 0, th = 0;
-    SDL_Texture *tt = text_cached(ren, dur > 0 ? total : "--:--", PC_MUT, 0, &tw, &th);
-    if (tt) { SDL_Rect d = { PWIN_W - 48 - tw, by + 12, tw, th }; SDL_RenderCopy(ren, tt, NULL, &d); }
-
-    if (expanded) {
-        int y = panel_y + 76;
-        draw_control(ren, 48,   y, 190, "A", paused ? "Continuar" : "Pausar", paused);
-        draw_control(ren, 254,  y, 210, "L/R", seekable ? "- / + 10s" : "Apos preparo", 0);
-        draw_control(ren, 480,  y, 232, "ZL/ZR", seekable ? "- / + 60s" : "Apos preparo", 0);
-        draw_control(ren, 728,  y, 270, "LS", seekable ? "Buscar na timeline" : "Busca indisponivel", 0);
-        draw_control(ren, 1014, y, 218, "B", "Voltar", 0);
-
-        char volume_value[24], audio_value[48], subtitle_value[48];
-        char audio_label[48], subtitle_label[48];
-        snprintf(volume_value, sizeof(volume_value), "%d%%", vol);
-        if (naud <= 0) snprintf(audio_value, sizeof(audio_value), "Indisponivel");
-        else format_language(stream_lang(fmt, aidx), audio_value, sizeof(audio_value));
-        if (nsub <= 0) snprintf(subtitle_value, sizeof(subtitle_value), "Indisponivel");
-        else if (sidx < 0) snprintf(subtitle_value, sizeof(subtitle_value), "Desligada");
-        else format_language(stream_lang(fmt, sidx), subtitle_value, sizeof(subtitle_value));
-        snprintf(audio_label, sizeof(audio_label), "AUDIO  %d/%d", naud ? acur + 1 : 0, naud);
-        snprintf(subtitle_label, sizeof(subtitle_label), "LEGENDAS  %d/%d", scur >= 0 ? scur + 1 : 0, nsub);
-
-        int cy = panel_y + 155;
-        draw_setting_card(ren, 48,  cy, 284, "UP/DN", "VOLUME", volume_value, 0);
-        draw_setting_card(ren, 348, cy, 284, "Y", audio_label, audio_value, 0);
-        draw_setting_card(ren, 648, cy, 284, "X", subtitle_label, subtitle_value, sidx >= 0);
-        draw_setting_card(ren, 948, cy, 284, "+", "MODO DO PAINEL",
-                          hud_pinned ? "Fixo" : "Automatico", hud_pinned);
-    } else {
-        int y = panel_y + 89;
-        draw_control(ren, 48,   y, 190, "A", "Pausar", 0);
-        draw_control(ren, 258,  y, 190, "L/R", seekable ? "10s" : "Sem busca", 0);
-        draw_control(ren, 468,  y, 220, "ZL/ZR", seekable ? "60s" : "Sem busca", 0);
-        draw_control(ren, 708,  y, 280, "LS/+", seekable ? "Buscar / Opcoes" : "Opcoes", 0);
-        draw_control(ren, 1008, y, 224, "B", "Voltar", 0);
+    text_draw(ren, now, bx, by + 13, PC_TEXT, 0);
+    const char *time_label = seekable && dur > 0 ? total : "--:--";
+    int time_width = 0, time_height = 0;
+    SDL_Texture *time_texture = text_cached(ren, time_label, PC_TEXT, 0,
+                                            &time_width, &time_height);
+    if (time_texture) {
+        SDL_Rect time_rect = { PWIN_W - 48 - time_width, by - 9,
+                               time_width, time_height };
+        SDL_RenderCopy(ren, time_texture, NULL, &time_rect);
     }
+
+    hud_transport(ren, 56, 652, paused);
+    text_draw(ren, "A", 64, 631, PC_MUT, 0);
+    if (seekable) {
+        hud_skip(ren, 136, 647, 0);
+        hud_skip(ren, 213, 647, 1);
+        text_draw(ren, "L", 154, 628, PC_MUT, 0);
+        text_draw(ren, "R", 232, 628, PC_MUT, 0);
+    }
+    char volume_text[32];
+    snprintf(volume_text, sizeof(volume_text), "VOL %d%%", vol);
+    text_draw(ren, volume_text, seekable ? 300 : 145, 658, PC_MUT, 0);
+    if (!paused)
+        draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao",
+                          seekable ? 425 : 320, 651, seekable ? 420 : 540, PC_TEXT, 0);
+    text_draw(ren, "Y Audio", 874, 654, naud ? PC_TEXT : PC_MUT, 0);
+    text_draw(ren, "X Legendas", 979, 654, nsub ? PC_TEXT : PC_MUT, 0);
+    text_draw(ren, "+ Painel", 1116, 654, PC_TEXT, 0);
 }
 
 static void draw_center_state(SDL_Renderer *ren, const char *state, const char *detail, int accent) {
-    ui_popcorn_draw(ren, PWIN_W / 2, 155, 190);
-    const int w = 620, h = 125, x = (PWIN_W - w) / 2, y = 375;
-    pfill(ren, x, y, w, h, PC_DARK, 225);
-    pfill(ren, x, y, 6, h, accent ? PC_ACC : PC_ACC2, 255);
+    // Same clean loading surface as the site: animated popcorn above centered
+    // copy, with no separate rectangular screen inside the video.
+    pfill(ren, 0, 0, PWIN_W, PWIN_H, PC_DARK, 184);
+    ui_popcorn_draw(ren, PWIN_W / 2, 157, 190);
     int sw = 0, sh = 0;
-    SDL_Texture *st = text_cached(ren, state, PC_TEXT, 1, &sw, &sh);
-    if (st) { SDL_Rect d = { x + (w - sw) / 2, y + 19, sw, sh }; SDL_RenderCopy(ren, st, NULL, &d); }
+    SDL_Texture *st = text_cached(ren, state, accent ? PC_ACC : PC_TEXT, 1, &sw, &sh);
+    if (st) { SDL_Rect d = { (PWIN_W - sw) / 2, 369, sw, sh }; SDL_RenderCopy(ren, st, NULL, &d); }
     int dw = 0, dh = 0;
     SDL_Texture *dt = text_cached(ren, detail, PC_MUT, 0, &dw, &dh);
-    if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 73, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
+    if (dt) { SDL_Rect d = { (PWIN_W - dw) / 2, 420, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
 }
 
 static int chapter_at(AVFormatContext *fmt, double target, double timeline_origin,
@@ -571,7 +569,7 @@ static int apply_player_seek(AVFormatContext *fmt, int video_index, int is_hls,
     if (adev) SDL_ClearQueuedAudio(adev);
     sub_text[0] = 0;
     *sub_end = 0;
-    double now = av_gettime() / 1000000.0;
+    double now = av_gettime_relative() / 1000000.0;
     *wall_start = now - target;
     *audio_clock = target;
     *cur_pos = target;
@@ -1077,7 +1075,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         adev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
         diag_player_event("audio", adev ? "device-ok" : "device-fail",
                           "stream=%d status=%s", aidx, adev ? "ok" : SDL_GetError());
-        if (adev) SDL_PauseAudioDevice(adev, 0);
+        // Start sound with the first visible frame. On slow direct/remux reads,
+        // playing the queue while video is still opening creates an A/V offset.
+        if (adev) SDL_PauseAudioDevice(adev, 1);
         else { if (swr) swr_free(&swr); avcodec_free_context(&actx); }
     } else diag_player_event("audio", "decoder-unavailable", "stream=%d", aidx);
     player_boot_stage("08 audio pronto");
@@ -1102,8 +1102,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     AVRational vtb = fmt->streams[vidx]->time_base;
     AVRational atb = (aidx >= 0) ? fmt->streams[aidx]->time_base : (AVRational){1, ORATE};
     double bps = (double)ORATE * OCH * 2.0;
-    double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
-    double last_ac = -1, last_ac_wall = av_gettime() / 1000000.0;  // detecta audio travado
+    double audio_clock = 0, wall_start = av_gettime_relative() / 1000000.0;
+    double last_ac = -1, last_ac_wall = av_gettime_relative() / 1000000.0;  // detecta audio travado
     double cur_pos = 0;
     int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0;
     int decoded_video = 0, dropped_video = 0, buffering_events = 0, hardware_decode = 0;
@@ -1180,7 +1180,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             if (seek_rc >= 0) {
                 if (out_resume_seeked) *out_resume_seeked = 1;
                 audio_clock = start_sec; cur_pos = start_sec;
-                wall_start = av_gettime() / 1000000.0 - start_sec;
+                wall_start = av_gettime_relative() / 1000000.0 - start_sec;
                 if (native_hls) {
                     resume_preroll = 1;
                     resume_target = start_sec;
@@ -1213,7 +1213,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // Heartbeat & Progress tracking are now managed by a separate thread
     Uint32 last_heartbeat = SDL_GetTicks();
     PlaybackHeartbeat *hb = heartbeat;
-    player_boot_stage("09 reproduzindo");
+    char playing_stage[96];
+    snprintf(playing_stage, sizeof(playing_stage), "09 reproduzindo %s %s%s",
+             req->playback.delivery_str[0] ? req->playback.delivery_str : "direto",
+             req->container ? req->container : "arquivo",
+             sequential_stream ? " continuo" : "");
+    player_boot_stage(playing_stage);
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
@@ -1268,7 +1273,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     } else if (b == JOY_B || b == JOY_MINUS) {
                         timeline_seek = 0; seek_axis_lock = 1;
                         paused = timeline_seek_was_paused;
-                        double resume_now = av_gettime() / 1000000.0;
+                        double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         last_ac = -1; last_ac_wall = resume_now;
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
@@ -1297,7 +1302,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                              (track_menu == TRACK_MENU_AUDIO && b == JOY_Y) ||
                              (track_menu == TRACK_MENU_SUB && b == JOY_X)) {
                         track_menu = 0;
-                        double resume_now = av_gettime() / 1000000.0;
+                        double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
@@ -1317,7 +1322,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                     atb = fmt->streams[aidx]->time_base;
                                     if (adev) SDL_ClearQueuedAudio(adev);
                                     audio_clock = cur_pos; last_ac = -1;
-                                    last_ac_wall = av_gettime() / 1000000.0;
+                                    last_ac_wall = av_gettime_relative() / 1000000.0;
                                     char lang[48]; format_language(stream_lang(fmt, aidx), lang, sizeof(lang));
                                     snprintf(notice, sizeof(notice), "Audio %d/%d  %s", acur + 1, naud, lang);
                                     AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidx]->metadata, "language", NULL, 0);
@@ -1346,7 +1351,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         }
                         notice_until = SDL_GetTicks() + 2200;
                         track_menu = 0;
-                        double resume_now = av_gettime() / 1000000.0;
+                        double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
@@ -1358,7 +1363,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 else if (b == JOY_A) {
                     paused = !paused;
                     last_present_tick = 0;
-                    if (adev) SDL_PauseAudioDevice(adev, paused);
+                    if (!paused) {
+                        double resume_now = av_gettime_relative() / 1000000.0;
+                        wall_start = resume_now - cur_pos;
+                        last_ac = -1;
+                        last_ac_wall = resume_now;
+                    }
+                    if (adev) SDL_PauseAudioDevice(adev, paused || !logged_first_present);
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
                 }
                 else if (b == JOY_UP || b == JOY_DOWN) {
@@ -1404,6 +1415,53 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
                     } else snprintf(notice, sizeof(notice), "Este video nao possui legendas");
                     if (!track_menu) notice_until = SDL_GetTicks() + 2200;
+                }
+            } else if (e.type == SDL_FINGERDOWN) {
+                int tx = (int)(e.tfinger.x * PWIN_W);
+                int ty = (int)(e.tfinger.y * PWIN_H);
+                hud_until = SDL_GetTicks() + 4000;
+                if (ty < 96 && tx < 180) { running = 0; continue; }
+                if (!have_video_frame || track_menu || timeline_seek) continue;
+                int touch_seek = 0;
+                double target = cur_pos;
+                if (!sequential_stream && dur > 1 && ty >= 580 && ty < 635 &&
+                    tx >= 48 && tx <= 1128) {
+                    target = dur * (tx - 48) / 1080.0;
+                    touch_seek = 1;
+                } else if (!sequential_stream && ty >= 635 && tx >= 120 && tx < 290) {
+                    target += tx < 205 ? -10 : 10;
+                    touch_seek = 1;
+                } else if (ty >= 635 && tx < 115) {
+                    paused = !paused;
+                    last_present_tick = 0;
+                    if (!paused) {
+                        double resume_now = av_gettime_relative() / 1000000.0;
+                        wall_start = resume_now - cur_pos;
+                        last_ac = -1;
+                        last_ac_wall = resume_now;
+                    }
+                    if (adev) SDL_PauseAudioDevice(adev, paused);
+                    if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
+                } else if (ty >= 635 && tx >= 870 && tx < 975 && naud > 1) {
+                    track_menu = TRACK_MENU_AUDIO; track_sel = acur;
+                    if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+                } else if (ty >= 635 && tx >= 975 && tx < 1110 && nsub > 0) {
+                    track_menu = TRACK_MENU_SUB; track_sel = scur + 1;
+                    if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+                } else if (ty >= 635 && tx >= 1110) hud_pinned = !hud_pinned;
+                if (touch_seek) {
+                    if (target < 0) target = 0;
+                    if (target > dur - 1) target = dur - 1;
+                    if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx,
+                                          adev, target, timeline_origin, &wall_start,
+                                          &audio_clock, &cur_pos, &last_ac,
+                                          &last_ac_wall, sub_text, &sub_end) == 0) {
+                        last_present_tick = 0;
+                        if (hb) SDL_AtomicSet(&hb->force_progress, 1);
+                    } else {
+                        snprintf(notice, sizeof(notice), "Nao foi possivel buscar neste video");
+                        notice_until = SDL_GetTicks() + 1800;
+                    }
                 }
             }
         }
@@ -1503,6 +1561,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             av_packet_unref(pkt);
             break;
         }
+        if (ret >= 0 && logged_first_present)
+            player_clock_account_read(&wall_start, read_ms / 1000.0,
+                                      audio_before_ms / 1000.0, 1, 1);
         read_since_present_ms += read_ms;
         if (read_ms > worst_read_ms) worst_read_ms = read_ms;
         if (read_ms >= 250) {
@@ -1610,7 +1671,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                              SDL_GetQueuedAudioSize(adev) < (unsigned)(bps * 0.35));
                         if (n > 0 && adev && queue_during_resume) {
                             SDL_QueueAudio(adev, audio_buf, n * OCH * 2);
-                            if (audio_pts >= 0) audio_clock = audio_pts;
+                            if (audio_pts >= 0) audio_clock = audio_pts + n / (double)ORATE;
+                            else audio_clock += n / (double)ORATE;
                             unsigned queued = SDL_GetQueuedAudioSize(adev);
                             if (queued > max_audio_queue) max_audio_queue = queued;
                         }
@@ -1634,7 +1696,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     int64_t vts = frame->best_effort_timestamp != AV_NOPTS_VALUE
                         ? frame->best_effort_timestamp : frame->pts;
                     double vpts = (vts != AV_NOPTS_VALUE) ? vts * av_q2d(vtb) - timeline_origin : cur_pos;
-                    double now = av_gettime() / 1000000.0;
+                    double now = av_gettime_relative() / 1000000.0;
                     int resume_first_frame = 0;
                     if (resume_preroll) {
                         // O seek HLS volta ao segmento/chave anterior. Decodifique
@@ -1657,17 +1719,16 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                           "wanted=%.2f actual=%.2f preroll=%d audioq=%u",
                                           resume_target, vpts, resume_preroll_frames,
                                           adev ? SDL_GetQueuedAudioSize(adev) : 0);
-                        if (adev) SDL_PauseAudioDevice(adev, 0);
+                        // The output remains paused until this frame is shown.
                     }
                     // Se o relogio de AUDIO parou de avancar (decode travando), o video
                     // NAO fica esperando: segue pelo relogio de parede (nao congela).
                     if (audio_clock != last_ac) { last_ac = audio_clock; last_ac_wall = now; }
                     unsigned audio_queued = adev ? SDL_GetQueuedAudioSize(adev) : 0;
                     int audio_ok = adev && audio_queued > 0 && (now - last_ac_wall < 0.7);
-                    double master;
-                    if (resume_first_frame) master = vpts;
-                    else if (audio_ok) { master = audio_clock - audio_queued / bps; wall_start = now - master; }
-                    else master = now - wall_start;   // audio travado / sem audio: video toca sozinho
+                    double master = player_clock_master(now, vpts, audio_clock,
+                                        audio_queued / bps, audio_ok,
+                                        &wall_start, !logged_first_present || resume_first_frame);
                     cur_pos = master;
                     double delay = vpts - master;
                     // Se ja perdeu o prazo por mais de 120 ms, converter e enviar
@@ -1785,6 +1846,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         diag_player_event("render", "first-present", "position=%.2f ms=%u",
                                           cur_pos, first_present_ms);
                         logged_first_present = 1;
+                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
                     }
                 }
             }
