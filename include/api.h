@@ -50,6 +50,7 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out);
 int api_fail_playback(const PlaybackSource *current, PlaybackSource *out);
 int api_playback_heartbeat(int session_id);
 int api_playback_progress(int item_id, int position_sec, int duration_sec);
+int api_mark_watched(int item_id);
 int api_stop_playback(int item_id);
 const char *api_last_error(void);
 

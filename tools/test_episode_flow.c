@@ -47,6 +47,12 @@ int main(void) {
     next = episode_after(series, 200);
     assert(next.item_id == 211);
     cJSON_Delete(series);
-    puts("episode flow OK: same season, next season, grouped season, specials, gap, final, unknown");
+    int keys_before[] = {10, 20, -31};
+    int keys_after[] = {-31, 10, 20};
+    assert(episode_group_index(keys_before, 3, 20) == 1);
+    assert(episode_group_index(keys_after, 3, 20) == 2);
+    assert(episode_group_index(keys_after, 3, 99) == -1);
+    assert(episode_group_index(NULL, 3, 20) == -1);
+    puts("episode flow OK: same season, next season, grouped season, specials, gap, final, unknown, reordered downloads");
     return 0;
 }

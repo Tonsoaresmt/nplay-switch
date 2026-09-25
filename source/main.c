@@ -740,6 +740,22 @@ static void on_player_progress(int item_id, int pos, int dur, void *u) {
     }
 }
 
+// HLS pode chegar ao EOF sem duracao conhecida. Nesse caso, /progress deixa
+// o item em Continuar assistindo mesmo apos a reproducao completa.
+static int finalize_natural_playback(int item_id, const PlayerResult *result,
+                                     PlaybackSyncStatus *sync) {
+    if (!result || result->reason != EXIT_REASON_NATURAL || !result->presented_frame) return 0;
+    if (sync && sync->completed && sync->item_id == item_id) return 1;
+    if (item_id <= 0 || result->position <= 5) return 0;
+    int saved = api_mark_watched(item_id) == 0;
+    if (sync) {
+        sync->item_id = item_id;
+        sync->saved = saved;
+        sync->completed = saved;
+    }
+    return saved;
+}
+
 static int on_player_heartbeat(int session_id, void *u) {
     (void)u;
     return api_playback_heartbeat(session_id);
@@ -856,7 +872,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     appletSetMediaPlaybackState(false);
     playback_memory_leave();
     g_download_awake = 0;
-    if (res.reason == EXIT_REASON_NATURAL && sync.completed && sync.item_id == itemId) {
+    if (finalize_natural_playback(itemId, &res, &sync)) {
         mark_episode_completed_in_detail(itemId);
         if (g_tab == TAB_DOWNLOADS && g_dlView == 1 && g_dlDoneN < 256) {
             int known = 0;
@@ -948,7 +964,7 @@ int resolve_and_play(int itemId, const char *title) {
         appletSetMediaPlaybackState(false);
         playback_memory_leave();
         g_download_awake = 0;
-        if (res.reason == EXIT_REASON_NATURAL && sync.completed && sync.item_id == itemId)
+        if (finalize_natural_playback(itemId, &res, &sync))
             mark_episode_completed_in_detail(itemId);
 
         if (g_tab == TAB_DOWNLOADS) load_history();
@@ -1058,6 +1074,7 @@ static void pump_catalog_fetch(void) {
         result = NULL;
     }
     if (g_fetch_discard || g_screen != SC_LOADING) {
+        if (g_fetch_current.kind == FETCH_SERIES) g_episode_pending.active = 0;
         if (result) cJSON_Delete(result);
         g_fetch_current.kind = FETCH_NONE;
         g_fetch_discard = 0;
@@ -1138,6 +1155,8 @@ static void pump_catalog_fetch(void) {
 
 static void open_series(int id) {
     if (id <= 0) return;
+    // Navegacao explicita invalida um autoavanco anterior ainda pendente.
+    g_episode_pending.active = 0;
     char path[96]; snprintf(path, sizeof(path), "/api/catalog/series/%d", id);
     begin_catalog_fetch(FETCH_SERIES, path, NULL);
 }
@@ -1621,14 +1640,34 @@ static cJSON *history_items(void) {
 
 static void apply_downloads(cJSON *fresh) {
     if (!fresh) return; // preserva a ultima lista numa falha transitoria de rede
+    int old_key = 0, old_item_id = 0;
+    if (g_dlView == 1 && g_dlGroup >= 0 && g_dlGroup < g_dlgN) {
+        old_key = g_dlg[g_dlGroup].key;
+        if (g_dlDetSel >= 0 && g_dlDetSel < g_dlg[g_dlGroup].nJobs)
+            old_item_id = jint(dlg_job(g_dlGroup, g_dlDetSel), "item_id");
+    }
     if (g_dl) cJSON_Delete(g_dl);
     g_dl = fresh;
     g_dl_last_ok = SDL_GetTicks();
     build_dl_groups();
     if (g_dlSel >= g_dlgN) g_dlSel = g_dlgN > 0 ? g_dlgN - 1 : 0;
     if (g_dlView == 1) {
-        if (g_dlGroup >= g_dlgN) { g_dlView = 0; g_dlGroup = 0; g_dlDetSel = 0; }
-        else { int nj = g_dlg[g_dlGroup].nJobs; if (g_dlDetSel >= nj) g_dlDetSel = nj > 0 ? nj - 1 : 0; }
+        int keys[MAX_DLG];
+        for (int i = 0; i < g_dlgN; i++) keys[i] = g_dlg[i].key;
+        int selected = episode_group_index(keys, g_dlgN, old_key);
+        if (selected < 0) {
+            g_dlView = 2; g_dlGroup = 0; g_dlDetSel = 0;
+            g_dl_done_requested = 0; g_dlDoneN = 0;
+        } else {
+            g_dlGroup = selected;
+            int nj = g_dlg[selected].nJobs;
+            int matching = -1;
+            for (int i = 0; i < nj; i++) {
+                if (jint(dlg_job(selected, i), "item_id") == old_item_id) { matching = i; break; }
+            }
+            if (matching >= 0) g_dlDetSel = matching;
+            else if (g_dlDetSel >= nj) g_dlDetSel = nj > 0 ? nj - 1 : 0;
+        }
     }
 }
 static void load_downloads(void) {
@@ -2805,11 +2844,14 @@ static int prompt_next_episode(cJSON *episode, cJSON *series) {
 static void fetch_episode_context(int series_id, int finished_item_id,
                                   int first_in_group) {
     if (series_id <= 0) return;
+    open_series(series_id);
+    // A criacao da thread pode falhar antes de existir uma consulta. Evite
+    // reaplicar esse autoavanco quando o usuario abrir a serie mais tarde.
+    if (g_fetch_current.kind != FETCH_SERIES && g_fetch_queued.kind != FETCH_SERIES) return;
     g_episode_pending.active = 1;
     g_episode_pending.series_id = series_id;
     g_episode_pending.finished_item_id = finished_item_id;
     g_episode_pending.first_in_group = first_in_group;
-    open_series(series_id);
 }
 
 // Return the episode to play, or zero when the user declined, there is no next

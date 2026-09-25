@@ -55,6 +55,7 @@ typedef struct {
     PlayerExitReason reason;
     double position;
     double duration;
+    int presented_frame;
     PlayerState final_state;
     int recovery_count;
 } PlayerResult;

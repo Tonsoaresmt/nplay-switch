@@ -52,3 +52,36 @@
 - O desktop tambem oferece anterior/proximo dentro do HUD do player. O NRO
   ainda exige sair do video para escolher manualmente outro episodio; isso
   continua como diferenca de interface, sem afetar o auto-avanco ao EOF.
+
+## Revisao adicional da 0.12.14
+
+O teste anterior de `episode_flow.c` verificava a ordem, mas nao executava o
+aplicativo completo. A revisao de chamadas e estado encontrou tres conflitos:
+
+- HLS com duracao desconhecida enviava a posicao, porem o backend so considera
+  `completed=1` quando recebe duracao positiva. Apos EOF com quadro exibido, o
+  NRO agora usa `/api/sync/item-watched` (limite de 6 s) se o ultimo progresso
+  nao confirmou conclusao. Saida com B e erro nao marcam como visto.
+- Um EOF sem primeiro quadro podia ser interpretado como episodio concluido e
+  saltar a obra. O player agora encerra essa condicao como erro e conserva o
+  progresso anterior.
+- Um novo fetch de serie ou um fetch que nao iniciou mais nao deixa autoavanco
+  pendente. O polling da Biblioteca preserva o grupo e o episodio selecionado
+  por IDs quando a ordem dos jobs muda; se a obra sumir, retorna a Biblioteca.
+
+| Area | Prova local | Resultado |
+| --- | --- | --- |
+| Episodios, temporadas, grupo, lacunas e reordem dos jobs | `tools/test_episode_flow.c` compilado no host | Passou |
+| 9 telas e 37 contratos HTTP Switch/backend `origin/main` | `tools/audit_switch_routes.mjs` | Passou (contrato estatico) |
+| Player, TLS, HLS, simbolos, NRO ARM64 | `tools/validate_release.ps1` com build limpo | Passou |
+| Continuar da serie e contrato integrado de playback | `catalog-continue-next-ep-test.mjs` e `player-flow-contract-test.mjs`, banco temporario | Passou |
+| Sintaxe e checks do backend | `npm run check` | Passou |
+| Suite geral do backend | `R2_ENABLED=0 npm test` | Parou em `nightly-schedule-test.mjs`: espera Ter/Sex, mas timer real e diario; falha preexistente fora do Switch |
+| Preferencias por dispositivo | `npm run test:device-preferences` | Passou |
+| Shell da TV e imagens Android | `npm run test:tv-shell` e `android-image-contract-test.mjs` | Passaram |
+| Navegacao/compatibilidade TV legada | `npm run test:tv-navigation` e `player-compat-test.mjs` | Testes antigos falharam: nome de import com cache-bust desatualizado e fixture sem `_isTv`; nao medem o NRO |
+| Reproducao, seek, audio, touch e stutter no console | NRO em hardware | Nao executado nesta rodada; nao ha Switch ou emulador disponivel neste ambiente |
+
+Esses testes comprovam a compilacao, contratos e estados exercitados no host.
+Nao demonstram que todos os caminhos visuais, rede R2 e decoder funcionam no
+Switch real. A release continua sujeita a essa verificacao fisica.

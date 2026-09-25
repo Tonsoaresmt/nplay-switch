@@ -1,5 +1,19 @@
 # Continuidade para agentes
 
+## Rodada 0.12.14 (25/09/2026)
+
+- Auditoria adicional do ciclo Home/Continuar, Historico, detalhe e Biblioteca.
+  O EOF sem duracao HLS agora marca a obra como vista pelo endpoint existente;
+  EOF antes de mostrar um quadro e erro, nao avanca para outro episodio.
+- A selecao da Biblioteca sobrevive a reordenacao dos jobs por polling pelo
+  identificador da obra e do episodio. Consulta de serie cancelada ou que nao
+  iniciou nao conserva autoavanco pendente.
+- Build ARM64 limpo, teste nativo de ordem/reordenacao, 37 contratos HTTP e
+  integracao de playback/Continue do backend passaram. A suite geral do backend
+  continua bloqueada por teste antigo que espera timer Ter/Sex enquanto a
+  configuracao atual agenda diariamente; testes TV legados tambem estao
+  desatualizados. Ver auditoria. NRO nao foi executado em hardware nesta rodada.
+
 ## Rodada 0.12.13 (25/09/2026)
 
 - EOF de episodio iniciado por Home/Continuar ou Historico agora conserva o

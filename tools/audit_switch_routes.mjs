@@ -63,6 +63,7 @@ const routes = [
   ['Historico', '/api/sync/progress', 'sync', 'get', '/progress'],
   ['Historico', '/api/sync/progress/%d', 'sync', 'get', '/progress/:itemId'],
   ['Historico', '/api/sync/progress', 'sync', 'post', '/progress'],
+  ['Player', '/api/sync/item-watched', 'sync', 'post', '/item-watched'],
   ['Listas', '/api/sync/watchlater', 'sync', 'get', '/watchlater'],
   ['Listas', '/api/sync/watchlater', 'sync', 'post', '/watchlater'],
   ['Listas', '/api/sync/watchlater', 'sync', 'delete', '/watchlater'],

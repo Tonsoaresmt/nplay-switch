@@ -305,6 +305,21 @@ int api_playback_progress(int item_id, int position_sec, int duration_sec) {
     return code == 200 ? 0 : -1;
 }
 
+int api_mark_watched(int item_id) {
+    if (item_id <= 0) return -1;
+    char body[96], url[1024];
+    snprintf(body, sizeof(body), "{\"item_id\":%d,\"completed\":true}", item_id);
+    snprintf(url, sizeof(url), "%s/api/sync/item-watched", BASE);
+    struct membuf out = {0}; const char *err = NULL;
+    Uint32 started = SDL_GetTicks();
+    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 6L);
+    diag_network_event("POST", "/api/sync/item-watched", code,
+                       SDL_GetTicks() - started, out.len);
+    membuf_free(&out);
+    return code == 200 ? 0 : -1;
+}
+
 int api_stop_playback(int item_id) {
     if (item_id <= 0) return 0;
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d/stop", BASE, item_id);

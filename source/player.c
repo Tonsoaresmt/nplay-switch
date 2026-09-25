@@ -1970,10 +1970,17 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             continue;
         }
 
-        if (rc == 1) { // Terminou naturalmente
-            result->reason = EXIT_REASON_NATURAL;
-            result->final_state = PLAYER_FINISHED;
-            final_rc = rc;
+        if (rc == 1) { // Terminou naturalmente somente se houve video
+            if (!ever_presented_frame) {
+                player_error_message("Fonte terminou antes do primeiro quadro");
+                result->reason = EXIT_REASON_ERROR;
+                result->final_state = PLAYER_ERROR;
+                final_rc = -5;
+            } else {
+                result->reason = EXIT_REASON_NATURAL;
+                result->final_state = PLAYER_FINISHED;
+                final_rc = rc;
+            }
             break;
         } else if (rc == 0 || rc == -11) { // Usuario saiu ou cancelou a abertura
             if (rc == -11) {
@@ -2066,6 +2073,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
 
     result->position = current_pos;
     result->duration = dur;
+    result->presented_frame = ever_presented_frame;
 
     if (heartbeat) {
         SDL_AtomicSet(&hb.running, 0);

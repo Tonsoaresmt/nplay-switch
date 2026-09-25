@@ -102,3 +102,9 @@ int episode_coordinates_adjacent(int season, int episode,
     return (season == next_season && next_episode == episode + 1) ||
            (next_season == season + 1 && next_episode == 1);
 }
+
+int episode_group_index(const int *keys, int count, int selected_key) {
+    if (!keys || count <= 0 || !selected_key) return -1;
+    for (int i = 0; i < count; i++) if (keys[i] == selected_key) return i;
+    return -1;
+}
