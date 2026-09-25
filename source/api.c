@@ -288,7 +288,10 @@ int api_playback_heartbeat(int session_id) {
 }
 
 int api_playback_progress(int item_id, int position_sec, int duration_sec) {
-    if (item_id <= 0 || position_sec <= 5 || duration_sec <= 0) return 0;
+    // O backend aceita duracao zero e guarda o ponto sem marcar conclusao.
+    // HLS pode nao conhecer a duracao quando o usuario sai do player.
+    if (item_id <= 0 || position_sec <= 5) return 0;
+    if (duration_sec < 0) duration_sec = 0;
     char body[160], url[1024];
     snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}",
              item_id, position_sec, duration_sec);

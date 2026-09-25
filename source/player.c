@@ -1878,7 +1878,7 @@ static int playback_heartbeat_thread(void *userdata) {
         if (progress_ms >= 15000 || SDL_AtomicCAS(&hb->force_progress, 1, 0)) {
             int pos = SDL_AtomicGet(&hb->current_pos);
             int dur = SDL_AtomicGet(&hb->duration);
-            if (hb->progress_cb && dur > 0 && pos > 5)
+            if (hb->progress_cb && pos > 5)
                 hb->progress_cb(hb->item_id, pos, dur, hb->callback_userdata);
             progress_ms = 0;
         }

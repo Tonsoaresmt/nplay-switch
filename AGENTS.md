@@ -1,5 +1,20 @@
 # Continuidade para agentes
 
+## Rodada 0.12.13 (25/09/2026)
+
+- EOF de episodio iniciado por Home/Continuar ou Historico agora conserva o
+  contexto da serie e oferece o proximo episodio, como ja ocorria no detalhe.
+  A escolha cobre a virada de temporada e series irmas de `season_group`.
+- A consulta de detalhe necessaria apos EOF usa `CatalogFetch` cancelavel.
+  Autoplay desligado apenas seleciona o proximo episodio; B cancela a contagem.
+- Biblioteca de episodios preparados e ordenada por T/E. O auto-avanco exige
+  coordenadas contiguas e job pronto, com a mesma contagem de 5 s. A consulta
+  de marcas de visto agora e assincrona e isolada por perfil.
+- HLS com duracao desconhecida envia progresso ao backend. Toque nos dialogos
+  de retomada e proximo episodio funciona. Ver
+  `docs/EPISODE_CONTINUATION_AUDIT_2026_09_25.md`.
+- Build e teste local de ordem validam codigo, nao a apresentacao no Switch.
+
 ## Rodada 0.12.11 (24/09/2026)
 
 - O detalhe de serie agora escolhe o episodio parcialmente assistido mais
