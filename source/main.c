@@ -316,7 +316,7 @@ static int g_search_counts[SEARCH_FILTERS] = {0};
 static int g_search_counts_valid = 0;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
-typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES, FETCH_SAGA } FetchKind;
+typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES, FETCH_SAGA, FETCH_AVATARS } FetchKind;
 typedef struct {
     FetchKind kind;
     Screen origin;
@@ -328,6 +328,20 @@ static FetchIntent g_fetch_current = {0}, g_fetch_queued = {0};
 static int g_fetch_discard = 0;
 static cJSON *g_profiles = NULL;
 static int g_profile_sel = 0, g_profile_id = 0, g_profile_required = 0;
+static Screen g_profiles_return = SC_CONFIG;
+static cJSON *g_avatar_catalog = NULL;
+static cJSON *g_avatar_items[256];
+static int g_avatar_item_n = 0;
+static cJSON *g_avatar_pending = NULL;
+static SDL_Thread *g_avatar_thread = NULL;
+static SDL_atomic_t g_avatar_done;
+static Uint32 g_avatar_due = 0;
+static int g_avatar_attempted = 0, g_avatar_picker_await = 0;
+static int g_profile_menu = 0, g_profile_menu_sel = 0;
+static int g_profile_editor = 0, g_profile_edit_sel = 0, g_profile_edit_id = 0;
+static Screen g_profile_editor_return = SC_CONFIG;
+static int g_avatar_picker = 0, g_avatar_sel = 0, g_avatar_page = 0;
+static int g_profile_delete_confirm = 0;
 
 // --- downloads (acelerador) ---
 static cJSON *g_dl = NULL;
@@ -364,7 +378,9 @@ static SDL_Thread *g_settings_thread = NULL;
 static SDL_atomic_t g_account_ready, g_settings_done;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
-static int g_prefs_open = 0, g_prefs_sel = 0;
+static int g_prefs_sel = 0;
+static int g_settings_section = 0, g_settings_focus = 1;
+static Screen g_settings_return = SC_MAIN;
 // menu "baixar episodios" (Y no detalhe da serie)
 static int g_dlmenu = 0;
 static char g_epChk[512]; static int g_epChkN = 0;
@@ -1147,7 +1163,7 @@ static void begin_catalog_fetch(FetchKind kind, const char *path, const char *qu
     intent.origin = g_screen == SC_LOADING ? g_fetch_current.origin : g_screen;
     snprintf(intent.path, sizeof(intent.path), "%s", path);
     if (query) snprintf(intent.query, sizeof(intent.query), "%s", query);
-    if (kind == FETCH_PROFILES && g_profiles) { cJSON_Delete(g_profiles); g_profiles = NULL; }
+    // Mantem o ultimo perfil visivel se a atualizacao da lista falhar/cancelar.
     if (g_fetch.thread) {
         // A newer selection wins. Keep at most one request in flight and one
         // pending intent so repeated button presses cannot flood the server.
@@ -1160,11 +1176,54 @@ static void begin_catalog_fetch(FetchKind kind, const char *path, const char *qu
         if (catalog_fetch_start(&g_fetch, intent.path, g_token) != 0) {
             g_fetch_current.kind = FETCH_NONE;
             toast("Nao foi possivel iniciar a consulta");
-            if (kind == FETCH_PROFILES) g_screen = SC_PROFILES;
+            if (kind == FETCH_PROFILES) g_screen = g_profile_required ? SC_PROFILES : g_profiles_return;
             return;
         }
     }
     g_screen = SC_LOADING;
+}
+
+static void install_avatar_catalog(cJSON *catalog) {
+    if (g_avatar_catalog) cJSON_Delete(g_avatar_catalog);
+    g_avatar_catalog = catalog;
+    g_avatar_item_n = 0;
+    cJSON *groups = cJSON_GetObjectItemCaseSensitive(catalog, "catalog");
+    for (int g = 0; g < arr_len(groups) && g_avatar_item_n < 256; g++) {
+        cJSON *items = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(groups, g), "items");
+        for (int i = 0; i < arr_len(items) && g_avatar_item_n < 256; i++) {
+            cJSON *item = cJSON_GetArrayItem(items, i);
+            const char *key = jstr(item, "k"), *url = jstr(item, "url");
+            if ((!key || (strncmp(key, "char:", 5) && strncmp(key, "img:", 4))) || !url) continue;
+            if (strstr(url, ".svg")) continue; // SDL_image do NRO nao decodifica SVG.
+            g_avatar_items[g_avatar_item_n++] = item;
+        }
+    }
+}
+static int avatar_fetch_thread(void *unused) {
+    (void)unused;
+    g_avatar_pending = api_get_timeout("/api/account/avatars", 3L, 12L);
+    SDL_AtomicSet(&g_avatar_done, 1);
+    return 0;
+}
+static void start_avatar_fetch(void) {
+    if (g_avatar_catalog || g_avatar_thread) return;
+    SDL_AtomicSet(&g_avatar_done, 0);
+    g_avatar_thread = SDL_CreateThread(avatar_fetch_thread, "avatar-catalog", NULL);
+}
+static void pump_avatar_fetch(void) {
+    if (!g_avatar_thread || !SDL_AtomicGet(&g_avatar_done)) return;
+    SDL_WaitThread(g_avatar_thread, NULL); g_avatar_thread = NULL;
+    if (g_avatar_pending && cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(g_avatar_pending, "catalog"))) {
+        install_avatar_catalog(g_avatar_pending);
+        g_avatar_pending = NULL;
+        if (g_avatar_picker_await && g_screen == SC_CONFIG) {
+            g_avatar_picker = 1; g_avatar_sel = 0; g_avatar_page = 0;
+        }
+    } else {
+        if (g_avatar_pending) { cJSON_Delete(g_avatar_pending); g_avatar_pending = NULL; }
+        if (g_avatar_picker_await) toast("Avatares indisponiveis. Tente novamente.");
+    }
+    g_avatar_picker_await = 0;
 }
 
 static void pump_catalog_fetch(void) {
@@ -1229,6 +1288,8 @@ static void pump_catalog_fetch(void) {
         for (int i = 0; i < arr_len(profiles); i++) {
             if (jint(cJSON_GetArrayItem(profiles, i), "id") == g_profile_id) g_profile_sel = i;
         }
+        g_avatar_due = SDL_GetTicks() + 3000;
+        g_avatar_attempted = 0;
         if (g_profile_required && g_profile_id > 0 && arr_len(profiles) > 0 &&
             jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id") == g_profile_id) {
             // O backend usa o primeiro perfil como fallback para um ID apagado.
@@ -1238,10 +1299,20 @@ static void pump_catalog_fetch(void) {
             load_favs(); g_screen = SC_MAIN; enter_tab(0);
         } else g_screen = SC_PROFILES;
         applied = 1;
+    } else if (result && g_fetch_current.kind == FETCH_AVATARS &&
+               cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(result, "catalog"))) {
+        install_avatar_catalog(result);
+        result = NULL;
+        g_avatar_picker = 1;
+        g_avatar_sel = 0;
+        g_avatar_page = 0;
+        g_screen = SC_CONFIG;
+        applied = 1;
     }
     if (result) cJSON_Delete(result);
     if (!applied) {
-        g_screen = g_fetch_current.kind == FETCH_PROFILES ? SC_PROFILES : g_fetch_current.origin;
+        g_screen = g_fetch_current.kind == FETCH_PROFILES ?
+                   (g_profile_required ? SC_PROFILES : g_profiles_return) : g_fetch_current.origin;
         toast(error[0] ? error : "Resposta invalida do servidor");
     }
     FetchKind completed_kind = g_fetch_current.kind;
@@ -1955,6 +2026,51 @@ static void do_search(void) {
 }
 
 // ------------------------------------------------------------- render: barra
+static cJSON *profile_by_id(int id) {
+    cJSON *arr = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+    for (int i = 0; i < arr_len(arr); i++) {
+        cJSON *profile = cJSON_GetArrayItem(arr, i);
+        if (jint(profile, "id") == id) return profile;
+    }
+    return NULL;
+}
+static const char *profile_avatar_url(cJSON *profile) {
+    const char *key = jstr(profile, "avatar");
+    if (!key || !key[0]) return NULL;
+    if (!strncmp(key, "img:", 4) && !strchr(key + 4, '/') && !strchr(key + 4, '\\')) {
+        static char local_url[320];
+        snprintf(local_url, sizeof(local_url), "/img/avatars/%s", key + 4);
+        return local_url;
+    }
+    cJSON *groups = g_avatar_catalog ? cJSON_GetObjectItemCaseSensitive(g_avatar_catalog, "catalog") : NULL;
+    for (int g = 0; g < arr_len(groups); g++) {
+        cJSON *items = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(groups, g), "items");
+        for (int i = 0; i < arr_len(items); i++) {
+            cJSON *item = cJSON_GetArrayItem(items, i);
+            const char *candidate = jstr(item, "k");
+            if (candidate && !strcmp(candidate, key)) return jstr(item, "url");
+        }
+    }
+    return NULL;
+}
+static void draw_profile_avatar(cJSON *profile, int x, int y, int size) {
+    const char *name = jstr(profile, "name");
+    SDL_Color bg = C_ACC2;
+    const char *hex = jstr(profile, "color");
+    unsigned red, green, blue;
+    if (hex && strlen(hex) == 7 && hex[0] == '#' &&
+        sscanf(hex + 1, "%02x%02x%02x", &red, &green, &blue) == 3) {
+        bg = (SDL_Color){(Uint8)red, (Uint8)green, (Uint8)blue, 255};
+    }
+    fill_rect(x, y, size, size, bg);
+    const char *url = profile_avatar_url(profile);
+    SDL_Texture *tex = url ? cover_get(url) : NULL;
+    if (tex) { SDL_Rect dst = { x, y, size, size }; ui_cover(tex, &dst); }
+    else {
+        char initial[2] = { name && name[0] ? name[0] : '?', 0 };
+        text_center_at(initial, x, size, y + size / 2 - 16, C_TEXT, 1);
+    }
+}
 static void draw_topbar(void) {
     fill_rect(0, 0, WIN_W, 95, C_BAR);
     fill_rect(0, 0, WIN_W, 3, C_ACC);
@@ -1969,9 +2085,28 @@ static void draw_topbar(void) {
         }
         tx += w + 33;
     }
-    text_draw(gRen, "Y Buscar", 1068, 33, C_TEXT, 0);
-    text_draw(gRen, "- Config", 1172, 33, C_MUT, 2);
+    text_draw(gRen, "Y Buscar", 1040, 33, C_TEXT, 0);
+    cJSON *active = profile_by_id(g_profile_id);
+    draw_profile_avatar(active, 1188, 24, 46);
+    border_rect(1186, 22, 50, 50, 2, C_ACC2);
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
+}
+static void draw_profile_menu(void) {
+    if (!g_profile_menu || (g_screen != SC_MAIN && g_screen != SC_SEARCH)) return;
+    fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 160});
+    ui_panel(844, 87, 390, 310, C_ACC2);
+    cJSON *active = profile_by_id(g_profile_id);
+    draw_profile_avatar(active, 868, 110, 58);
+    text_clip(jstr(active, "name") ? jstr(active, "name") : g_user,
+              942, 113, C_TEXT, 1, 260);
+    text_draw(gRen, "Perfil ativo", 942, 147, C_MUT, 0);
+    static const char *items[] = { "Alterar perfil", "Configuracoes", "Sair da conta" };
+    for (int i = 0; i < 3; i++) {
+        int y = 190 + i * 63;
+        fill_rect(868, y, 342, 52, i == g_profile_menu_sel ? (SDL_Color){55, 47, 92, 255} : C_BAR);
+        if (i == g_profile_menu_sel) ui_focus(865, y - 3, 348, 58);
+        text_draw(gRen, items[i], 888, y + 11, C_TEXT, 0);
+    }
 }
 
 // ------------------------------------------------------------- render: landing
@@ -1988,7 +2123,7 @@ static void draw_landing(void) {
                                             "Buscando os destaques e as capas da sua conta");
         else ui_empty_state(g_status[0] ? g_status : "Falha ao carregar catalogo",
                             "Pressione A para tentar novamente.");
-        ui_footer("Y Buscar    L/R Trocar categoria    - Configuracoes");
+        ui_footer("Y Buscar    L/R Trocar categoria    - Perfil");
         return;
     }
     SDL_Rect content_clip = { 0, 95, WIN_W, WIN_H - 95 - 52 };
@@ -3313,8 +3448,6 @@ static void input_downloads(int b) {
 }
 
 // ------------------------------------------------------------- config
-static const char *SET_ITEMS[] = { "Preferencias do Switch", "Trocar perfil", "Buscar atualizacao", "Reiniciar Nplay", "Fechar Nplay", "Sair da conta" };
-#define NSET 6
 static int g_setSel = 0;
 static int g_diag_open = 0;
 static char g_diag_player_lines[6][DIAG_LINE_CAP];
@@ -3478,32 +3611,6 @@ static void draw_player_diagnostics(void) {
     text_center_at("Cima anteriores  |  Baixo recentes  |  X atualizar  |  B fechar",
                    252, 776, 614, C_TEXT, 0);
 }
-static void draw_preferences(void) {
-    if (!g_prefs_open) return;
-    ui_panel(220, 84, 840, 552, C_ACC2);
-    text_draw(gRen, "PREFERENCIAS DO SWITCH", 260, 116, C_ACC2, 0);
-    text_draw(gRen, "Sincronizadas com sua conta Nplay", 260, 150, C_MUT, 0);
-    static const char *names[] = { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido" };
-    static const char *details[] = {
-        "Aplica o controle de catalogo da conta.",
-        "Continua a serie quando um episodio termina.",
-        "Desativa a rotacao automatica dos destaques.",
-        "Prioridade usada quando a obra oferece versoes diferentes."
-    };
-    const char *audio[] = { "Dublado", "Legendado", "Tanto faz" };
-    for (int i = 0; i < 4; i++) {
-        int y = 190 + i * 88;
-        fill_rect(252, y, 776, 72, C_BAR);
-        if (i == g_prefs_sel) { ui_focus(248, y - 4, 784, 80); fill_rect(252, y, 5, 72, C_ACC); }
-        text_draw(gRen, names[i], 278, y + 9, i == g_prefs_sel ? C_TEXT : C_MUT, 0);
-        text_draw(gRen, details[i], 278, y + 39, C_MUT, 0);
-        const char *value = i == 0 ? (g_pref_hide_adult ? "Ativado" : "Desativado") :
-                            i == 1 ? (g_pref_autoplay ? "Ativado" : "Desativado") :
-                            i == 2 ? (g_pref_reduce_motion ? "Ativado" : "Desativado") : audio[g_pref_audio];
-        text_right(value, 998, y + 21, i == g_prefs_sel ? C_GREEN : C_MUT, 0);
-    }
-    text_center_at("A Alterar    Esquerda/direita Escolher audio    B Concluir", 252, 776, 588, C_TEXT, 0);
-}
 static void save_selected_preference(int direction) {
     int old_hide = g_pref_hide_adult, old_auto = g_pref_autoplay, old_motion = g_pref_reduce_motion, old_audio = g_pref_audio;
     char body[96];
@@ -3551,101 +3658,308 @@ static void format_subscription_period(cJSON *account, cJSON *subscription, char
     else if (days == 0) snprintf(out, cap, "Validade encerra hoje");
     else snprintf(out, cap, "Periodo encerrado em %02d/%02d/%04d", day, month, year);
 }
+static const char *const SETTINGS_NAV[] = { "Meu perfil", "Reproducao", "Conta", "Aplicativo" };
+static const char *const SETTINGS_ROWS[4][5] = {
+    { "Editar meu cartao", "Trocar perfil", "Adicionar perfil", NULL },
+    { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido", NULL },
+    { "Alterar senha", "E-mail de recuperacao", "Sair da conta", NULL },
+    { "Buscar atualizacao", "Diagnostico do player", "Reiniciar Nplay", "Fechar Nplay", NULL }
+};
+static const char *const SETTINGS_DETAILS[4][5] = {
+    { "Nome, avatar, cor e acesso infantil", "Escolha quem esta assistindo", "Crie outro espaco para favoritos e progresso", NULL },
+    { "Remove titulos adultos da descoberta", "Continua a serie apos o fim do episodio", "Para a rotacao automatica dos destaques", "Prioridade quando ha varias versoes", NULL },
+    { "Proteja o acesso com uma nova senha", "Para recuperar a conta se esquecer a senha", "Encerra o acesso neste Switch", NULL },
+    { "Instale a versao mais recente pelo aplicativo", "Dados locais para investigar a reproducao", "Reabre o aplicativo", "Volta ao menu HOME", NULL }
+};
+static int settings_row_count(void) { return g_settings_section == 0 || g_settings_section == 2 ? 3 : 4; }
+static void open_profile_editor(int id) {
+    if (!profile_by_id(id)) { toast("Perfil indisponivel. Atualize a lista."); return; }
+    g_profile_editor_return = g_screen;
+    g_profile_edit_id = id;
+    g_profile_edit_sel = 0;
+    g_profile_delete_confirm = 0;
+    g_profile_editor = 1;
+    g_screen = SC_CONFIG;
+}
+static int patch_profile(cJSON *body) {
+    char path[96];
+    snprintf(path, sizeof(path), "/api/account/profiles/%d", g_profile_edit_id);
+    char *json = cJSON_PrintUnformatted(body);
+    if (!json) return 0;
+    long code = api_send(path, "PATCH", json);
+    free(json);
+    if (code != 200) { toast("Nao foi possivel salvar o perfil"); return 0; }
+    cJSON *profile = profile_by_id(g_profile_edit_id);
+    if (profile) {
+        for (cJSON *field = body->child; field; field = field->next)
+            cJSON_ReplaceItemInObjectCaseSensitive(profile, field->string, cJSON_Duplicate(field, 1));
+    }
+    toast("Perfil atualizado");
+    return 1;
+}
+static void edit_profile_action(void) {
+    cJSON *profile = profile_by_id(g_profile_edit_id);
+    if (!profile) { g_profile_editor = 0; return; }
+    cJSON *body = NULL;
+    if (g_profile_edit_sel == 0) {
+        char name[31];
+        if (prompt_text("Novo nome do perfil", name, sizeof(name), 0) != 0) return;
+        body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "name", name);
+    } else if (g_profile_edit_sel == 1) {
+        if (g_avatar_catalog) { g_avatar_picker = 1; g_avatar_sel = 0; g_avatar_page = 0; }
+        else if (g_avatar_thread) { g_avatar_picker_await = 1; toast("Carregando avatares..."); }
+        else begin_catalog_fetch(FETCH_AVATARS, "/api/account/avatars", NULL);
+        return;
+    } else if (g_profile_edit_sel == 2) {
+        static const char *colors[] = { "#8b5cf6", "#3d9bff", "#e368aa", "#20b99a", "#ef9f51" };
+        const char *current = jstr(profile, "color");
+        int next = 0;
+        for (int i = 0; i < 5; i++) if (current && !strcasecmp(current, colors[i])) { next = (i + 1) % 5; break; }
+        body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "color", colors[next]);
+    } else if (g_profile_edit_sel == 3) {
+        body = cJSON_CreateObject(); cJSON_AddBoolToObject(body, "is_kids", !jint(profile, "is_kids"));
+    } else if (g_profile_edit_sel == 4) {
+        if (g_profile_edit_id == g_profile_id) { toast("Troque de perfil antes de excluir o atual"); return; }
+        if (!g_profile_delete_confirm) { g_profile_delete_confirm = 1; return; }
+        char path[96]; snprintf(path, sizeof(path), "/api/account/profiles/%d", g_profile_edit_id);
+        if (api_send(path, "DELETE", "{}") == 200) {
+            g_profile_editor = 0; g_profile_delete_confirm = 0;
+            begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
+            toast("Perfil excluido");
+        } else toast("Nao foi possivel excluir o perfil");
+        return;
+    }
+    if (body) { patch_profile(body); cJSON_Delete(body); }
+}
+static void add_profile_from_settings(void) {
+    if (g_screen == SC_CONFIG) g_profiles_return = SC_CONFIG;
+    int limit = g_profiles ? jint(g_profiles, "limit") : 4;
+    cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+    if (limit > 0 && arr_len(profiles) >= limit) { toast("Limite de perfis da conta atingido"); return; }
+    char name[31];
+    if (prompt_text("Nome do novo perfil", name, sizeof(name), 0) != 0) return;
+    cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "name", name);
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!json) return;
+    long code = api_send("/api/account/profiles", "POST", json);
+    free(json);
+    if (code == 200) { toast("Perfil criado"); begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); }
+    else toast("Nao foi possivel criar o perfil");
+}
+static void draw_profile_editor(void) {
+    if (!g_profile_editor) return;
+    cJSON *profile = profile_by_id(g_profile_edit_id);
+    if (!profile) return;
+    fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 190});
+    ui_panel(194, 82, 892, 560, C_ACC2);
+    draw_profile_avatar(profile, 224, 112, 84);
+    text_clip(jstr(profile, "name"), 328, 114, C_TEXT, 1, 690);
+    text_draw(gRen, "Personalize seu cartao", 328, 155, C_MUT, 0);
+    static const char *labels[] = { "Nome", "Avatar", "Cor do perfil", "Perfil infantil", "Excluir perfil" };
+    for (int i = 0; i < 5; i++) {
+        int y = 218 + i * 70;
+        fill_rect(224, y, 832, 58, C_BAR);
+        if (i == g_profile_edit_sel) ui_focus(220, y - 4, 840, 66);
+        text_draw(gRen, labels[i], 246, y + 15, i == 4 ? C_ROSE : C_TEXT, 0);
+        const char *value = i == 0 ? jstr(profile, "name") : i == 1 ? (jstr(profile, "avatar") ? "Selecionado" : "Letra do nome") :
+                            i == 2 ? (jstr(profile, "color") ? jstr(profile, "color") : "Roxo") :
+                            i == 3 ? (jint(profile, "is_kids") ? "Sim" : "Nao") :
+                            (g_profile_delete_confirm ? "A novamente para confirmar" : "Remove favoritos e progresso");
+        text_right(value ? value : "", 1028, y + 15, i == 4 ? C_ROSE : C_ACC2, 0);
+    }
+    text_center_at("A Alterar    Cima/baixo Navegar    B Voltar", 224, 832, 596, C_MUT, 0);
+}
+static void draw_avatar_picker(void) {
+    if (!g_avatar_picker) return;
+    fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 190});
+    ui_panel(146, 76, 988, 574, C_ACC2);
+    text_draw(gRen, "Escolher avatar", 176, 101, C_TEXT, 1);
+    char page[72]; snprintf(page, sizeof(page), "Pagina %d de %d", g_avatar_page + 1, (g_avatar_item_n + 18) / 18);
+    text_right(page, 1096, 108, C_MUT, 0);
+    for (int slot = 0; slot < 18; slot++) {
+        int idx = g_avatar_page * 18 + slot;
+        if (idx > g_avatar_item_n) break;
+        int col = slot % 6, row = slot / 6;
+        int x = 177 + col * 155, y = 168 + row * 137;
+        fill_rect(x, y, 133, 124, C_BAR);
+        if (idx == g_avatar_sel) ui_focus(x - 3, y - 3, 139, 130);
+        if (idx == 0) text_center_at("Sem avatar", x + 4, 125, y + 49, C_TEXT, 0);
+        else {
+            cJSON *item = g_avatar_items[idx - 1];
+            SDL_Texture *tex = cover_get(jstr(item, "url"));
+            if (tex) { SDL_Rect dst = { x + 24, y + 7, 84, 84 }; ui_cover(tex, &dst); }
+            else text_center_at("...", x + 4, 125, y + 39, C_MUT, 1);
+            text_clip(jstr(item, "label"), x + 6, y + 98, C_MUT, 2, 121);
+        }
+    }
+    text_center_at("A Escolher    L/R Pagina    B Voltar", 176, 928, 613, C_MUT, 0);
+}
+static void settings_execute(void) {
+    if (g_settings_section == 0) {
+        if (g_setSel == 0) open_profile_editor(g_profile_id);
+        else if (g_setSel == 1) { g_profiles_return = SC_CONFIG; begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); }
+        else add_profile_from_settings();
+    } else if (g_settings_section == 1) {
+        g_prefs_sel = g_setSel;
+        save_selected_preference(1);
+    } else if (g_settings_section == 2) {
+        if (g_setSel == 0) {
+            char current[128], next[128], confirm[128];
+            if (prompt_text("Senha atual", current, sizeof(current), 1) != 0) return;
+            if (prompt_text("Nova senha (4 ou mais caracteres)", next, sizeof(next), 1) != 0) { memset(current, 0, sizeof(current)); return; }
+            if (prompt_text("Repita a nova senha", confirm, sizeof(confirm), 1) != 0) { memset(current, 0, sizeof(current)); memset(next, 0, sizeof(next)); return; }
+            if (strlen(next) < 4 || strcmp(next, confirm)) { toast("As novas senhas nao conferem"); }
+            else {
+                cJSON *body = cJSON_CreateObject();
+                cJSON_AddStringToObject(body, "current", current);
+                cJSON_AddStringToObject(body, "next", next);
+                char *json = cJSON_PrintUnformatted(body);
+                cJSON_Delete(body);
+                if (json) {
+                    long code = api_send("/api/account/password", "PATCH", json);
+                    memset(json, 0, strlen(json)); free(json);
+                    toast(code == 200 ? "Senha alterada" : "Confira a senha atual e tente novamente");
+                }
+            }
+            memset(current, 0, sizeof(current)); memset(next, 0, sizeof(next)); memset(confirm, 0, sizeof(confirm));
+        } else if (g_setSel == 1) {
+            char email[201];
+            if (prompt_text("E-mail de recuperacao", email, sizeof(email), 0) != 0) return;
+            cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "email", email);
+            char *json = cJSON_PrintUnformatted(body); cJSON_Delete(body);
+            if (json) {
+                long code = api_send("/api/account/email", "PATCH", json); free(json);
+                if (code == 200) {
+                    cJSON *user = g_account_status ? cJSON_GetObjectItem(g_account_status, "user") : NULL;
+                    if (user) cJSON_ReplaceItemInObjectCaseSensitive(user, "email", cJSON_CreateString(email));
+                    toast("E-mail atualizado");
+                } else toast("Nao foi possivel salvar o e-mail");
+            }
+        } else logout_and_restart();
+    } else {
+        if (g_setSel == 0) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
+        else if (g_setSel == 1) { g_diag_page = 0; reload_player_diagnostics(); g_diag_open = 1; }
+        else if (g_setSel == 2) schedule_restart(NULL);
+        else g_running = 0;
+    }
+}
 static void draw_settings(void) {
     ui_header("NPLAY", "Configuracoes", "B Voltar");
-    char v[96]; snprintf(v, sizeof(v), "Versao %s", APP_VERSION_STR);
-    char u[180]; snprintf(u, sizeof(u), "Conta  %s", g_user[0] ? g_user : "-");
-    text_draw(gRen, u, 40, 104, C_TEXT, 0);
-    text_right(v, WIN_W - 40, 104, C_MUT, 0);
-    text_draw(gRen, "CONTA E BIBLIOTECA", 40, 138, C_ACC2, 0);
-
-    ui_panel(40, 174, 580, 170, C_ACC);
-    text_draw(gRen, "SUA BIBLIOTECA", 68, 194, C_ACC, 0);
-    text_draw(gRen, "Obras preparadas para assistir.", 68, 232, C_TEXT, 0);
-    text_draw(gRen, "Disponiveis nos seus aparelhos.", 68, 264, C_MUT, 0);
-    if (g_accel_status) {
-        int count = jint(g_accel_status, "count");
-        char sl[96]; snprintf(sl, sizeof(sl), count == 1 ? "%d obra preparada" : "%d obras preparadas", count);
-        text_draw(gRen, sl, 68, 302, C_GREEN, 0);
-    } else text_draw(gRen, "Consultando sua conta...", 68, 302, C_MUT, 0);
-
-    ui_panel(644, 174, 596, 170, C_ACC2);
-    text_draw(gRen, "SEU PLANO", 672, 194, C_ACC2, 0);
+    cJSON *active = profile_by_id(g_profile_id);
     cJSON *account = g_account_status ? cJSON_GetObjectItem(g_account_status, "user") : NULL;
-    if (!account && g_account_status && cJSON_IsObject(g_account_status)) account = g_account_status;
-    if (account) {
+    const char *name = jstr(active, "name");
+    draw_profile_avatar(active, 40, 111, 64);
+    text_clip(name && name[0] ? name : g_user, 120, 113, C_TEXT, 1, 560);
+    char secondary[180]; snprintf(secondary, sizeof(secondary), "Conta %s  |  Perfil atual", g_user[0] ? g_user : "-");
+    text_clip(secondary, 120, 152, C_MUT, 0, 600);
+    char version[60]; snprintf(version, sizeof(version), "Switch v%s", APP_VERSION_STR);
+    text_right(version, 1238, 135, C_MUT, 0);
+
+    ui_panel(40, 202, 224, 406, C_ACC2);
+    text_draw(gRen, "AJUSTES", 62, 224, C_ACC2, 0);
+    for (int i = 0; i < 4; i++) {
+        int y = 264 + i * 77;
+        fill_rect(56, y, 192, 60, i == g_settings_section ? (SDL_Color){49, 42, 82, 255} : C_BAR);
+        if (i == g_settings_section && !g_settings_focus) ui_focus(53, y - 3, 198, 66);
+        text_draw(gRen, SETTINGS_NAV[i], 72, y + 16, i == g_settings_section ? C_TEXT : C_MUT, 0);
+    }
+    ui_panel(290, 202, 950, 406, C_ACC);
+    const char *heading = g_settings_section == 0 ? "Seu perfil" : g_settings_section == 1 ? "Conteudo e reproducao" :
+                          g_settings_section == 2 ? "Seguranca e acesso" : "Sobre o aplicativo";
+    text_draw(gRen, heading, 320, 219, C_TEXT, 1);
+    const char *intro = g_settings_section == 0 ? "Um perfil para cada pessoa, com historico e lista proprios." :
+                        g_settings_section == 1 ? "Escolhas sincronizadas com a sua conta Nplay." :
+                        g_settings_section == 2 ? "Cuide de sua conta e do acesso neste aparelho." :
+                        "Atualizacao, suporte e controles do Nplay no Switch.";
+    text_draw(gRen, intro, 320, 256, C_MUT, 0);
+    if (g_settings_section == 2 && account) {
         cJSON *plan = cJSON_GetObjectItem(account, "plan");
         cJSON *subscription = cJSON_GetObjectItem(account, "subscription");
         const char *plan_name = plan ? jstr(plan, "name") : NULL;
-        const char *status = subscription ? jstr(subscription, "status") : NULL;
-        if (!status) status = jstr(account, "subscription_status");
-        text_clip(plan_name && plan_name[0] ? plan_name : "Plano da conta", 672, 226, C_TEXT, 1, 520);
-        text_draw(gRen, subscription_status_label(status), 672, 260,
-                  status && (!strcmp(status, "active") || !strcmp(status, "trialing")) ? C_GREEN : C_ACC, 0);
-        int screens = plan ? jint(plan, "session_limit") : 0;
-        int devices = plan ? jint(plan, "device_limit") : 0;
-        if (screens <= 0) screens = jint(account, "max_sessions");
-        if (devices <= 0) devices = jint(account, "max_devices");
-        int profiles = arr_len(cJSON_GetObjectItem(g_account_status, "profiles"));
-        int profile_limit = jint(account, "profile_limit");
-        char limits[128];
-        if (screens > 0 && devices > 0 && profile_limit > 0) snprintf(limits, sizeof(limits), "%d tela%s  |  %d dispositivo%s  |  %d/%d perfis", screens, screens == 1 ? "" : "s", devices, devices == 1 ? "" : "s", profiles, profile_limit);
-        else if (screens > 0 && devices > 0) snprintf(limits, sizeof(limits), "%d tela%s simultanea%s  |  %d dispositivo%s", screens, screens == 1 ? "" : "s", screens == 1 ? "" : "s", devices, devices == 1 ? "" : "s");
-        else if (screens > 0) snprintf(limits, sizeof(limits), "%d tela%s simultanea%s", screens, screens == 1 ? "" : "s", screens == 1 ? "" : "s");
-        else snprintf(limits, sizeof(limits), "Limites gerenciados pela sua conta");
-        text_draw(gRen, limits, 672, 288, C_MUT, 0);
+        const char *status = jstr(account, "subscription_status");
+        char info[180]; snprintf(info, sizeof(info), "%s  |  %s", plan_name ? plan_name : "Plano da conta", subscription_status_label(status));
+        text_clip(info, 320, 285, C_ACC2, 0, 850);
         char period[160]; format_subscription_period(account, subscription, period, sizeof(period));
-        text_draw(gRen, period, 672, 316, C_MUT, 0);
-    } else {
-        text_draw(gRen, SDL_AtomicGet(&g_settings_done) ? "Plano indisponivel agora" : "Consultando seu plano...", 672, 238, C_TEXT, 0);
-        text_draw(gRen, "Tente abrir as configuracoes novamente.", 672, 278, C_MUT, 0);
+        text_clip(period, 320, 584, C_MUT, 2, 850);
+    } else if (g_settings_section == 0) {
+        int limit = g_profiles ? jint(g_profiles, "limit") : 0;
+        cJSON *arr = g_profiles ? cJSON_GetObjectItem(g_profiles, "profiles") : NULL;
+        char info[100]; snprintf(info, sizeof(info), "%d de %d perfis usados", arr_len(arr), limit > 0 ? limit : 4);
+        text_draw(gRen, info, 320, 285, C_ACC2, 0);
+    } else if (g_settings_section == 3 && g_accel_status) {
+        char info[100]; snprintf(info, sizeof(info), "%d obras preparadas na sua biblioteca", jint(g_accel_status, "count"));
+        text_draw(gRen, info, 320, 285, C_ACC2, 0);
     }
-
-    text_draw(gRen, "ACOES", 40, 366, C_ACC2, 0);
-    for (int i = 0; i < NSET; i++) {
-        int y = 382 + i * 40;
-        fill_rect(260, y, 760, 37, C_CARD);
-        if (i == g_setSel) { ui_focus(256, y - 3, 768, 43); fill_rect(260, y, 4, 37, C_ACC2); }
-        text_draw(gRen, SET_ITEMS[i], 286, y + 4, (i == g_setSel) ? C_TEXT : C_MUT, 0);
-        text_right(i == 2 ? "A Verificar" : "A Confirmar", 994, y + 4, C_MUT, 0);
+    int count = settings_row_count();
+    for (int i = 0; i < count; i++) {
+        int y = 322 + i * 65;
+        fill_rect(316, y, 898, 57, C_BAR);
+        if (g_settings_focus && g_setSel == i) { ui_focus(313, y - 3, 904, 63); fill_rect(316, y, 4, 57, C_ACC); }
+        text_draw(gRen, SETTINGS_ROWS[g_settings_section][i], 338, y + 5,
+                  g_settings_section == 2 && i == 2 ? C_ROSE : C_TEXT, 0);
+        text_clip(SETTINGS_DETAILS[g_settings_section][i], 338, y + 32, C_MUT, 2, 600);
+        if (g_settings_section == 1) {
+            static const char *audio[] = { "Dublado", "Legendado", "Tanto faz" };
+            const char *value = i == 0 ? (g_pref_hide_adult ? "Ligado" : "Desligado") :
+                                i == 1 ? (g_pref_autoplay ? "Ligado" : "Desligado") :
+                                i == 2 ? (g_pref_reduce_motion ? "Ligado" : "Desligado") : audio[g_pref_audio];
+            text_right(value, 1188, y + 14, C_ACC2, 0);
+        }
     }
-    if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 632, C_ACC, 0);
-    ui_footer("Cima/baixo Navegar    A Confirmar    X Diagnostico do player    B Voltar");
+    if (g_status[0]) text_clip(g_status, 48, 622, C_ACC2, 0, 1160);
+    ui_footer("Esquerda/direita Secao    Cima/baixo Navegar    A Confirmar    X Diagnostico    B Voltar");
     draw_player_diagnostics();
-    draw_preferences();
+    draw_profile_editor();
+    draw_avatar_picker();
 }
 static void input_settings(int b) {
-    if (g_prefs_open) {
-        if (b == JOY_B || b == JOY_MINUS) { g_prefs_open = 0; return; }
-        if (b == JOY_UP && g_prefs_sel > 0) g_prefs_sel--;
-        else if (b == JOY_DOWN && g_prefs_sel < 3) g_prefs_sel++;
-        else if (b == JOY_A) save_selected_preference(1);
-        else if (g_prefs_sel == 3 && b == JOY_DLEFT) save_selected_preference(-1);
-        else if (g_prefs_sel == 3 && b == JOY_DRIGHT) save_selected_preference(1);
+    if (g_avatar_picker) {
+        int total = g_avatar_item_n + 1;
+        if (b == JOY_B || b == JOY_MINUS) { g_avatar_picker = 0; return; }
+        if (b == JOY_L && g_avatar_page > 0) g_avatar_sel = (g_avatar_page - 1) * 18;
+        else if (b == JOY_R && (g_avatar_page + 1) * 18 < total) g_avatar_sel = (g_avatar_page + 1) * 18;
+        else if (b == JOY_DLEFT && g_avatar_sel > 0) g_avatar_sel--;
+        else if (b == JOY_DRIGHT && g_avatar_sel + 1 < total) g_avatar_sel++;
+        else if (b == JOY_UP && g_avatar_sel >= 6) g_avatar_sel -= 6;
+        else if (b == JOY_DOWN && g_avatar_sel + 6 < total) g_avatar_sel += 6;
+        else if (b == JOY_A) {
+            const char *key = g_avatar_sel == 0 ? "" : jstr(g_avatar_items[g_avatar_sel - 1], "k");
+            cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "avatar", key ? key : "");
+            if (patch_profile(body)) g_avatar_picker = 0;
+            cJSON_Delete(body);
+        }
+        g_avatar_page = g_avatar_sel / 18;
+        return;
+    }
+    if (g_profile_editor) {
+        if (b == JOY_B || b == JOY_MINUS) {
+            g_profile_editor = 0; g_profile_delete_confirm = 0; g_avatar_picker_await = 0;
+            g_screen = g_profile_editor_return;
+        } else if (b == JOY_UP && g_profile_edit_sel > 0) { g_profile_edit_sel--; g_profile_delete_confirm = 0; }
+        else if (b == JOY_DOWN && g_profile_edit_sel < 4) { g_profile_edit_sel++; g_profile_delete_confirm = 0; }
+        else if (b == JOY_A) edit_profile_action();
         return;
     }
     if (g_diag_open) {
-        if (b == JOY_UP && (g_diag_page + 1) * 6 < g_diag_player_total) {
-            g_diag_page++;
-            reload_player_diagnostics();
-        } else if (b == JOY_DOWN && g_diag_page > 0) {
-            g_diag_page--;
-            reload_player_diagnostics();
-        } else if (b == JOY_X) reload_player_diagnostics();
+        if (b == JOY_UP && (g_diag_page + 1) * 6 < g_diag_player_total) { g_diag_page++; reload_player_diagnostics(); }
+        else if (b == JOY_DOWN && g_diag_page > 0) { g_diag_page--; reload_player_diagnostics(); }
+        else if (b == JOY_X) reload_player_diagnostics();
         else if (b == JOY_A || b == JOY_B || b == JOY_MINUS) g_diag_open = 0;
         return;
     }
-    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
+    if (b == JOY_B || b == JOY_MINUS) { g_screen = g_settings_return; return; }
     if (b == JOY_X) { g_diag_page = 0; reload_player_diagnostics(); g_diag_open = 1; return; }
-    if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
-    else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }
-    else if (b == JOY_A) {
-        if (g_setSel == 0) { g_prefs_sel = 0; g_prefs_open = 1; }
-        else if (g_setSel == 1) begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
-        else if (g_setSel == 2) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
-        else if (g_setSel == 3) schedule_restart(NULL);
-        else if (g_setSel == 4) g_running = 0;
-        else logout_and_restart();
+    if (b == JOY_DLEFT) { g_settings_focus = 0; return; }
+    if (b == JOY_DRIGHT) { g_settings_focus = 1; return; }
+    if (!g_settings_focus) {
+        if (b == JOY_UP && g_settings_section > 0) { g_settings_section--; g_setSel = 0; }
+        else if (b == JOY_DOWN && g_settings_section < 3) { g_settings_section++; g_setSel = 0; }
+        else if (b == JOY_A) g_settings_focus = 1;
+    } else {
+        if (b == JOY_UP && g_setSel > 0) g_setSel--;
+        else if (b == JOY_DOWN && g_setSel + 1 < settings_row_count()) g_setSel++;
+        else if (b == JOY_A) settings_execute();
     }
 }
 static void run_update(void) {
@@ -3674,6 +3988,7 @@ static void run_update(void) {
 
 static void draw_catalog_loading(void) {
     const char *label = g_fetch_current.kind == FETCH_PROFILES ? "Carregando perfis" :
+                        g_fetch_current.kind == FETCH_AVATARS ? "Carregando avatares" :
                         g_fetch_current.kind == FETCH_SEARCH ? "Buscando titulos" :
                         g_fetch_current.kind == FETCH_SAGA ? "Abrindo saga" :
                         g_fetch_current.kind == FETCH_SERIES ? "Abrindo serie" : "Abrindo filme";
@@ -3703,16 +4018,18 @@ static void draw_profiles(void) {
             const char *name = jstr(profile, "name");
             ui_panel(x, 227, 220, 240, i == g_profile_sel ? C_ACC2 : C_ACC);
             if (i == g_profile_sel) ui_focus(x - 5, 222, 230, 250);
-            char initial[2] = { name && name[0] ? name[0] : '?', 0 };
-            fill_rect(x + 76, 263, 68, 68, i == g_profile_sel ? C_ACC2 : C_CARD);
-            text_center_at(initial, x + 76, 68, 276, C_TEXT, 1);
+            draw_profile_avatar(profile, x + 76, 263, 68);
             text_clip(name && name[0] ? name : "Perfil", x + 20, 365, C_TEXT, 0, 180);
             if (jint(profile, "id") == g_profile_id) text_center_at("Atual", x + 20, 180, 411, C_GREEN, 0);
         }
     }
+    if (!g_profile_required && count > 0) {
+        fill_rect(418, 513, 444, 48, C_CARD);
+        text_center_at("X Editar o perfil selecionado", 418, 444, 522, C_TEXT, 0);
+    }
     if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 608, C_ACC, 0);
     ui_footer(g_profile_required ? "Esquerda/direita Escolher    A Entrar    B Sair da conta" :
-                                 "Esquerda/direita Escolher    A Entrar    B Voltar");
+                                 "Esquerda/direita Escolher    A Entrar    X Editar    Y Adicionar    B Voltar");
 }
 
 static void input_profiles(int b) {
@@ -3722,14 +4039,14 @@ static void input_profiles(int b) {
     else if (b == JOY_DRIGHT && g_profile_sel + 1 < count && g_profile_sel < 3) g_profile_sel++;
     else if (b == JOY_B || b == JOY_MINUS) {
         if (g_profile_required) logout_and_restart();
-        else g_screen = SC_CONFIG;
+        else g_screen = g_profiles_return;
     } else if (b == JOY_PLUS) {
         g_running = 0;
     } else if (b == JOY_A) {
         if (count <= 0) { begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); return; }
         int selected = jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id");
         if (selected <= 0) return;
-        if (selected == g_profile_id && !g_profile_required) { g_screen = SC_CONFIG; return; }
+        if (selected == g_profile_id && !g_profile_required) { g_screen = g_profiles_return; return; }
         if (!store_save_profile_id(selected)) { toast("Nao foi possivel salvar o perfil na microSD"); return; }
         if (g_profile_required) {
             g_profile_required = 0; g_profile_id = selected;
@@ -3774,6 +4091,22 @@ static int stick_dir(SDL_Joystick *j) {
     return ax < 0 ? JOY_DLEFT : JOY_DRIGHT;
 }
 static void handle_button(int b) {
+    if (g_profile_menu && (g_screen == SC_MAIN || g_screen == SC_SEARCH)) {
+        if (b == JOY_B || b == JOY_MINUS) g_profile_menu = 0;
+        else if (b == JOY_UP && g_profile_menu_sel > 0) g_profile_menu_sel--;
+        else if (b == JOY_DOWN && g_profile_menu_sel < 2) g_profile_menu_sel++;
+        else if (b == JOY_A) {
+            int action = g_profile_menu_sel;
+            g_profile_menu = 0;
+            if (action == 0) { g_profiles_return = g_screen; begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); }
+            else if (action == 1) {
+                g_settings_section = 0; g_settings_focus = 1; g_setSel = 0;
+                g_settings_return = g_screen;
+                load_settings_status(); g_screen = SC_CONFIG;
+            } else logout_and_restart();
+        }
+        return;
+    }
     if (g_screen == SC_LOGIN) {
         if (b == JOY_A) { if (do_login() == 0) {
             store_clear_profile_id(); g_profile_id = 0; net_set_profile_id(0);
@@ -3786,7 +4119,7 @@ static void handle_button(int b) {
         else if (b == JOY_L || b == JOY_ZL) enter_tab((g_tab - 1 + NTABS) % NTABS);
         else if (b == JOY_R || b == JOY_ZR) enter_tab((g_tab + 1) % NTABS);
         else if (b == JOY_PLUS) g_running = 0;
-        else if (b == JOY_MINUS) { g_setSel = 0; load_settings_status(); g_screen = SC_CONFIG; }
+        else if (b == JOY_MINUS) { g_profile_menu_sel = 0; g_profile_menu = 1; }
         else if (b == JOY_Y) do_search();
         else if (b == JOY_A && g_tab <= TAB_SAGAS && !g_land && !g_land_thread) load_landing(g_tab);
         else if (g_tab == TAB_DOWNLOADS) input_downloads(b);
@@ -3795,19 +4128,24 @@ static void handle_button(int b) {
     } else if (g_screen == SC_SERIES) {
         input_series(b);
     } else if (g_screen == SC_SEARCH) {
-        input_search(b);
+        if (b == JOY_MINUS) { g_profile_menu_sel = 0; g_profile_menu = 1; }
+        else input_search(b);
     } else if (g_screen == SC_CONFIG) {
         input_settings(b);
     } else if (g_screen == SC_MOVIE) {
         input_movie(b);
     } else if (g_screen == SC_PROFILES) {
-        input_profiles(b);
+        if (b == JOY_X) {
+            cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
+            if (g_profile_sel < arr_len(profiles)) open_profile_editor(jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id"));
+        } else if (b == JOY_Y && !g_profile_required) add_profile_from_settings();
+        else input_profiles(b);
     } else if (g_screen == SC_LOADING) {
         if (b == JOY_B || b == JOY_MINUS) {
             g_episode_pending.active = 0;
             Screen origin = g_fetch_queued.kind != FETCH_NONE ? g_fetch_queued.origin : g_fetch_current.origin;
             if (g_fetch_current.kind == FETCH_PROFILES || g_fetch_queued.kind == FETCH_PROFILES)
-                origin = SC_PROFILES;
+                origin = g_profile_required ? SC_PROFILES : g_profiles_return;
             g_fetch_queued.kind = FETCH_NONE;
             g_fetch_discard = 1;
             catalog_fetch_cancel(&g_fetch);
@@ -3895,6 +4233,13 @@ static void handle_history_touch(int x, int y) {
 static void handle_touch_tap(int x, int y) {
     if (g_screen == SC_LOGIN) { if (y >= 300 && y < 395) handle_button(JOY_A); return; }
     if (g_screen == SC_LOADING) { if (y < 92) handle_button(JOY_B); return; }
+    if ((g_screen == SC_MAIN || g_screen == SC_SEARCH) && g_profile_menu) {
+        if (x >= 868 && x < 1210 && y >= 190 && y < 368) {
+            int index = (y - 190) / 63;
+            if (index < 3 && (y - 190) % 63 < 52) { g_profile_menu_sel = index; handle_button(JOY_A); }
+        } else handle_button(JOY_B);
+        return;
+    }
     if (g_screen == SC_MAIN || g_screen == SC_SEARCH) {
         if (y < 95) {
             int tx = 255;
@@ -3904,7 +4249,7 @@ static void handle_touch_tap(int x, int y) {
                 if (x >= tx && x <= tx + w + 22) { g_screen = SC_MAIN; enter_tab(t); return; }
                 tx += w + 33;
             }
-            if (x >= 1160) { g_setSel = 0; load_settings_status(); g_screen = SC_CONFIG; }
+            if (x >= 1160) { g_profile_menu_sel = 0; g_profile_menu = 1; }
             else if (x >= 1050) do_search();
             return;
         }
@@ -3995,16 +4340,37 @@ static void handle_touch_tap(int x, int y) {
                 input_profiles(JOY_A);
             }
         } else if (count <= 0 && y >= 220 && y < 540) input_profiles(JOY_A);
+        else if (!g_profile_required && y >= 513 && y < 561 && x >= 418 && x < 862) handle_button(JOY_X);
         return;
     }
     if (g_screen == SC_CONFIG) {
-        if (g_diag_open) { if (y >= 66 && y < 652) input_settings(JOY_X); return; }
-        if (g_prefs_open) return;
-        if (x >= 260 && x < 1020 && y >= 382 && y < 619) {
-            int index = (y - 382) / 40;
-            if (index < NSET && (y - 382) % 40 < 37) {
-                g_setSel = index;
-                input_settings(JOY_A);
+        if (g_avatar_picker) {
+            if (x >= 177 && x < 1107 && y >= 168 && y < 566) {
+                int col = (x - 177) / 155, row = (y - 168) / 137;
+                int index = g_avatar_page * 18 + row * 6 + col;
+                if (col < 6 && row < 3 && (x - 177) % 155 < 133 && (y - 168) % 137 < 124 && index <= g_avatar_item_n) {
+                    g_avatar_sel = index; input_settings(JOY_A);
+                }
+            } else input_settings(JOY_B);
+            return;
+        }
+        if (g_profile_editor) {
+            if (x >= 224 && x < 1056 && y >= 218 && y < 556) {
+                int index = (y - 218) / 70;
+                if (index < 5 && (y - 218) % 70 < 58) { g_profile_edit_sel = index; input_settings(JOY_A); }
+            } else input_settings(JOY_B);
+            return;
+        }
+        if (g_diag_open) { input_settings(JOY_B); return; }
+        if (x >= 56 && x < 248 && y >= 264 && y < 555) {
+            int section = (y - 264) / 77;
+            if (section < 4 && (y - 264) % 77 < 60) {
+                g_settings_section = section; g_settings_focus = 1; g_setSel = 0;
+            }
+        } else if (x >= 316 && x < 1214 && y >= 322 && y < 582) {
+            int index = (y - 322) / 65;
+            if (index < settings_row_count() && (y - 322) % 65 < 57) {
+                g_settings_focus = 1; g_setSel = index; input_settings(JOY_A);
             }
         }
         return;
@@ -4204,8 +4570,15 @@ int main(int argc, char **argv) {
         pump_favs();
         pump_history();
         pump_settings_status();
+        pump_avatar_fetch();
         pump_landing();
         pump_catalog_fetch();
+        if (!g_avatar_attempted && g_avatar_due && SDL_GetTicks() >= g_avatar_due &&
+            g_screen == SC_MAIN && g_land) {
+            g_avatar_attempted = 1;
+            const char *avatar = jstr(profile_by_id(g_profile_id), "avatar");
+            if (avatar && !strncmp(avatar, "char:", 5)) start_avatar_fetch();
+        }
         update_download_awake();
         // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.
         // Assim nenhuma textura usada neste frame e destruida antes do Present.
@@ -4223,6 +4596,7 @@ int main(int argc, char **argv) {
         else if (g_screen == SC_LOADING) draw_catalog_loading();
         else { if (g_tab == TAB_DOWNLOADS) draw_downloads(); else if (g_tab == TAB_SAGAS) draw_sagas(); else draw_landing(); }
 
+        draw_profile_menu();
         if (g_toast[0] && SDL_GetTicks() < g_toast_until) {
             int w = 0, h = 0;
             SDL_Texture *tx = text_cached(gRen, g_toast, C_TEXT, 0, &w, &h);
@@ -4252,6 +4626,9 @@ int main(int argc, char **argv) {
     if (g_history_pending) { cJSON_Delete(g_history_pending); g_history_pending = NULL; }
     if (g_watchlater_pending) { cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL; }
     if (g_settings_thread) { SDL_WaitThread(g_settings_thread, NULL); g_settings_thread = NULL; }
+    if (g_avatar_thread) { SDL_WaitThread(g_avatar_thread, NULL); g_avatar_thread = NULL; }
+    if (g_avatar_pending) { cJSON_Delete(g_avatar_pending); g_avatar_pending = NULL; }
+    if (g_avatar_catalog) { cJSON_Delete(g_avatar_catalog); g_avatar_catalog = NULL; }
     if (g_account_pending) { cJSON_Delete(g_account_pending); g_account_pending = NULL; }
     if (g_settings_accel_pending) { cJSON_Delete(g_settings_accel_pending); g_settings_accel_pending = NULL; }
 
