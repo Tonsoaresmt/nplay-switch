@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nplay TV Probe</title>
+<!--
+  Sonda de compatibilidade para TVs antigas (Tizen, webOS, Android TV WebView).
+  Escrita em ES5 puro, sem let/const/arrow/template, para rodar em motores
+  Chromium 38+ e WebKit antigos. Hospede este arquivo no MESMO dominio do site
+  Nplay (ex.: public/tv-probe.html) e abra no navegador da TV.
+
+  Parametros opcionais na URL:
+    ?src=URL        testa uma URL HLS/MP4 especifica
+    ?item=ID        pede /api/stream/ID ao backend (mesmo dominio) e testa a fonte real
+    ?type=m3u8      forca HLS quando ?src= e um /api/play/ sem extensao
+    ?hlsjs=URL      usa o mesmo hls.js do site (ex.: /js/hls.min.js)
+    &auto=1         inicia o teste sozinho (util quando digitar no controle e dificil)
+  Nenhum token ou URL assinada e exibido: queries sao removidas antes do log.
+-->
+<style>
+  body { background: #0b0d14; color: #eaf0fa; font-family: Arial, Helvetica, sans-serif; font-size: 20px; margin: 20px 28px; }
+  h1 { font-size: 30px; margin: 0 0 6px 0; color: #8b5cf6; }
+  h2 { font-size: 22px; margin: 18px 0 6px 0; color: #3b82f6; }
+  .muted { color: #aab2c4; }
+  .ok { color: #34d399; }
+  .bad { color: #f43f5e; }
+  .warn { color: #fbbf24; }
+  .btn { display: inline-block; padding: 12px 18px; margin: 4px 6px 4px 0; background: #181d2b; border: 3px solid #2c3347; color: #eaf0fa; font-size: 20px; cursor: pointer; }
+  .btn:focus, .btn.focus { border-color: #8b5cf6; background: #2a2346; outline: none; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 3px 8px; border-bottom: 1px solid #1d2233; vertical-align: top; }
+  td.k { width: 38%; color: #aab2c4; }
+  #verdict { font-size: 26px; padding: 12px 16px; background: #141827; border-left: 6px solid #8b5cf6; margin: 10px 0; }
+  #stage video { width: 426px; height: 240px; background: #000; margin: 6px 12px 6px 0; }
+  #live { font-family: "Courier New", monospace; font-size: 18px; white-space: pre; background: #0f1320; padding: 8px; }
+  #log { font-family: "Courier New", monospace; font-size: 16px; white-space: pre-wrap; background: #0f1320; padding: 8px; max-height: 360px; overflow: hidden; }
+  .col { display: inline-block; vertical-align: top; width: 48%; margin-right: 1%; }
+</style>
+</head>
+<body>
+<h1>Nplay TV Probe</h1>
+<div class="muted">Setas escolhem, OK executa, Voltar para o teste. Fotografe o veredito, a tabela e o registro.</div>
+
+<div id="verdict">Pronto. Escolha um teste abaixo.</div>
+
+<div id="buttons">
+  <span class="btn" tabindex="0" data-action="item">Fonte Nplay (?item=)</span>
+  <span class="btn" tabindex="0" data-action="src">URL (?src=)</span>
+  <span class="btn" tabindex="0" data-action="ts">HLS TS (legado)</span>
+  <span class="btn" tabindex="0" data-action="fmp4">HLS fMP4 + audio separado</span>
+  <span class="btn" tabindex="0" data-action="mp4">MP4 progressivo</span>
+  <span class="btn" tabindex="0" data-action="mode">Modo: auto</span>
+  <span class="btn" tabindex="0" data-action="dual">Dois videos: nao</span>
+  <span class="btn" tabindex="0" data-action="stop">Parar</span>
+</div>
+
+<div id="stage"></div>
+<div id="live">Sem reproducao ativa.</div>
+
+<div class="col">
+  <h2>Capacidades</h2>
+  <table id="caps"></table>
+</div>
+<div class="col">
+  <h2>Registro</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var PRESETS = {
+    ts: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+    fmp4: 'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8',
+    mp4: 'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+  };
+  var HLSJS_DEFAULT = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js';
+  var HLSJS_LEGACY = 'https://cdn.jsdelivr.net/npm/hls.js@0.14.17/dist/hls.min.js';
+
+  var logLines = [];
+  var players = [];
+  var sampler = null;
+  var mode = 'auto';        // auto | native | hlsjs
+  var dual = false;
+  var session = null;       // { item: id } quando a fonte veio de /api/stream
+  var jank = { last: now(), max: 0, windowMax: 0, frames: 0, fps: 0, fpsAt: now() };
+
+  function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function safeUrl(u) {
+    // Nunca exibir token/assinatura: mantem apenas origem + caminho.
+    var s = String(u || '');
+    var q = s.indexOf('?');
+    return q >= 0 ? s.substring(0, q) + '?…' : s;
+  }
+  function param(name) {
+    var m = new RegExp('[?&]' + name + '=([^&#]*)').exec(location.search);
+    if (!m) return '';
+    try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { return m[1]; }
+  }
+  function stamp() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  function log(msg, level) {
+    logLines.push({ t: stamp(), m: msg, l: level || '' });
+    if (logLines.length > 40) logLines.shift();
+    var html = '';
+    for (var i = logLines.length - 1; i >= 0; i--) {
+      var e = logLines[i];
+      html += '<span class="' + e.l + '">' + e.t + ' ' + esc(e.m) + '</span>\n';
+    }
+    $('log').innerHTML = html;
+  }
+  function verdict(text, level) {
+    var v = $('verdict');
+    v.className = level || '';
+    v.innerHTML = esc(text);
+  }
+
+  window.onerror = function (msg, src, line, col) {
+    log('ERRO JS: ' + msg + ' @' + safeUrl(src) + ':' + line + ':' + (col || '?'), 'bad');
+  };
+  window.addEventListener('unhandledrejection', function (ev) {
+    var r = ev && ev.reason;
+    log('PROMISE REJEITADA: ' + (r && r.message ? r.message : String(r)), 'bad');
+  });
+
+  // ------------------------------------------------------------ capacidades
+  var capRows = [];
+  function cap(name, value, level) { capRows.push([name, value, level || '']); }
+  function has(fn) { try { return !!fn(); } catch (e) { return false; } }
+  function syntax(code) { try { new Function(code); return true; } catch (e) { return false; } }
+  function yes(v) { return v ? 'sim' : 'NAO'; }
+
+  function detectPlatform() {
+    var ua = navigator.userAgent;
+    if (/Tizen/i.test(ua)) return 'Samsung Tizen';
+    if (/Web0S|webOS/i.test(ua)) return 'LG webOS';
+    if (/Android/i.test(ua)) return 'Android / Android TV';
+    if (/NetCast/i.test(ua)) return 'LG NetCast';
+    if (/Maple|SMART-TV/i.test(ua)) return 'Samsung (Orsay)';
+    if (/HbbTV|Opera TV|VIDAA|Hisense|Roku|AFT/i.test(ua)) return 'Outra TV';
+    return 'Desconhecida';
+  }
+
+  function collectCaps() {
+    var ua = navigator.userAgent;
+    var chrome = /Chrom(?:e|ium)\/(\d+)/.exec(ua);
+    var chromeVersion = chrome ? parseInt(chrome[1], 10) : 0;
+    cap('Plataforma', detectPlatform());
+    cap('Chromium', chromeVersion || 'nao identificado', chromeVersion && chromeVersion < 56 ? 'warn' : '');
+    cap('User-Agent', ua);
+    cap('Tela / janela', screen.width + 'x' + screen.height + '  |  ' + window.innerWidth + 'x' + window.innerHeight +
+        '  dpr ' + (window.devicePixelRatio || 1));
+
+    // Sintaxe moderna: se o bundle do player nao for transpilado, estas quebram.
+    cap('Sintaxe ES2015 (let, =>, `...`)', yes(syntax('let a = () => 1; return `x${a()}`;')), syntax('let a=()=>1') ? 'ok' : 'bad');
+    cap('async/await', yes(syntax('return (async function(){ await 1; })')), syntax('return (async function(){await 1})') ? 'ok' : 'bad');
+    cap('Optional chaining ?. / ??', yes(syntax('var o={}; return o?.a ?? 1;')), syntax('var o={};return o?.a??1') ? 'ok' : 'bad');
+
+    // APIs que costumam quebrar a transicao para o player em TVs antigas.
+    var apis = [
+      ['Promise', function () { return window.Promise; }],
+      ['Promise.prototype.finally', function () { return window.Promise && Promise.prototype['finally']; }],
+      ['fetch', function () { return window.fetch; }],
+      ['AbortController', function () { return window.AbortController; }],
+      ['AbortSignal.timeout', function () { return window.AbortSignal && AbortSignal.timeout; }],
+      ['Array.prototype.includes', function () { return Array.prototype.includes; }],
+      ['Array.prototype.at', function () { return Array.prototype.at; }],
+      ['String.prototype.replaceAll', function () { return String.prototype.replaceAll; }],
+      ['Object.entries', function () { return Object.entries; }],
+      ['structuredClone', function () { return window.structuredClone; }],
+      ['URLSearchParams', function () { return window.URLSearchParams; }],
+      ['IntersectionObserver', function () { return window.IntersectionObserver; }],
+      ['ResizeObserver', function () { return window.ResizeObserver; }],
+      ['requestIdleCallback', function () { return window.requestIdleCallback; }],
+      ['Element.closest', function () { return Element.prototype.closest; }],
+      ['Web Worker', function () { return window.Worker; }]
+    ];
+    for (var i = 0; i < apis.length; i++) {
+      var ok = has(apis[i][1]);
+      cap(apis[i][0], yes(ok), ok ? 'ok' : 'warn');
+    }
+    var css = window.CSS && CSS.supports;
+    cap('CSS backdrop-filter', yes(css && (CSS.supports('backdrop-filter', 'blur(2px)') || CSS.supports('-webkit-backdrop-filter', 'blur(2px)'))));
+    cap('CSS variaveis', yes(css && CSS.supports('--a', '0')));
+    cap('CSS grid', yes(css && CSS.supports('display', 'grid')));
+
+    // Midia
+    var v = document.createElement('video');
+    var playReturn;
+    try { playReturn = v.play(); } catch (e) { playReturn = 'throw'; }
+    var playPromise = playReturn && typeof playReturn.then === 'function';
+    if (playPromise) playReturn['catch'](function () {});
+    cap('video.play() devolve Promise', yes(playPromise), playPromise ? 'ok' : 'bad');
+    var fs = v.requestFullscreen ? 'requestFullscreen' : v.webkitRequestFullscreen ? 'webkitRequestFullscreen' :
+             v.webkitRequestFullScreen ? 'webkitRequestFullScreen' : 'nenhum';
+    cap('Fullscreen', fs, fs === 'requestFullscreen' ? 'ok' : 'warn');
+    cap('Contador de quadros', v.getVideoPlaybackQuality ? 'getVideoPlaybackQuality' :
+        ('webkitDecodedFrameCount' in v ? 'webkitDecodedFrameCount' : 'indisponivel'));
+
+    var types = [
+      ['HLS nativo (vnd.apple.mpegurl)', 'application/vnd.apple.mpegurl'],
+      ['HLS nativo (x-mpegURL)', 'application/x-mpegURL'],
+      ['MPEG-TS', 'video/mp2t'],
+      ['MP4 H.264 Main + AAC', 'video/mp4; codecs="avc1.4D401F, mp4a.40.2"'],
+      ['MP4 H.264 High 4.0', 'video/mp4; codecs="avc1.640028"'],
+      ['MP4 H.264 High 4.2', 'video/mp4; codecs="avc1.64002A"'],
+      ['MP4 H.264 High 5.1', 'video/mp4; codecs="avc1.640033"'],
+      ['MP4 HEVC', 'video/mp4; codecs="hvc1.1.6.L120.90"']
+    ];
+    for (var t = 0; t < types.length; t++) {
+      var r = '';
+      try { r = v.canPlayType(types[t][1]); } catch (e2) { r = 'erro'; }
+      cap('canPlayType ' + types[t][0], r || '(vazio)', r ? '' : 'warn');
+    }
+    var MS = window.MediaSource || window.WebKitMediaSource;
+    cap('MediaSource (MSE, usado pelo hls.js)', yes(MS), MS ? 'ok' : 'bad');
+    if (MS && MS.isTypeSupported) {
+      var mse = [
+        ['H.264 Baseline 3.0', 'video/mp4; codecs="avc1.42E01E"'],
+        ['H.264 Main 3.1', 'video/mp4; codecs="avc1.4D401F"'],
+        ['H.264 High 4.0 (1080p30)', 'video/mp4; codecs="avc1.640028"'],
+        ['H.264 High 4.2 (1080p60)', 'video/mp4; codecs="avc1.64002A"'],
+        ['H.264 High 5.1', 'video/mp4; codecs="avc1.640033"'],
+        ['HEVC', 'video/mp4; codecs="hvc1.1.6.L120.90"'],
+        ['AAC-LC', 'audio/mp4; codecs="mp4a.40.2"'],
+        ['HE-AAC', 'audio/mp4; codecs="mp4a.40.5"'],
+        ['AC-3 / E-AC-3', 'audio/mp4; codecs="ec-3"'],
+        ['MPEG-TS (transmux)', 'video/mp2t; codecs="avc1.42E01E,mp4a.40.2"']
+      ];
+      for (var m = 0; m < mse.length; m++) {
+        var s = false;
+        try { s = MS.isTypeSupported(mse[m][1]); } catch (e3) { s = false; }
+        cap('MSE ' + mse[m][0], yes(s), s ? 'ok' : 'warn');
+      }
+    }
+    renderCaps();
+  }
+
+  function renderCaps() {
+    var html = '';
+    for (var i = 0; i < capRows.length; i++) {
+      html += '<tr><td class="k">' + esc(capRows[i][0]) + '</td><td class="' + capRows[i][2] + '">' +
+              esc(capRows[i][1]) + '</td></tr>';
+    }
+    $('caps').innerHTML = html;
+  }
+
+  // ------------------------------------------------------------ medidor de travamento da UI
+  // Se a pagina parar de repintar enquanto o audio toca, estes numeros congelam
+  // na tela: e exatamente o sintoma "audio toca, imagem parada".
+  function tick() {
+    var t = now();
+    var gap = t - jank.last - 100;
+    jank.last = t;
+    if (gap > jank.max) jank.max = gap;
+    if (gap > jank.windowMax) jank.windowMax = gap;
+  }
+  setInterval(tick, 100);
+  var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame;
+  function frame() {
+    jank.frames++;
+    var t = now();
+    if (t - jank.fpsAt >= 1000) {
+      jank.fps = Math.round(jank.frames * 1000 / (t - jank.fpsAt));
+      jank.frames = 0;
+      jank.fpsAt = t;
+    }
+    if (raf) raf(frame);
+  }
+  if (raf) raf(frame);
+
+  // ------------------------------------------------------------ reproducao
+  function videoFrames(video) {
+    try {
+      if (video.getVideoPlaybackQuality) {
+        var q = video.getVideoPlaybackQuality();
+        return { decoded: q.totalVideoFrames, dropped: q.droppedVideoFrames };
+      }
+      if ('webkitDecodedFrameCount' in video)
+        return { decoded: video.webkitDecodedFrameCount, dropped: video.webkitDroppedFrameCount };
+    } catch (e) {}
+    return null;
+  }
+
+  var MEDIA_ERR = { 1: 'ABORTADO', 2: 'REDE', 3: 'DECODIFICACAO', 4: 'FORMATO NAO SUPORTADO' };
+  var EVENTS = ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'waiting',
+                'stalled', 'pause', 'ended', 'resize', 'error', 'emptied'];
+
+  function attachEvents(p) {
+    for (var i = 0; i < EVENTS.length; i++) {
+      (function (name) {
+        p.video.addEventListener(name, function () {
+          var v = p.video;
+          if (name === 'error') {
+            var err = v.error;
+            log('#' + p.n + ' ERRO DE MIDIA ' + (err ? err.code + ' ' + (MEDIA_ERR[err.code] || '') +
+                (err.message ? ' ' + err.message : '') : ''), 'bad');
+            return;
+          }
+          if (name === 'playing' && !p.playingAt) p.playingAt = now();
+          log('#' + p.n + ' ' + name + '  t=' + v.currentTime.toFixed(1) + ' rs=' + v.readyState +
+              ' ' + v.videoWidth + 'x' + v.videoHeight,
+              name === 'waiting' || name === 'stalled' ? 'warn' : '');
+        });
+      })(EVENTS[i]);
+    }
+  }
+
+  function tryPlay(p) {
+    var r;
+    try { r = p.video.play(); } catch (e) { log('#' + p.n + ' play() lancou: ' + e.message, 'bad'); return; }
+    if (r && typeof r.then === 'function') {
+      r['catch'](function (e) { log('#' + p.n + ' play() rejeitado: ' + (e && e.name) + ' ' + (e && e.message), 'warn'); });
+    } else {
+      log('#' + p.n + ' play() nao devolve Promise (codigo com .then/.catch quebraria aqui)', 'warn');
+    }
+  }
+
+  function loadScript(url, done) {
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function () { done(null); };
+    s.onerror = function () { done(new Error('falha ao carregar ' + safeUrl(url))); };
+    document.head.appendChild(s);
+  }
+
+  function isHls(url) {
+    // /api/play/:id serve HLS e MP4; o container informado pela API decide.
+    if (session && session.container) return session.container === 'm3u8';
+    if (param('type')) return param('type') === 'm3u8';
+    return /\.m3u8(\?|$)/i.test(url) || /\/api\/hls/i.test(url);
+  }
+
+  function wantHlsJs(url) {
+    if (!isHls(url)) return false;
+    if (mode === 'hlsjs') return true;
+    if (mode === 'native') return false;
+    var v = document.createElement('video');
+    var native = v.canPlayType('application/vnd.apple.mpegurl') || v.canPlayType('application/x-mpegURL');
+    return !native;
+  }
+
+  function createPlayer(n, url, useHls) {
+    var p = { n: n, video: document.createElement('video'), hls: null, startedAt: now(), playingAt: 0,
+              lastTime: 0, advanceSince: 0 };
+    p.video.setAttribute('playsinline', '');
+    p.video.controls = false;
+    p.video.muted = n > 1; // o segundo player so testa o decodificador de video
+    $('stage').appendChild(p.video);
+    attachEvents(p);
+    if (useHls) {
+      var hls = new window.Hls({ enableWorker: true, debug: false });
+      p.hls = hls;
+      hls.on(window.Hls.Events.MANIFEST_PARSED, function (ev, data) {
+        var levels = (data && data.levels) || [];
+        for (var i = 0; i < levels.length; i++) {
+          var l = levels[i];
+          log('#' + n + ' nivel ' + i + ': ' + (l.width || '?') + 'x' + (l.height || '?') + ' ' +
+              Math.round((l.bitrate || 0) / 1000) + 'kbps codecs=' + (l.videoCodec || l.codecs || '(nao informado)') +
+              (l.audioCodec ? '/' + l.audioCodec : ''));
+        }
+        tryPlay(p);
+      });
+      hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, function (ev, data) {
+        log('#' + n + ' faixas de audio: ' + ((data && data.audioTracks) ? data.audioTracks.length : 0));
+      });
+      hls.on(window.Hls.Events.ERROR, function (ev, data) {
+        var code = data && data.response && data.response.code;
+        log('#' + n + ' hls.js ' + (data.fatal ? 'FATAL ' : '') + data.type + ' / ' + data.details +
+            (code ? ' HTTP ' + code : '') + (data.url ? ' ' + safeUrl(data.url) : ''), data.fatal ? 'bad' : 'warn');
+      });
+      hls.loadSource(url);
+      hls.attachMedia(p.video);
+    } else {
+      p.video.src = url;
+      tryPlay(p);
+    }
+    players.push(p);
+    return p;
+  }
+
+  function sample() {
+    var lines = [];
+    var t = now();
+    lines.push('UI: ' + (raf ? jank.fps + ' fps' : 'rAF indisponivel') + '  |  maior travamento ' +
+               Math.round(jank.windowMax) + ' ms (total ' + Math.round(jank.max) + ' ms)');
+    jank.windowMax = 0;
+    var summary = null;
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i], v = p.video;
+      var f = videoFrames(v);
+      if (v.currentTime > p.lastTime + 0.2) {
+        if (!p.advanceSince) p.advanceSince = t;
+      }
+      p.lastTime = v.currentTime;
+      var buffered = '';
+      try { if (v.buffered.length) buffered = v.buffered.end(v.buffered.length - 1).toFixed(1); } catch (e) {}
+      lines.push('#' + p.n + ' t=' + v.currentTime.toFixed(1) + 's  rs=' + v.readyState + ' ns=' + v.networkState +
+                 '  ' + v.videoWidth + 'x' + v.videoHeight +
+                 (f ? '  quadros=' + f.decoded + ' descartados=' + f.dropped : '  quadros=?') +
+                 '  buffer ate ' + (buffered || '-') + 's' + (v.paused ? '  PAUSADO' : ''));
+      if (!summary) summary = { p: p, f: f };
+      judge(p, f, t);
+    }
+    $('live').innerHTML = esc(lines.join('\n'));
+  }
+
+  function judge(p, f, t) {
+    var v = p.video;
+    if (p.judged) return;
+    if (v.error) {
+      p.judged = true;
+      verdict('#' + p.n + ' FALHOU: erro de midia ' + v.error.code + ' (' + (MEDIA_ERR[v.error.code] || '?') +
+              '). ' + (v.error.code === 3 || v.error.code === 4 ?
+              'A TV nao aceita este formato/perfil de video.' : 'Ver registro para HTTP/rede.'), 'bad');
+      return;
+    }
+    var advancing = p.advanceSince && v.currentTime > 3;
+    if (!advancing) {
+      if (t - p.startedAt > 25000) {
+        p.judged = true;
+        verdict('#' + p.n + ' NAO INICIOU em 25 s (rs=' + v.readyState + '). Ver HTTP/erros no registro.', 'bad');
+      }
+      return;
+    }
+    // O tempo avanca (o audio esta tocando). Agora: ha quadros de video?
+    var noFrames = f ? f.decoded === 0 : false;
+    if (v.videoWidth === 0 || noFrames) {
+      p.judged = true;
+      verdict('#' + p.n + ' AUDIO SEM VIDEO: o tempo avanca mas a TV nao decodifica quadros (' +
+              v.videoWidth + 'x' + v.videoHeight + (f ? ', quadros ' + f.decoded : '') +
+              '). Causa no FORMATO do video ou decodificador ocupado.', 'bad');
+      return;
+    }
+    if (f && f.decoded > 30) {
+      p.judged = true;
+      var drop = f.dropped / Math.max(1, f.decoded);
+      verdict('#' + p.n + ' VIDEO OK nesta TV (' + v.videoWidth + 'x' + v.videoHeight + ', ' + f.decoded +
+              ' quadros, ' + Math.round(drop * 100) + '% descartados). Se no app a imagem nao aparece, a causa e o ' +
+              'codigo/tela do app, nao o formato.', drop > 0.2 ? 'warn' : 'ok');
+    } else if (!f && t - p.advanceSince > 6000) {
+      p.judged = true;
+      verdict('#' + p.n + ' Tempo avanca e ha dimensao ' + v.videoWidth + 'x' + v.videoHeight +
+              '. A TV nao expoe contador de quadros: confira a imagem acima a olho.', 'warn');
+    }
+  }
+
+  function stopPlayers() {
+    if (sampler) { clearInterval(sampler); sampler = null; }
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      try { if (p.hls) p.hls.destroy(); } catch (e) {}
+      try { p.video.pause(); p.video.removeAttribute('src'); p.video.load(); } catch (e2) {}
+      if (p.video.parentNode) p.video.parentNode.removeChild(p.video);
+    }
+    players = [];
+    $('live').innerHTML = 'Sem reproducao ativa.';
+  }
+
+  function stopTest() {
+    stopPlayers();
+    stopSession();
+  }
+
+  // Nao encerra a sessao: testItem cria a sessao e so depois inicia o teste.
+  function startTest(url, label) {
+    stopPlayers();
+    if (!url) { verdict('Nenhuma URL para testar. Use ?src= ou ?item= na barra de endereco.', 'warn'); return; }
+    var useHls = wantHlsJs(url);
+    log('Teste: ' + label + ' | ' + (useHls ? 'hls.js (MSE)' : 'player nativo') + ' | ' + safeUrl(url));
+    verdict('Testando ' + label + '... aguarde ate 25 s.');
+    function go() {
+      createPlayer(1, url, useHls);
+      if (dual) createPlayer(2, url, useHls);
+      sampler = setInterval(sample, 1000);
+    }
+    if (useHls && !window.Hls) {
+      var src = param('hlsjs') || HLSJS_DEFAULT;
+      loadScript(src, function (err) {
+        if (err || !window.Hls) {
+          log('hls.js indisponivel (' + (err ? err.message : 'sem Hls') + '); tentando versao legada 0.14', 'warn');
+          loadScript(HLSJS_LEGACY, function (err2) {
+            if (err2 || !window.Hls) { verdict('Nao consegui carregar hls.js nesta TV.', 'bad'); return; }
+            if (!window.Hls.isSupported()) { verdict('hls.js carregou mas diz que MSE nao e suportado aqui.', 'bad'); return; }
+            go();
+          });
+          return;
+        }
+        if (!window.Hls.isSupported()) { verdict('hls.js carregou mas diz que MSE nao e suportado aqui.', 'bad'); return; }
+        go();
+      });
+    } else go();
+  }
+
+  // ------------------------------------------------------------ fonte real do Nplay
+  function findToken() {
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!/token|jwt|auth/i.test(k)) continue;
+        var v = localStorage.getItem(k);
+        if (!v || v.length < 20) continue;
+        try {
+          var o = JSON.parse(v);
+          if (o && typeof o === 'object') v = o.token || o.access_token || o.accessToken || '';
+          else if (typeof o === 'string') v = o;
+        } catch (e) {}
+        if (v && String(v).length >= 20) return { key: k, value: String(v) };
+      }
+    } catch (e2) {}
+    return null;
+  }
+
+  function request(method, path, body, done) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, path, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    var token = findToken();
+    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token.value);
+    xhr.timeout = 20000;
+    var started = now();
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      var json = null;
+      try { json = JSON.parse(xhr.responseText); } catch (e) {}
+      done(xhr.status, json, Math.round(now() - started));
+    };
+    xhr.ontimeout = function () { done(0, null, Math.round(now() - started)); };
+    xhr.send(body ? JSON.stringify(body) : null);
+  }
+
+  function stopSession() {
+    if (!session) return;
+    var item = session.item;
+    session = null;
+    request('POST', '/api/stream/' + item + '/stop', {}, function (status) {
+      log('POST /api/stream/' + item + '/stop -> HTTP ' + status);
+    });
+  }
+
+  function testItem() {
+    var item = parseInt(param('item'), 10);
+    if (!item) { verdict('Abra esta pagina com ?item=ID do filme/episodio (mesmo dominio do Nplay).', 'warn'); return; }
+    stopTest();
+    var token = findToken();
+    log('Token: ' + (token ? 'encontrado na chave "' + token.key + '"' : 'nao encontrado; usando so cookies'),
+        token ? '' : 'warn');
+    verdict('Pedindo a fonte do item ' + item + '...');
+    request('POST', '/api/stream/' + item, {}, function (status, json, ms) {
+      var message = json && (json.error || json.message);
+      log('POST /api/stream/' + item + ' -> HTTP ' + status + ' em ' + ms + ' ms' + (message ? ' "' + message + '"' : ''),
+          status === 200 ? '' : 'bad');
+      if (status !== 200 || !json) {
+        verdict('Backend recusou a fonte: HTTP ' + status + (message ? ' - ' + message : '') + '. Ver matriz de erros.', 'bad');
+        return;
+      }
+      log('fonte: container=' + json.container + ' delivery=' + json.delivery + ' source=' + json.source_id +
+          ' session=' + json.session_id + (json.quality ? ' qualidade=' + json.quality : ''));
+      if (json.container === 'embed' || json.container === 'torrent') {
+        verdict('A fonte escolhida e "' + json.container + '": nao e um video direto. Uma TV antiga nao toca ' +
+                'isso como <video>; o app precisa tratar este caso.', 'warn');
+        session = { item: item, container: json.container };
+        return;
+      }
+      var url = json.play_url || '';
+      if (url && url.charAt(0) === '/') url = location.protocol + '//' + location.host + url;
+      session = { item: item, container: json.container };
+      startTest(url, 'Nplay item ' + item + ' (' + json.container + ')');
+    });
+  }
+
+  // ------------------------------------------------------------ controle remoto
+  var buttons = document.querySelectorAll ? document.querySelectorAll('.btn') : [];
+  var focusIndex = 0;
+  function focusButton(i) {
+    if (!buttons.length) return;
+    focusIndex = (i + buttons.length) % buttons.length;
+    for (var k = 0; k < buttons.length; k++) buttons[k].className = 'btn';
+    buttons[focusIndex].className = 'btn focus';
+    try { buttons[focusIndex].focus(); } catch (e) {}
+  }
+  function activate(el) {
+    var action = el.getAttribute('data-action');
+    if (action === 'item') testItem();
+    else if (action === 'src') { stopTest(); startTest(param('src'), 'URL informada'); }
+    else if (action === 'ts') { stopTest(); startTest(PRESETS.ts, 'HLS com segmentos TS'); }
+    else if (action === 'fmp4') { stopTest(); startTest(PRESETS.fmp4, 'HLS fMP4 com audio separado'); }
+    else if (action === 'mp4') { stopTest(); startTest(PRESETS.mp4, 'MP4 progressivo'); }
+    else if (action === 'mode') {
+      mode = mode === 'auto' ? 'native' : mode === 'native' ? 'hlsjs' : 'auto';
+      el.innerHTML = 'Modo: ' + mode;
+    } else if (action === 'dual') {
+      dual = !dual;
+      el.innerHTML = 'Dois videos: ' + (dual ? 'sim' : 'nao');
+    } else if (action === 'stop') { stopTest(); verdict('Parado.'); }
+  }
+  for (var b = 0; b < buttons.length; b++) {
+    (function (index) {
+      buttons[index].addEventListener('click', function () { focusButton(index); activate(buttons[index]); });
+    })(b);
+  }
+  document.addEventListener('keydown', function (ev) {
+    var k = ev.keyCode;
+    if (k === 37 || k === 38) { focusButton(focusIndex - 1); ev.preventDefault(); }
+    else if (k === 39 || k === 40) { focusButton(focusIndex + 1); ev.preventDefault(); }
+    else if (k === 13) { activate(buttons[focusIndex]); ev.preventDefault(); }
+    else if (k === 10009 || k === 461 || k === 8 || k === 27) { stopTest(); verdict('Parado.'); ev.preventDefault(); }
+  });
+  window.addEventListener('beforeunload', stopSession);
+
+  collectCaps();
+  focusButton(0);
+  log('Sonda pronta. ' + detectPlatform());
+  if (param('auto') === '1') {
+    if (param('item')) testItem();
+    else if (param('src')) startTest(param('src'), 'URL informada');
+  }
+})();
+</script>
+</body>
+</html>

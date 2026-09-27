@@ -966,3 +966,21 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   pelo diagnostico, ambos na thread do player.
 - Nenhum codigo foi alterado nesta rodada. Seguir a ordem da secao "Ordem sugerida
   de correcao" do documento.
+
+## TV antiga: audio sem video em 27/09/2026
+
+- Relato: em TVs antigas, Assistir toca o audio mas a tela fica parada no detalhe
+  do filme. Analise e matriz completa de rotas/erros (TV e Switch) em
+  `docs/TV_AUDIO_SEM_VIDEO_E_MATRIZ_DE_ERROS.md`. O codigo da TV (`C:/iptv`) nao
+  estava acessivel; nada dele foi lido.
+- Conclusao da analise: audio tocando prova que stream/play/master/audio estao OK.
+  Continuar vendo o detalhe (e nao a tela preta do player) indica que a camada web
+  nao repintou depois do Play: excecao JS apos `video.play()` em motor antigo,
+  pagina travada, ou video por baixo do detalhe. O formato R2 (fMP4 CMAF, audio
+  separado, master sem `CODECS`, 1080p) agrava em TVs antigas.
+- Sintoma nao se aplica ao NRO atual: o Switch sempre desenha PREPARANDO antes.
+- `tools/tv_probe.html` e uma sonda ES5 para hospedar no mesmo dominio do site e
+  abrir na TV (`?item=ID&auto=1`). Distingue formato x app, testa TS x fMP4,
+  dois decodificadores, APIs ausentes e travamento da UI. Validada no Chromium com
+  backend simulado; hls.js nao foi exercitado (CDN bloqueado aqui). Proximo passo:
+  rodar nas TVs que falharam e fotografar veredito, capacidades e registro.
