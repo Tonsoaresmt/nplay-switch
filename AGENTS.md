@@ -949,3 +949,20 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   release. Ele contem `/releases/latest`, download `.nro` e busca dos caminhos
   Nplay/Meruem. A versao instalada pelo usuario ainda precisa ser identificada
   e a atualizacao confirmada no console; o build local nao prova essa etapa.
+
+## Revisao de fluxos e rotas em 27/09/2026
+
+- Revisao estatica completa do cliente em `docs/REVISAO_FLUXOS_E_ROTAS_0_11.md`:
+  inventario de todas as rotas `/api/*` usadas, thread e timeout de cada uma,
+  mapa de telas e achados priorizados. TV web e backend (`C:/iptv`) nao estavam
+  acessiveis nesta sessao; itens dependentes do servidor estao marcados.
+- Bugs confirmados por leitura: voltar da busca/config para MAIN apos o player ou
+  apos mudar `hideAdult` deixa a landing em "Carregando" para sempre (falta
+  recarregar ao entrar em SC_MAIN); `retry_count` do supervisor nunca zera, entao
+  a 2a queda de rede num filme longo ja chama `/fail`; download-batch anuncia
+  sucesso sem checar HTTP; preferencias da conta so carregam ao abrir Config.
+- Suspeitas de desempenho a medir antes de alterar buffers: um handshake TLS novo
+  por recurso HLS (handles isolados) e varias escritas na microSD por segmento
+  pelo diagnostico, ambos na thread do player.
+- Nenhum codigo foi alterado nesta rodada. Seguir a ordem da secao "Ordem sugerida
+  de correcao" do documento.
