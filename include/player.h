@@ -43,6 +43,9 @@ typedef struct {
     int episode;
 
     double start_sec;
+    // Preferencia da conta e continuidade entre episodios. audio_hint e 1-based.
+    int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
+    int audio_hint;
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;
@@ -58,6 +61,7 @@ typedef struct {
     int presented_frame;
     PlayerState final_state;
     int recovery_count;
+    int audio_index; // faixa ativa ao sair (1-based; 0 = sem audio)
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);

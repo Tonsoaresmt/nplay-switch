@@ -227,6 +227,24 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 3. Nao considere a validacao concluida apenas pela compilacao: player, capas e navegacao devem ser testados no Switch quando possivel.
 4. Ao encerrar uma rodada, atualize este arquivo se o estado ou os proximos passos mudarem.
 
+## Rodada 0.12.18 em 28/09/2026
+
+- Integracao foi feita sobre `origin/codex/switch-rebuild` 0.12.17, sem substituir
+  o HUD e as correcoes de estabilidade mais novas pelos arquivos antigos da linha
+  0.11. Apenas as melhorias ainda ausentes do commit `453d1bf` foram portadas.
+- Idiomas de audio/legenda sao normalizados; a preferencia da conta e carregada
+  apos o primeiro catalogo e a faixa ativa e preservada em recuperacoes e entre
+  episodios quando a fonte nao possui tag de idioma.
+- O player descarta faixas HLS nao usadas e, ao trocar audio/legenda, ativa apenas
+  a nova faixa. Audio antigo anterior ao ponto atual e ignorado por ate 5 s.
+- Esperas de sincronismo de video agora ocorrem em fatias de 8 ms e cedem quando
+  existe comando do Joy-Con. O pool de conexoes HLS e limpo ao encerrar o player.
+- ZL/ZR percorre todas as versoes de audio da serie. L/R entre temporadas agrupadas
+  tenta conservar a versao atual e informa quando ela nao estiver disponivel.
+- Versao preparada: 0.12.18. Validar no Switch real filme, episodio de serie,
+  anime e dorama; testar troca de audio/legenda, episodio seguinte e temporada
+  agrupada antes de considerar o comportamento de hardware definitivamente aprovado.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

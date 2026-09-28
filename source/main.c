@@ -378,6 +378,8 @@ static SDL_Thread *g_settings_thread = NULL;
 static SDL_atomic_t g_account_ready, g_settings_done;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
+static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
+static char g_series_keep_lang[32] = "";
 static int g_prefs_sel = 0;
 static int g_settings_section = 0, g_settings_focus = 1;
 static Screen g_settings_return = SC_MAIN;
@@ -418,6 +420,8 @@ static int hot_wait_for_stream(int itemId, int sourceId, const char *title,
                                PlaybackSource *out);
 static void do_search(void);
 static void open_series(int id);
+static void load_settings_status(void);
+static void series_keep_audio_after_switch(void);
 int resolve_and_play(int itemId, const char *title);
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 static void mark_episode_completed_in_detail(int item_id);
@@ -537,6 +541,10 @@ static void landing_apply(int tab, cJSON *land) {
 
     if (!g_land) { snprintf(g_status, sizeof(g_status), "Falha ao carregar %s", TAB_NAME[tab]); g_railSel = 0; return; }
     g_status[0] = '\0';
+    if (!g_account_prefs_loaded) {
+        g_account_prefs_loaded = 1;
+        load_settings_status();
+    }
     if (tab == TAB_SAGAS) {
         int groups = arr_len(cJSON_GetObjectItem(g_land, "sagas"));
         if (g_saga_sel >= groups) g_saga_sel = groups > 0 ? groups - 1 : 0;
@@ -877,6 +885,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.title = stable_title;
     req.url = url;
     req.start_sec = start;
+    req.audio_pref = g_pref_audio;
     req.progress_cb = on_player_progress;
     req.heartbeat_cb = NULL;
     // Sem renew_cb pois nao e uma stream resolvida via API.
@@ -887,6 +896,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     appletSetMediaPlaybackState(true);
     PlayerResult res = {0};
     int run_rc = player_run(gRen, g_joy, &req, &res);
+    g_last_audio_index = res.audio_index;
     appletSetMediaPlaybackState(false);
     playback_memory_leave();
     g_download_awake = 0;
@@ -1069,6 +1079,8 @@ int resolve_and_play(int itemId, const char *title) {
         req.season = src.season;
         req.episode = src.episode;
         req.start_sec = start;
+        req.audio_pref = g_pref_audio;
+        req.audio_hint = g_next_audio_hint;
         if (src.sequential_stream) req.start_sec = 0;
         req.progress_cb = on_player_progress;
         // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
@@ -1085,6 +1097,7 @@ int resolve_and_play(int itemId, const char *title) {
         appletSetMediaPlaybackState(true);
         PlayerResult res = {0};
         int run_rc = player_run(gRen, g_joy, &req, &res);
+        g_last_audio_index = res.audio_index;
         appletSetMediaPlaybackState(false);
         playback_memory_leave();
         g_download_awake = 0;
@@ -1317,6 +1330,10 @@ static void pump_catalog_fetch(void) {
     }
     FetchKind completed_kind = g_fetch_current.kind;
     g_fetch_current.kind = FETCH_NONE;
+    if (completed_kind == FETCH_SERIES) {
+        if (applied) series_keep_audio_after_switch();
+        else g_series_keep_lang[0] = '\0';
+    }
     if (completed_kind == FETCH_SERIES && g_episode_pending.active) {
         int series_id = g_episode_pending.series_id;
         int finished_item_id = g_episode_pending.finished_item_id;
@@ -2299,6 +2316,42 @@ static int ser_group_idx(void) {
     cJSON_ArrayForEach(e, g) { if (jint(e, "id") == sid) { k = i; break; } i++; }
     return k;
 }
+static const char *ser_audio_version_lang(cJSON *version) {
+    const char *lang = jstr(version, "language");
+    return lang && lang[0] ? lang : jstr(version, "label");
+}
+static void series_keep_audio_begin(void) {
+    g_series_keep_lang[0] = '\0';
+    cJSON *version;
+    cJSON_ArrayForEach(version, ser_audio()) {
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(version, "current"))) continue;
+        const char *lang = ser_audio_version_lang(version);
+        if (lang) snprintf(g_series_keep_lang, sizeof(g_series_keep_lang), "%s", lang);
+        break;
+    }
+}
+static void series_keep_audio_after_switch(void) {
+    if (!g_series_keep_lang[0]) return;
+    char wanted[sizeof(g_series_keep_lang)];
+    snprintf(wanted, sizeof(wanted), "%s", g_series_keep_lang);
+    g_series_keep_lang[0] = '\0';
+    cJSON *versions = ser_audio(), *version, *current = NULL;
+    int current_id = jint(ser_obj(), "id");
+    cJSON_ArrayForEach(version, versions)
+        if (cJSON_IsTrue(cJSON_GetObjectItem(version, "current"))) current = version;
+    const char *current_lang = current ? ser_audio_version_lang(current) : NULL;
+    if (current_lang && !strcasecmp(current_lang, wanted)) return;
+    cJSON_ArrayForEach(version, versions) {
+        const char *lang = ser_audio_version_lang(version);
+        int id = jint(version, "id");
+        if (lang && !strcasecmp(lang, wanted) && id > 0 && id != current_id) {
+            open_series(id); return;
+        }
+    }
+    char message[128];
+    snprintf(message, sizeof(message), "Esta temporada nao possui a versao %s", wanted);
+    toast(message);
+}
 static int ser_nseasons(void) { return ser_grouped() ? arr_len(ser_group()) : season_count(); }
 // episodios visiveis: agrupado -> junta as temporadas internas (em geral 1);
 // senao -> a temporada interna selecionada.
@@ -3222,8 +3275,13 @@ static void play_episode_sequence(int item_id, int series_id, const char *title)
     if (item_id <= 0) return;
     char current_title[256];
     snprintf(current_title, sizeof(current_title), "%s", title && title[0] ? title : "Episodio");
+    int audio_hint = 0;
     while (g_running && item_id > 0) {
-        if (resolve_and_play(item_id, current_title) != 1) return;
+        g_next_audio_hint = audio_hint;
+        int play_result = resolve_and_play(item_id, current_title);
+        g_next_audio_hint = 0;
+        if (g_last_audio_index > 0) audio_hint = g_last_audio_index;
+        if (play_result != 1) return;
         char next_title[256] = {0};
         int next_id = choose_next_episode(series_id, item_id, 0, 1,
                                           next_title, sizeof(next_title));
@@ -3239,20 +3297,25 @@ static void input_series(int b) {
     else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
     else if (b == JOY_PLUS) { cJSON *s = ser_obj(); if (s) media_list_prompt_add(jint(s, "id"), 1, jstr(s, "title"), jstr(s, "logo")); }
     else if (b == JOY_Y) { open_dlmenu(); }       // escolher episodios pra baixar
-    else if (b == JOY_ZL || b == JOY_ZR) {        // troca audio (Legendado <-> Dublado)
-        cJSON *au = ser_audio();
-        if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
+    else if (b == JOY_ZL || b == JOY_ZR) {
+        cJSON *versions = ser_audio(); int count = arr_len(versions), current = 0;
+        for (int i = 0; i < count; i++)
+            if (cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(versions, i), "current"))) current = i;
+        if (count > 1) {
+            int next = (current + (b == JOY_ZR ? 1 : count - 1)) % count;
+            open_series(jint(cJSON_GetArrayItem(versions, next), "id"));
+        }
     }
     else if (b == JOY_DLEFT) { if (g_epSel > 0) g_epSel--; }
     else if (b == JOY_DRIGHT) { if (g_epSel < nep - 1) g_epSel++; }
     else if (b == JOY_UP) { if (g_ep_plot_scroll > 0) g_ep_plot_scroll--; }
     else if (b == JOY_DOWN) { if (g_ep_plot_scroll + 4 < g_ep_plot_count) g_ep_plot_scroll++; }
     else if (b == JOY_L) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); } }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_R) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); } }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_A) {

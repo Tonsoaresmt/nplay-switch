@@ -50,6 +50,11 @@ Assert-True ($sources -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnosti
 Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e iniciado para cada reproducao.'
 Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior ao primeiro frame.'
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
+Assert-True ($sources -match 'lang_norm' -and $sources -match 'stream_norm') 'Selecao de idioma voltou a comparar tags inconsistentes diretamente.'
+Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
+Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
+Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
+Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
 
 $diagSource = Get-Content source/diag.c -Raw
 Assert-True ($diagSource -match 'sdmc:/switch/\.nplay-player-trace\.log') 'Trace detalhado do player nao persiste na raiz de switch.'
@@ -69,6 +74,9 @@ Assert-True ($mainSource -match 'cover_suspend_and_release') 'Workers de capa po
 Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes de um crash nao aparece no diagnostico.'
 Assert-True ($mainSource -match 'diag_read_player_page') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
 Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
+Assert-True ($mainSource -match 'req\.audio_pref = g_pref_audio') 'Player nao recebe a preferencia de audio da conta.'
+Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio seguinte nao preserva a faixa de audio anterior.'
+Assert-True ($mainSource -match 'series_keep_audio_after_switch') 'Temporada agrupada nao tenta preservar sua versao de audio.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'

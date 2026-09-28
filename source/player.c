@@ -8,6 +8,7 @@
 #include <switch.h>
 #include <SDL.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <string.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -51,6 +52,7 @@
 #define SEEK_HOLD_MS       550
 
 static char g_player_last_error[160] = "";
+static int g_player_audio_index = 0;
 // Os callbacks HLS de abertura/fechamento rodam dentro de av_read_frame na
 // thread que desenha os quadros. Depois do primeiro quadro, nao grave eventos
 // normais na microSD em toda troca de segmento.
@@ -238,19 +240,61 @@ static void fmt_time(double s, char *out, int cap) {
 }
 
 // idioma de um stream (tag "language"), ex.: "por", "eng", "jpn".
-static const char *stream_lang(AVFormatContext *fmt, int idx) {
-    if (idx < 0) return "?";
-    AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
-    return (e && e->value) ? e->value : "und";
+static const char *lang_norm(const char *value) {
+    static const struct { const char *code, *norm; } codes[] = {
+        { "pt", "pt" }, { "por", "pt" }, { "pob", "pt" }, { "en", "en" }, { "eng", "en" },
+        { "ja", "ja" }, { "jp", "ja" }, { "jpn", "ja" }, { "es", "es" }, { "spa", "es" },
+        { "fr", "fr" }, { "fre", "fr" }, { "fra", "fr" }, { "it", "it" }, { "ita", "it" },
+        { "de", "de" }, { "ger", "de" }, { "deu", "de" }, { "ko", "ko" }, { "kor", "ko" },
+        { "zh", "zh" }, { "chi", "zh" }, { "zho", "zh" }
+    };
+    static const struct { const char *word, *norm; } words[] = {
+        { "portugu", "pt" }, { "brasil", "pt" }, { "brazil", "pt" }, { "dublad", "pt" },
+        { "ingl", "en" }, { "english", "en" }, { "japon", "ja" }, { "japan", "ja" },
+        { "espanh", "es" }, { "spanish", "es" }, { "castel", "es" }, { "latino", "es" },
+        { "franc", "fr" }, { "french", "fr" }, { "italian", "it" }, { "alem", "de" },
+        { "german", "de" }, { "corean", "ko" }, { "korean", "ko" }, { "chin", "zh" }
+    };
+    if (!value || !value[0]) return "";
+    char code[8] = ""; size_t n = 0;
+    while (value[n] && value[n] != '-' && value[n] != '_' && n < sizeof(code) - 1) {
+        code[n] = (char)tolower((unsigned char)value[n]); n++;
+    }
+    code[n] = '\0';
+    if (n >= 2 && n <= 3 && (value[n] == '\0' || value[n] == '-' || value[n] == '_')) {
+        for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
+            if (!strcmp(code, codes[i].code)) return codes[i].norm;
+        return "";
+    }
+    char lower[64]; size_t k = 0;
+    for (; value[k] && k < sizeof(lower) - 1; k++) lower[k] = (char)tolower((unsigned char)value[k]);
+    lower[k] = '\0';
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (strstr(lower, words[i].word)) return words[i].norm;
+    return "";
 }
 
-static const char *lang_label(const char *lang) {
-    if (!lang) return "?";
-    if (!strncasecmp(lang, "por", 3) || !strncasecmp(lang, "pt", 2)) return "PT";
-    if (!strncasecmp(lang, "eng", 3) || !strncasecmp(lang, "en", 2)) return "EN";
-    if (!strncasecmp(lang, "jpn", 3) || !strncasecmp(lang, "ja", 2)) return "JP";
-    if (!strncasecmp(lang, "spa", 3) || !strncasecmp(lang, "es", 2)) return "ES";
-    return lang[0] ? lang : "?";
+static const char *stream_norm(AVFormatContext *fmt, int idx) {
+    if (!fmt || idx < 0 || idx >= (int)fmt->nb_streams) return "";
+    AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
+    const char *norm = lang_norm(e ? e->value : NULL);
+    if (norm[0]) return norm;
+    e = av_dict_get(fmt->streams[idx]->metadata, "title", NULL, 0);
+    return lang_norm(e ? e->value : NULL);
+}
+
+static const char *lang_label(const char *norm) {
+    if (!norm || !norm[0]) return "?";
+    if (!strcmp(norm, "pt")) return "PT";
+    if (!strcmp(norm, "en")) return "EN";
+    if (!strcmp(norm, "ja")) return "JP";
+    if (!strcmp(norm, "es")) return "ES";
+    if (!strcmp(norm, "fr")) return "FR";
+    if (!strcmp(norm, "it")) return "IT";
+    if (!strcmp(norm, "de")) return "DE";
+    if (!strcmp(norm, "ko")) return "KO";
+    if (!strcmp(norm, "zh")) return "ZH";
+    return "?";
 }
 
 static void draw_clipped_text(SDL_Renderer *ren, const char *text, int x, int y,
@@ -261,12 +305,16 @@ static void draw_clipped_text(SDL_Renderer *ren, const char *text, int x, int y,
     SDL_RenderSetClipRect(ren, NULL);
 }
 
-static const char *lang_name(const char *lang) {
-    const char *code = lang_label(lang);
-    if (!strcmp(code, "PT")) return "Portugues";
-    if (!strcmp(code, "EN")) return "Ingles";
-    if (!strcmp(code, "JP")) return "Japones";
-    if (!strcmp(code, "ES")) return "Espanhol";
+static const char *lang_name(const char *norm) {
+    if (!strcmp(norm, "pt")) return "Portugues";
+    if (!strcmp(norm, "en")) return "Ingles";
+    if (!strcmp(norm, "ja")) return "Japones";
+    if (!strcmp(norm, "es")) return "Espanhol";
+    if (!strcmp(norm, "fr")) return "Frances";
+    if (!strcmp(norm, "it")) return "Italiano";
+    if (!strcmp(norm, "de")) return "Alemao";
+    if (!strcmp(norm, "ko")) return "Coreano";
+    if (!strcmp(norm, "zh")) return "Chines";
     return "Desconhecido";
 }
 
@@ -329,7 +377,7 @@ static void draw_track_menu(SDL_Renderer *ren, AVFormatContext *fmt, int menu,
             AVStream *stream = fmt->streams[stream_index];
             AVDictionaryEntry *track_title = av_dict_get(stream->metadata, "title", NULL, 0);
             char language[48];
-            format_language(stream_lang(fmt, stream_index), language, sizeof(language));
+            format_language(stream_norm(fmt, stream_index), language, sizeof(language));
             snprintf(primary, sizeof(primary), "%s", track_title && track_title->value && track_title->value[0]
                      ? track_title->value : language);
             if (menu == TRACK_MENU_AUDIO) {
@@ -946,55 +994,51 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     
     char pref_aud[32] = ""; store_load_pref_audio(pref_aud, sizeof(pref_aud));
     char pref_sub[32] = ""; store_load_pref_sub(pref_sub, sizeof(pref_sub));
-    int scur = -1;                       // -1 = legenda desligada
-
-    if (!pref_aud[0] && !pref_sub[0]) {
-        // --- SMART DEFAULT (PORTUGUES) ---
-        int has_pt_audio = 0;
+    const char *want_audio = lang_norm(pref_aud);
+    int scur = -1, audio_chosen = 0, sub_chosen = 0, pt_audio = -1, known_audio = 0;
+    for (int i = 0; i < naud; i++) {
+        const char *norm = stream_norm(fmt, aidxs[i]);
+        if (norm[0]) known_audio++;
+        if (pt_audio < 0 && !strcmp(norm, "pt")) pt_audio = i;
+        if (!audio_chosen && want_audio[0] && !strcmp(norm, want_audio)) { acur = i; audio_chosen = 1; }
+    }
+    if (!audio_chosen && known_audio == 0 && req->audio_hint > 0 && req->audio_hint <= naud) {
+        acur = req->audio_hint - 1; audio_chosen = 1;
+    }
+    if (!audio_chosen && req->audio_pref == 1) {
         for (int i = 0; i < naud; i++) {
-            AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
-            if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
-                acur = i; 
-                has_pt_audio = 1;
-                break; 
-            }
-        }
-        if (!has_pt_audio) {
-            // Se nao tem audio PT, liga a legenda PT (se existir)
-            for (int i = 0; i < nsub; i++) {
-                AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
-                if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
-                    scur = i; 
-                    break; 
-                }
-            }
-        }
-    } else {
-        // --- PREFERENCIAS SALVAS ---
-        if (pref_aud[0]) {
-            for (int i = 0; i < naud; i++) {
-                AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
-                if (tag && strncasecmp(tag->value, pref_aud, 3) == 0) { acur = i; break; }
-            }
-        }
-        if (pref_sub[0]) {
-            if (strcasecmp(pref_sub, "off") == 0) scur = -1;
-            else {
-                for (int i = 0; i < nsub; i++) {
-                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
-                    if (tag && strncasecmp(tag->value, pref_sub, 3) == 0) { scur = i; break; }
-                }
-            }
+            const char *norm = stream_norm(fmt, aidxs[i]);
+            if (norm[0] && strcmp(norm, "pt")) { acur = i; audio_chosen = 1; break; }
         }
     }
-    
+    if (!audio_chosen && pt_audio >= 0) acur = pt_audio;
+    if (pref_sub[0]) {
+        if (!strcasecmp(pref_sub, "off")) sub_chosen = 1;
+        else {
+            const char *want_sub = lang_norm(pref_sub);
+            for (int i = 0; want_sub[0] && i < nsub; i++)
+                if (!strcmp(stream_norm(fmt, sidxs[i]), want_sub)) { scur = i; sub_chosen = 1; break; }
+        }
+    }
+    if (!sub_chosen && naud > 0) {
+        const char *audio_norm = stream_norm(fmt, aidxs[acur]);
+        if ((audio_norm[0] && strcmp(audio_norm, "pt")) ||
+            (req->audio_pref == 1 && pt_audio < 0 && known_audio > 0)) {
+            for (int i = 0; i < nsub; i++)
+                if (!strcmp(stream_norm(fmt, sidxs[i]), "pt")) { scur = i; break; }
+        }
+    }
+
     int aidx = naud ? aidxs[acur] : -1;
+    g_player_audio_index = naud ? acur + 1 : 0;
+    double audio_skip_until = -1;
+    Uint32 audio_skip_deadline = 0;
     diag_player_event("streams", "selected", "video=%d audio=%d naud=%d nsub=%d", vidx, aidx, naud, nsub);
     AVCodecContext *sctx = NULL;
     char sub_text[512] = ""; double sub_end = 0;
     if (scur >= 0 && open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
+    player_select_hls_streams(fmt, vidx, aidx, scur >= 0 ? sidxs[scur] : -1);
     if (native_hls) {
-        player_select_hls_streams(fmt, vidx, aidx, scur >= 0 ? sidxs[scur] : -1);
         diag_player_event("hls-io", "tracks", "video=%d audio=%d subtitle=%d",
                           vidx, aidx, scur >= 0 ? sidxs[scur] : -1);
     }
@@ -1315,18 +1359,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 if (!adev) {
                                     snprintf(notice, sizeof(notice), "Saida de audio indisponivel");
                                 } else if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
+                                    if (aidx >= 0) fmt->streams[aidx]->discard = AVDISCARD_ALL;
                                     acur = track_sel; aidx = next_idx;
-                                    if (native_hls)
-                                        player_select_hls_streams(fmt, vidx, aidx,
-                                                                  scur >= 0 ? sidxs[scur] : -1);
+                                    fmt->streams[aidx]->discard = AVDISCARD_DEFAULT;
+                                    g_player_audio_index = acur + 1;
                                     atb = fmt->streams[aidx]->time_base;
                                     if (adev) SDL_ClearQueuedAudio(adev);
-                                    audio_clock = cur_pos; last_ac = -1;
+                                    audio_clock = cur_pos; audio_skip_until = cur_pos - 0.25;
+                                    audio_skip_deadline = SDL_GetTicks() + 5000; last_ac = -1;
                                     last_ac_wall = av_gettime_relative() / 1000000.0;
-                                    char lang[48]; format_language(stream_lang(fmt, aidx), lang, sizeof(lang));
+                                    char lang[48]; format_language(stream_norm(fmt, aidx), lang, sizeof(lang));
                                     snprintf(notice, sizeof(notice), "Audio %d/%d  %s", acur + 1, naud, lang);
-                                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidx]->metadata, "language", NULL, 0);
-                                    if (tag) store_save_pref_audio(tag->value);
+                                    const char *norm = stream_norm(fmt, aidx);
+                                    if (norm[0]) store_save_pref_audio(norm);
                                 } else snprintf(notice, sizeof(notice), "Nao consegui abrir esta faixa de audio");
                             }
                         } else {
@@ -1334,15 +1379,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             if (next == scur) {
                                 snprintf(notice, sizeof(notice), "Legenda atual mantida");
                             } else if (open_sub_dec(fmt, next >= 0 ? sidxs[next] : -1, &sctx) == 0) {
+                                if (scur >= 0) fmt->streams[sidxs[scur]]->discard = AVDISCARD_ALL;
+                                if (next >= 0) fmt->streams[sidxs[next]]->discard = AVDISCARD_DEFAULT;
                                 scur = next; sub_text[0] = 0; sub_end = 0;
-                                if (native_hls)
-                                    player_select_hls_streams(fmt, vidx, aidx,
-                                                              scur >= 0 ? sidxs[scur] : -1);
                                 if (scur >= 0) {
-                                    char lang[48]; format_language(stream_lang(fmt, sidxs[scur]), lang, sizeof(lang));
+                                    char lang[48]; format_language(stream_norm(fmt, sidxs[scur]), lang, sizeof(lang));
                                     snprintf(notice, sizeof(notice), "Legenda %d/%d  %s", scur + 1, nsub, lang);
-                                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[scur]]->metadata, "language", NULL, 0);
-                                    if (tag) store_save_pref_sub(tag->value);
+                                    const char *norm = stream_norm(fmt, sidxs[scur]);
+                                    if (norm[0]) store_save_pref_sub(norm);
                                 } else {
                                     snprintf(notice, sizeof(notice), "Legendas desligadas");
                                     store_save_pref_sub("off");
@@ -1666,6 +1710,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         }
                         double audio_pts = ats != AV_NOPTS_VALUE
                             ? ats * av_q2d(atb) - timeline_origin : -1;
+                        if (audio_skip_until >= 0 && audio_pts >= 0 &&
+                            audio_pts < audio_skip_until &&
+                            !SDL_TICKS_PASSED(SDL_GetTicks(), audio_skip_deadline)) continue;
+                        if (audio_skip_until >= 0) audio_skip_until = -1;
                         int queue_during_resume = !resume_preroll ||
                             (adev && audio_pts >= resume_target - 0.15 &&
                              SDL_GetQueuedAudioSize(adev) < (unsigned)(bps * 0.35));
@@ -1738,7 +1786,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (delay > 0.001) {
                         if (delay > 0.35) delay = 0.35;
                         Uint32 sync_started = SDL_GetTicks();
-                        SDL_Delay((Uint32)(delay * 1000));
+                        Uint32 wait_until = sync_started + (Uint32)(delay * 1000);
+                        while (!SDL_TICKS_PASSED(SDL_GetTicks(), wait_until)) {
+                            Uint32 left = wait_until - SDL_GetTicks();
+                            SDL_Delay(left > 8 ? 8 : left);
+                            SDL_PumpEvents();
+                            if (SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT,
+                                               SDL_JOYBUTTONDOWN, SDL_JOYBUTTONDOWN) > 0) break;
+                        }
                         sync_since_present_ms += SDL_GetTicks() - sync_started;
                     }
                     AVFrame *u = frame;
@@ -1984,6 +2039,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     double dur = 0.0;
     int ever_presented_frame = 0;
     int final_rc = 0;
+    int last_audio = 0;
     PlaybackSource active = request->playback;
     if (active.item_id <= 0) active.item_id = request->item_id;
     if (active.session_id <= 0) active.session_id = request->session_id;
@@ -2012,6 +2068,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.section = active.section;
         attempt.container = active.container;
         attempt.url = active.play_url;
+        if (last_audio > 0) attempt.audio_hint = last_audio;
+        g_player_audio_index = 0;
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
                           retry_count + 1, attempt_start, active.session_id, active.source_id);
         int rc = player_play_internal(ren, joy, &attempt, &hb, attempt_start,
@@ -2026,6 +2084,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         // tentativa de retomada pode atualizar cur_pos sem decodificar nada.
         if (out_pos > 0 && (presented_frame || rc == 1)) current_pos = out_pos;
         if (out_dur > 0) dur = out_dur;
+        if (g_player_audio_index > 0) last_audio = g_player_audio_index;
 
         if (rc < 0 && rc != -11 && resume_seeked && !presented_frame &&
             !resume_restart_attempted && attempt_start > 3 &&
@@ -2145,6 +2204,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
 
     result->position = current_pos;
     result->duration = dur;
+    result->audio_index = last_audio;
     result->presented_frame = ever_presented_frame;
 
     if (heartbeat) {
@@ -2162,6 +2222,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                           g_player_last_error[0] ? g_player_last_error : "falha sem detalhe");
     diag_player_finish(final_rc);
     ui_popcorn_release();
+    nplay_curl_avio_pool_clear();
 
     return final_rc;
 }
