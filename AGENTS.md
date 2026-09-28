@@ -988,3 +988,41 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   `inset:0` (Chromium 87+) e colapsavam fora da tela em TVs antigas. Correcao e
   teste na branch `claude/nplay-tv-switch-review-n4drzv` do Nplay (commit 5b24542),
   ainda nao publicada no `main` (que faz deploy automatico).
+
+## Player no estilo da versao PC em 28/09/2026
+
+- Pedido do usuario: o player estava estatico e pouco intuitivo (faixas opacas e
+  legenda de teclas). O HUD foi refeito seguindo `public/js/player.js` e
+  `public/css/player-netflix.css` do repo `Tonsoaresmt/Nplay`.
+- `source/player_ui.c` so desenha a partir de `PlayerHud` (sem FFmpeg). Usa
+  `SDL_RenderGeometry` para degrades, circulos e icones vetoriais. `text.c` ganhou
+  estilos 3 (40 negrito), 4 (20 negrito, tempo) e 5 (28, legenda) e `text_measure`.
+- Layout: degrade inferior/superior sobre o video, timeline roxa com capitulos e
+  tempo `atual / total`, fileira de icones (play/pausa, -10, +10, volume, titulo e
+  subtitulo, audio e legendas, proximo episodio), rotulo do controle focado, voltar
+  no topo. HUD some em 3,5 s com fade; sinopse "Voce esta assistindo" ao pausar.
+- Controles: direcional navega entre botoes (cima = timeline); na timeline ou com
+  HUD escondido, esquerda/direita escolhe o ponto (10/30/60 s acelerando ao segurar)
+  e aplica sozinho apos 1 s (A aplica, B cancela). A pausa/ativa; L/R 10 s; ZL/ZR
+  60 s; Y/X abrem o painel de audio e legendas (duas colunas, aplica na hora); +
+  fixa o HUD; B volta; - sai. Analogico mantem a protecao anti-drift da 0.6.9.
+- Proximo episodio: `PlayerRequest.has_next/next_title`, botao na fileira e cartao
+  nos ultimos 30 s. Escolher pelo player devolve `EXIT_REASON_NEXT` e a serie toca o
+  proximo sem a contagem. `PlayMeta`/`resolve_and_play_meta` levam titulo, T/E,
+  sinopse e proximo episodio; filme leva ano, duracao, genero e sinopse.
+- Correcoes junto: retomar apos pausa reancora o relogio (quadros eram descartados);
+  seek inicial so aplica se o FFmpeg confirmar; orcamento de recuperacao zera apos
+  60 s tocando (antes a 2a queda de rede ja chamava `/fail`); trace HLS/AVIO
+  detalhado so nos 24 primeiros recursos (falhas sempre); voltar da busca/config
+  recarrega a landing (`enter_main`); +18 invalida todas as abas e a busca.
+- Validacao: build ARM64 limpo sem avisos com devkitA64 GCC 15.2, libnx 4.12.0,
+  switch-ffmpeg 7.1-5, switch-curl 7.69.1-5, switch-sdl2 2.28.5 (mesmos pacotes do
+  projeto). ELF contem ff_https_protocol, ff_hls_demuxer, ff_h264_nvtegra_hwaccel e
+  av_hwdevice_ctx_create. As 55 assercoes de codigo do validate_release.ps1 passaram
+  (emuladas em Python; sem PowerShell no ambiente). `Nplay.nro` 23618951 bytes, SHA-256
+  `1b972f5013be2c4907cf4f1d52fec35689847836758cebaed1199b0b1442bfb6`. Screenshots do HUD renderizados no host com o mesmo player_ui.c.
+- Ambiente sem devkitPro: a imagem `devkitpro/devkita64` pode ser baixada do Docker
+  Hub via API de registry (sem daemon) e extraida em /opt/devkitpro.
+- Pendente no Switch: navegacao por foco com Joy-Con e Pro Controller, busca pela
+  timeline em HLS lento, painel de audio/legendas, cartao de proximo episodio em
+  serie, legibilidade do HUD a distancia (dock) e desempenho do fade com 1080p.

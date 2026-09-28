@@ -8,7 +8,35 @@
 static TTF_Font *g_font     = NULL;   // texto normal (listas)
 static TTF_Font *g_font_big = NULL;   // titulos
 static TTF_Font *g_font_small = NULL; // metadados e badges compactos
+static TTF_Font *g_font_display = NULL; // titulo grande do player (negrito)
+static TTF_Font *g_font_time = NULL;    // tempo/numeros do player (negrito)
+static TTF_Font *g_font_sub = NULL;     // legendas do video
 static int       g_pl_ok    = 0;
+
+// Estilos: 0 normal (23), 1 titulo (31), 2 pequeno (17), 3 destaque do player
+// (40, negrito), 4 tempo do player (20, negrito), 5 legenda do video (28).
+static TTF_Font *font_for(int style) {
+    switch (style) {
+        case 1: return g_font_big;
+        case 2: return g_font_small;
+        case 3: return g_font_display ? g_font_display : g_font_big;
+        case 4: return g_font_time ? g_font_time : g_font;
+        case 5: return g_font_sub ? g_font_sub : g_font;
+        default: return g_font;
+    }
+}
+
+int text_measure(const char *utf8, int style, int *outW, int *outH) {
+    if (outW) *outW = 0;
+    if (outH) *outH = 0;
+    TTF_Font *f = font_for(style);
+    if (!f || !utf8 || !utf8[0]) return -1;
+    int w = 0, h = 0;
+    if (TTF_SizeUTF8(f, utf8, &w, &h) != 0) return -1;
+    if (outW) *outW = w;
+    if (outH) *outH = h;
+    return 0;
+}
 
 // ---- cache de texturas de texto: evita rasterizar a mesma string todo frame ----
 #define TEXT_CACHE_MAX 192
@@ -48,6 +76,14 @@ int text_init(void) {
     g_font_big = TTF_OpenFontRW(rw2, 1, 31);
     SDL_RWops *rw3 = SDL_RWFromConstMem(fd.address, (int)fd.size);
     g_font_small = TTF_OpenFontRW(rw3, 1, 17);
+    SDL_RWops *rw4 = SDL_RWFromConstMem(fd.address, (int)fd.size);
+    g_font_display = TTF_OpenFontRW(rw4, 1, 40);
+    SDL_RWops *rw5 = SDL_RWFromConstMem(fd.address, (int)fd.size);
+    g_font_time = TTF_OpenFontRW(rw5, 1, 20);
+    SDL_RWops *rw6 = SDL_RWFromConstMem(fd.address, (int)fd.size);
+    g_font_sub = TTF_OpenFontRW(rw6, 1, 28);
+    if (g_font_display) TTF_SetFontStyle(g_font_display, TTF_STYLE_BOLD);
+    if (g_font_time) TTF_SetFontStyle(g_font_time, TTF_STYLE_BOLD);
 
     if (!g_font || !g_font_big || !g_font_small) return -4;
     return 0;
@@ -58,6 +94,9 @@ void text_exit(void) {
     if (g_font)     { TTF_CloseFont(g_font);     g_font = NULL; }
     if (g_font_big) { TTF_CloseFont(g_font_big); g_font_big = NULL; }
     if (g_font_small) { TTF_CloseFont(g_font_small); g_font_small = NULL; }
+    if (g_font_display) { TTF_CloseFont(g_font_display); g_font_display = NULL; }
+    if (g_font_time) { TTF_CloseFont(g_font_time); g_font_time = NULL; }
+    if (g_font_sub) { TTF_CloseFont(g_font_sub); g_font_sub = NULL; }
     if (g_pl_ok)    { plExit(); g_pl_ok = 0; }
     TTF_Quit();
 }
@@ -66,7 +105,7 @@ void text_exit(void) {
 SDL_Texture *text_cached(SDL_Renderer *ren, const char *utf8, SDL_Color color, int big, int *outW, int *outH) {
     if (outW) *outW = 0;
     if (outH) *outH = 0;
-    TTF_Font *f = big == 1 ? g_font_big : big == 2 ? g_font_small : g_font;
+    TTF_Font *f = font_for(big);
     if (!f || !utf8 || !utf8[0]) return NULL;
 
     TextCacheEntry *hit = NULL;
@@ -101,7 +140,7 @@ SDL_Texture *text_cached(SDL_Renderer *ren, const char *utf8, SDL_Color color, i
 SDL_Texture *text_make(SDL_Renderer *ren, const char *utf8, SDL_Color color, int big, int *outW, int *outH) {
     if (outW) *outW = 0;
     if (outH) *outH = 0;
-    TTF_Font *f = big == 1 ? g_font_big : big == 2 ? g_font_small : g_font;
+    TTF_Font *f = font_for(big);
     if (!f || !utf8 || !utf8[0]) return NULL;
 
     SDL_Surface *s = TTF_RenderUTF8_Blended(f, utf8, color);

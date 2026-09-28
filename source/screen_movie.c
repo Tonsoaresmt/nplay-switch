@@ -299,7 +299,20 @@ void input_movie(int b) {
             if (id > 0) request_related_movie_details(id);
         } else {
             int id = jint(g_movie, "id");
-            if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));
+            if (g_movie_sel == 0) {
+                char subtitle[256] = "";
+                int year = jint(g_movie, "year"), duration = jint(g_movie, "duration");
+                const char *genre = jstr(g_movie, "genre");
+                if (year > 0) snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle), "%d", year);
+                if (duration > 0)
+                    snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle), "%s%d h %02d min",
+                             subtitle[0] ? "  |  " : "", duration / 60, duration % 60);
+                if (genre && genre[0])
+                    snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle), "%s%s",
+                             subtitle[0] ? "  |  " : "", genre);
+                PlayMeta meta = { jstr(g_movie, "title"), subtitle, jstr(g_movie, "plot"), NULL };
+                resolve_and_play_meta(id, &meta);
+            }
             else toggle_fav_item(id);
         }
     }

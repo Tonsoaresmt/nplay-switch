@@ -20,6 +20,7 @@
 #include "cJSON.h"
 #include "update.h"
 #include "player.h"
+#include "player_ui.h"
 #include "api.h"
 #include "diag.h"
 #include "catalog_fetch.h"
@@ -379,6 +380,7 @@ static int accel_wait_and_play(int itemId, const char *title);
 static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
+static void enter_main(void);
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 
 // Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
@@ -622,11 +624,20 @@ static void load_landing(int tab) {
     else landing_start(tab);
 }
 
-static void landing_invalidate(int tab) {
-    if (tab < 0 || tab > 4) return;
-    if (g_land == g_land_cache[tab]) g_land = NULL;
-    if (g_land_cache[tab]) { cJSON_Delete(g_land_cache[tab]); g_land_cache[tab] = NULL; }
-    load_landing(tab);
+// Descarta todas as landings e a busca; a aba visivel recarrega ao voltar para ela.
+static void landing_invalidate_all(void) {
+    g_land = NULL; g_heroesArr = NULL; g_railsN = 0;
+    for (int i = 0; i < 5; i++) {
+        if (g_land_cache[i]) { cJSON_Delete(g_land_cache[i]); g_land_cache[i] = NULL; }
+    }
+    if (g_search) { cJSON_Delete(g_search); g_search = NULL; g_search_counts_valid = 0; }
+}
+
+// Toda volta para a tela principal passa por aqui. O player libera as landings
+// para reservar memoria; sem recarregar, a aba ficava em "Carregando" para sempre.
+static void enter_main(void) {
+    g_screen = SC_MAIN;
+    if (g_tab <= 4 && !g_land) load_landing(g_tab);
 }
 
 static void pump_landing(void) {
@@ -797,17 +808,22 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     return (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
 }
 
-// Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play(int itemId, const char *title) {
-    char stable_title[256];
+    PlayMeta meta = { title, NULL, NULL, NULL };
+    return resolve_and_play_meta(itemId, &meta);
+}
+
+// Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
+int resolve_and_play_meta(int itemId, const PlayMeta *meta) {
+    const char *title = meta ? meta->title : NULL;
+    // Copias estaveis: a landing e liberada antes do player (pressao de memoria),
+    // e os ponteiros de meta podem apontar para esse JSON.
+    char stable_title[256], stable_subtitle[256], stable_overview[1200], stable_next[256];
     snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
-    SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
-    ui_header("NPLAY", "Abrindo video", "");
-    ui_panel(260, 210, WIN_W - 520, 250, C_ACC2);
-    text_draw(gRen, "PREPARANDO", 300, 244, C_ACC2, 0);
-    text_center_at(stable_title, 300, WIN_W - 600, 286, C_TEXT, 1);
-    text_center_at("Organizando tudo para comecar...", 300, WIN_W - 600, 354, C_MUT, 0);
-    for (int i = 0; i < 5; i++) fill_rect(WIN_W / 2 - 58 + i * 28, 408, 14, 6, i == 0 ? C_ACC : C_CARD);
+    snprintf(stable_subtitle, sizeof(stable_subtitle), "%s", meta && meta->subtitle ? meta->subtitle : "");
+    snprintf(stable_overview, sizeof(stable_overview), "%s", meta && meta->overview ? meta->overview : "");
+    snprintf(stable_next, sizeof(stable_next), "%s", meta && meta->next_title ? meta->next_title : "");
+    pui_draw_loading(gRen, stable_title, "Abrindo video", "Buscando a melhor fonte para voce...", SDL_GetTicks(), 0);
     SDL_RenderPresent(gRen);
     
     PlaybackSource src = {0};
@@ -848,6 +864,10 @@ int resolve_and_play(int itemId, const char *title) {
         req.source_id = src.source_id;
         req.delivery = src.delivery;
         req.title = stable_title;
+        req.subtitle = stable_subtitle[0] ? stable_subtitle : NULL;
+        req.overview = stable_overview[0] ? stable_overview : NULL;
+        req.has_next = stable_next[0] != '\0';
+        req.next_title = req.has_next ? stable_next : NULL;
         req.section = src.section;
         req.container = src.container;
         req.url = src.play_url;
@@ -877,7 +897,7 @@ int resolve_and_play(int itemId, const char *title) {
             toast(m); 
             rc = 0;
         } else {
-            rc = (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
+            rc = res.reason == EXIT_REASON_NATURAL ? 1 : res.reason == EXIT_REASON_NEXT ? 2 : 0;
         }
     } else {
         toast("Este titulo esta indisponivel no momento");
@@ -2317,7 +2337,7 @@ static void input_landing(int b) {
 }
 static void input_search(int b) {
     int n = srch_count_for(g_srchFilter);
-    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
+    if (b == JOY_B || b == JOY_MINUS) { enter_main(); return; }
     if (b == JOY_Y) { do_search(); return; }
     if (b == JOY_ZL || b == JOY_ZR) {
         int step = b == JOY_ZR ? 1 : -1;
@@ -2336,6 +2356,13 @@ static void input_search(int b) {
     if (rowTop - g_srchScroll < 184) g_srchScroll = rowTop - 184;
     if (g_srchScroll < 0) g_srchScroll = 0;
 }
+// "T1 E3 - Titulo do episodio" para o HUD do player.
+static void episode_label(cJSON *episode, int index, char *out, size_t cap) {
+    int season = jint(episode, "season"), number = jint(episode, "episode");
+    snprintf(out, cap, "T%d E%d  -  %s", season > 0 ? season : 1, number > 0 ? number : index + 1,
+             ep_display_title(episode));
+}
+
 static int prompt_next_episode(cJSON *episode) {
     Uint32 deadline = SDL_GetTicks() + 5000;
     cJSON *series = ser_obj();
@@ -2400,19 +2427,27 @@ static void input_series(int b) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
-    else if (b == JOY_A) {   // assistir + auto-play do proximo episodio
+    else if (b == JOY_A) {   // assistir + proximo episodio (pelo player ou pela contagem)
         int idx = g_epSel;
+        cJSON *series = ser_obj();
         while (idx < ser_nep()) {
             cJSON *ep = ser_ep_at(idx); if (!ep) break;
             g_epSel = idx;
-            int ended = resolve_and_play(jint(ep, "id"), ep_display_title(ep));
-            if (ended != 1) break;
-            int next = idx + 1;
-            if (next >= ser_nep()) break;
-            g_epSel = next;
-            cJSON *next_ep = ser_ep_at(next);
-            if (!g_pref_autoplay || !next_ep || !prompt_next_episode(next_ep)) break;
-            idx = next;
+            cJSON *next_ep = idx + 1 < ser_nep() ? ser_ep_at(idx + 1) : NULL;
+            char subtitle[256], next_label[256] = "";
+            episode_label(ep, idx, subtitle, sizeof(subtitle));
+            if (next_ep) episode_label(next_ep, idx + 1, next_label, sizeof(next_label));
+            const char *overview = jstr(ep, "ep_overview");
+            if (!overview || !overview[0]) overview = jstr(series, "plot");
+            const char *series_title = jstr(series, "title");
+            PlayMeta meta = { series_title && series_title[0] ? series_title : ep_display_title(ep),
+                              subtitle, overview, next_ep ? next_label : NULL };
+            int ended = resolve_and_play_meta(jint(ep, "id"), &meta);
+            if (!next_ep || (ended != 1 && ended != 2)) break;
+            g_epSel = idx + 1;
+            // 2 = o usuario ja escolheu o proximo no player; nao pergunta de novo.
+            if (ended == 1 && (!g_pref_autoplay || !prompt_next_episode(next_ep))) break;
+            idx++;
         }
     }
 }
@@ -2768,7 +2803,8 @@ static void save_selected_preference(int direction) {
         g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
         toast("Nao foi possivel salvar a preferencia");
     } else {
-        if (g_prefs_sel == 0 && g_tab <= 4) landing_invalidate(g_tab);
+        // O filtro +18 muda o conteudo de todas as abas e da busca.
+        if (g_prefs_sel == 0) landing_invalidate_all();
         g_hero_next = SDL_GetTicks() + 8000;
         toast("Preferencia sincronizada");
     }
@@ -2877,7 +2913,7 @@ static void input_settings(int b) {
         if (b == JOY_A || b == JOY_B || b == JOY_MINUS || b == JOY_X) g_diag_open = 0;
         return;
     }
-    if (b == JOY_B || b == JOY_MINUS) { g_screen = SC_MAIN; return; }
+    if (b == JOY_B || b == JOY_MINUS) { enter_main(); return; }
     if (b == JOY_X) { reload_player_diagnostics(); g_diag_open = 1; return; }
     if (b == JOY_UP) { if (g_setSel > 0) g_setSel--; }
     else if (b == JOY_DOWN) { if (g_setSel < NSET - 1) g_setSel++; }

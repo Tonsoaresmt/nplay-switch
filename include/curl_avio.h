@@ -7,6 +7,9 @@
 
 #include <libavformat/avio.h>
 
+// Zera o limite de eventos detalhados do trace (chamado a cada abertura do player).
+void nplay_curl_avio_trace_reset(void);
+
 // Cria um AVIOContext que le a URL via libcurl. Retorna NULL em falha.
 // Passe o resultado em fmt->pb + AVFMT_FLAG_CUSTOM_IO antes de avformat_open_input.
 // expected_size pode ser -1 quando a API nao conhece o tamanho. Quando existe,

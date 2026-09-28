@@ -28,6 +28,12 @@
 static SDL_atomic_t g_active_contexts = {0};
 static SDL_atomic_t g_reserved_kb = {0};
 static SDL_atomic_t g_resource_sequence = {0};
+// Quantos recursos desta reproducao ja tiveram o ciclo de vida registrado. O
+// trace grava na microSD; registrar cada segmento HLS custava I/O durante o video.
+static SDL_atomic_t g_traced_resources = {0};
+#define TRACE_DETAILED_RESOURCES 24
+
+void nplay_curl_avio_trace_reset(void) { SDL_AtomicSet(&g_traced_resources, 0); }
 
 typedef struct {
     CURL *easy;
@@ -50,7 +56,7 @@ typedef struct {
     int accounted, reserved_kb;
     int static_data;
     size_t static_pos, static_len;
-    int resource_id, first_http_logged;
+    int resource_id, first_http_logged, traced;
     char profile[8];
 } CurlIO;
 
@@ -108,7 +114,7 @@ static int fetch_block(CurlIO *c, int64_t start) {
     curl_easy_setopt(c->easy, CURLOPT_RANGE, range);
     CURLcode r = curl_easy_perform(c->easy);
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
-    if (!c->first_http_logged || r != CURLE_OK || code < 200 || code >= 400 || c->write_overflow) {
+    if ((c->traced && !c->first_http_logged) || r != CURLE_OK || code < 200 || code >= 400 || c->write_overflow) {
         diag_player_event("avio", "http",
                           "id=%d %s code=%ld curl=%d off=%lld got=%u ov=%d",
                           c->resource_id, c->profile, code, (int)r,
@@ -141,7 +147,7 @@ static int fetch_block(CurlIO *c, int64_t start) {
 // Encerra a thread e libera tudo do CurlIO.
 static void free_cio(CurlIO *c) {
     if (!c) return;
-    if (c->accounted)
+    if (c->accounted && c->traced)
         diag_player_event("avio", "close", "id=%d %s active=%d reserved=%dKB",
                           c->resource_id, c->profile,
                           SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
@@ -324,6 +330,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     memcpy(c->url, url, url_len + 1);
     c->size = expected_size > 0 ? expected_size : -1;
     c->resource_id = SDL_AtomicAdd(&g_resource_sequence, 1) + 1;
+    c->traced = SDL_AtomicAdd(&g_traced_resources, 1) < TRACE_DETAILED_RESOURCES;
     snprintf(c->profile, sizeof(c->profile), "%s", profile ? profile : "file");
     c->response_length = c->range_total = -1;
     c->seek_req = -1; c->base = 0; c->running = 1;
@@ -377,7 +384,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->accounted = 1;
     SDL_AtomicAdd(&g_active_contexts, 1);
     SDL_AtomicAdd(&g_reserved_kb, c->reserved_kb);
-    diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
+    if (c->traced) diag_player_event("avio", "allocated", "id=%d %s ring=%uKB active=%d total=%dKB",
                       c->resource_id, c->profile, (unsigned)(c->ring_cap / 1024),
                       SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     if (synchronous) {
@@ -399,7 +406,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
         c->static_pos = 0;
         c->size = got;
         c->eof = 1;
-        diag_player_event("avio", "metadata-ready", "id=%d bytes=%d", c->resource_id, got);
+        if (c->traced) diag_player_event("avio", "metadata-ready", "id=%d bytes=%d", c->resource_id, got);
     } else {
         c->th = SDL_CreateThread(producer, "cavio", c);
         if (!c->th) { av_free(avio_buf); free_cio(c); return NULL; }

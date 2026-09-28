@@ -2,8 +2,9 @@
 // o audio (SDL Audio + swresample). Sincroniza o video pelo relogio do audio.
 // MP4/MKV remoto usa HTTPS nativo. HLS usa callbacks AVIO com libcurl para abrir
 // cada playlist e segmento sem depender do TLS interno do FFmpeg/libnx.
-// Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur) e mostra
-// um HUD (titulo + barra de progresso + tempo) ao pausar/buscar.
+// Retoma de onde parou (start_sec), reporta a posicao (out_pos/out_dur). O HUD
+// segue o player da versao PC: controles focaveis, timeline, painel de audio e
+// legendas e proximo episodio (desenho em player_ui.c).
 #include <switch.h>
 #include <SDL.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #include "text.h"
 #include "store.h"
 #include "diag.h"
+#include "player_ui.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -76,6 +78,11 @@ typedef struct {
     int64_t deadline_us;
     SDL_Joystick *joy;
     int cancelled;
+    // Enquanto FFmpeg abre a fonte, o callback tambem anima o loader. Fica NULL
+    // depois da abertura: o callback continua instalado durante a reproducao.
+    SDL_Renderer *ren;
+    const char *title, *headline, *detail;
+    Uint32 last_draw;
 } PlayerOpenDeadline;
 
 static int player_open_interrupted(void *userdata) {
@@ -85,6 +92,14 @@ static int player_open_interrupted(void *userdata) {
     // dentro do callback de interrupcao para B/- realmente funcionarem mesmo
     // enquanto FFmpeg espera rede ou uma rendition HLS.
     SDL_PumpEvents();
+    if (watch->ren) {
+        Uint32 now = SDL_GetTicks();
+        if ((Uint32)(now - watch->last_draw) >= 60) {
+            watch->last_draw = now;
+            pui_draw_loading(watch->ren, watch->title, watch->headline, watch->detail, now, 0);
+            SDL_RenderPresent(watch->ren);
+        }
+    }
     if (watch->joy && (SDL_JoystickGetButton(watch->joy, JOY_B) ||
                        SDL_JoystickGetButton(watch->joy, JOY_MINUS))) {
         watch->cancelled = 1;
@@ -97,6 +112,12 @@ static int player_open_interrupted(void *userdata) {
 // preso ao abrir as playlists/segmentos seguintes. O demuxer HLS chama io_open
 // para cada recurso aninhado; entregue todos ao libcurl, a mesma pilha TLS usada
 // com sucesso pela API e pelas capas do aplicativo.
+// Cada segmento HLS passa por io_open. Registrar todos gravava varias linhas na
+// microSD por segmento, na mesma thread que decodifica e desenha. Os primeiros
+// recursos (abertura) e qualquer falha continuam no trace.
+#define HLS_TRACE_DETAILED 24
+static int g_hls_io_opened = 0;
+
 static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
                               const char *url, int flags, AVDictionary **options) {
     (void)fmt;
@@ -107,24 +128,30 @@ static int player_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
         return AVERROR_PROTOCOL_NOT_FOUND;
     int active = 0, reserved_kb = 0;
     char stage[96];
+    int detailed = g_hls_io_opened++ < HLS_TRACE_DETAILED;
     nplay_curl_avio_stats(&active, &reserved_kb);
-    snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
-    player_boot_stage(stage);
-    diag_player_event("hls-io", "open-begin", "active=%d reserved=%dKB", active, reserved_kb);
+    if (detailed) {
+        snprintf(stage, sizeof(stage), "03 HLS abrindo recurso %d (%d KB)", active + 1, reserved_kb);
+        player_boot_stage(stage);
+        diag_player_event("hls-io", "open-begin", "active=%d reserved=%dKB", active, reserved_kb);
+    }
     *pb = nplay_curl_avio_open_hls(url);
     nplay_curl_avio_stats(&active, &reserved_kb);
-    snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
-                                      : "03 HLS sem memoria: %d recursos, %d KB",
-             active, reserved_kb);
-    player_boot_stage(stage);
-    diag_player_event("hls-io", *pb ? "open-ok" : "open-fail",
-                      "active=%d reserved=%dKB", active, reserved_kb);
+    if (detailed || !*pb) {
+        snprintf(stage, sizeof(stage), *pb ? "03 HLS ativo: %d recursos, %d KB"
+                                          : "03 HLS sem memoria: %d recursos, %d KB",
+                 active, reserved_kb);
+        player_boot_stage(stage);
+        diag_player_event("hls-io", *pb ? "open-ok" : "open-fail",
+                          "active=%d reserved=%dKB", active, reserved_kb);
+    }
     return *pb ? 0 : AVERROR(ENOMEM);
 }
 
 static int player_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
     (void)fmt;
-    diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
+    if (g_hls_io_opened <= HLS_TRACE_DETAILED)
+        diag_player_event("hls-io", "close", "pb=%s", pb ? "yes" : "no");
     nplay_curl_avio_close(pb);
     return 0;
 }
@@ -137,26 +164,6 @@ static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
     return avcodec_default_get_format(ctx, formats);
 }
 
-static const SDL_Color PC_TEXT = { 234, 240, 250, 255 };
-static const SDL_Color PC_MUT  = { 170, 178, 196, 255 };
-static const SDL_Color PC_ACC  = { 139, 92, 246, 255 };
-static const SDL_Color PC_ACC2 = { 59, 130, 246, 255 };
-static const SDL_Color PC_DARK = { 8, 10, 15, 255 };
-static const SDL_Color PC_CARD = { 24, 29, 43, 255 };
-
-static void pfill(SDL_Renderer *r, int x, int y, int w, int h, SDL_Color c, int a) {
-    SDL_SetRenderDrawColor(r, c.r, c.g, c.b, a);
-    SDL_Rect rr = { x, y, w, h };
-    SDL_RenderFillRect(r, &rr);
-}
-static void fmt_time(double s, char *out, int cap) {
-    if (s < 0 || s != s) s = 0;
-    int t = (int)s, h = t / 3600, m = (t % 3600) / 60, sec = t % 60;
-    if (h > 0) snprintf(out, cap, "%d:%02d:%02d", h, m, sec);
-    else snprintf(out, cap, "%d:%02d", m, sec);
-}
-
-// idioma de um stream (tag "language"), ex.: "por", "eng", "jpn".
 static const char *stream_lang(AVFormatContext *fmt, int idx) {
     if (idx < 0) return "?";
     AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
@@ -172,30 +179,6 @@ static const char *lang_label(const char *lang) {
     return lang[0] ? lang : "?";
 }
 
-static void draw_clipped_text(SDL_Renderer *ren, const char *text, int x, int y,
-                              int maxw, SDL_Color color, int big) {
-    SDL_Rect clip = { x, y - 3, maxw, big ? 42 : 32 };
-    SDL_RenderSetClipRect(ren, &clip);
-    text_draw(ren, text, x, y, color, big);
-    SDL_RenderSetClipRect(ren, NULL);
-}
-
-static void draw_control(SDL_Renderer *ren, int x, int y, int w,
-                         const char *key, const char *label, int active) {
-    SDL_Color key_color = active ? PC_ACC : PC_ACC2;
-    int kw = 0, kh = 0;
-    SDL_Texture *kt = text_cached(ren, key, PC_TEXT, 0, &kw, &kh);
-    int key_w = kw + 12;
-    if (key_w < 38) key_w = 38;
-    pfill(ren, x, y + 3, key_w, 30, key_color, 245);
-    if (kt) {
-        SDL_Rect d = { x + (key_w - kw) / 2, y + 5, kw, kh };
-        SDL_RenderCopy(ren, kt, NULL, &d);
-    }
-    int label_x = x + key_w + 10;
-    draw_clipped_text(ren, label, label_x, y + 6, x + w - label_x, active ? PC_TEXT : PC_MUT, 0);
-}
-
 static const char *lang_name(const char *lang) {
     const char *code = lang_label(lang);
     if (!strcmp(code, "PT")) return "Portugues";
@@ -205,189 +188,6 @@ static const char *lang_name(const char *lang) {
     return "Desconhecido";
 }
 
-static void format_language(const char *lang, char *out, size_t cap) {
-    snprintf(out, cap, "%s - %s", lang_label(lang), lang_name(lang));
-}
-
-static void draw_setting_card(SDL_Renderer *ren, int x, int y, int w,
-                              const char *key, const char *label,
-                              const char *value, int active) {
-    SDL_Color accent = active ? PC_ACC : PC_ACC2;
-    pfill(ren, x, y, w, 76, PC_CARD, 240);
-    pfill(ren, x, y, 4, 76, accent, 255);
-
-    int kw = 0, kh = 0;
-    SDL_Texture *kt = text_cached(ren, key, PC_TEXT, 0, &kw, &kh);
-    int key_w = kw + 18;
-    if (key_w < 48) key_w = 48;
-    pfill(ren, x + 14, y + 22, key_w, 34, accent, 245);
-    if (kt) {
-        SDL_Rect d = { x + 14 + (key_w - kw) / 2, y + 27, kw, kh };
-        SDL_RenderCopy(ren, kt, NULL, &d);
-    }
-
-    int tx = x + 28 + key_w;
-    draw_clipped_text(ren, label, tx, y + 8, x + w - tx - 12, PC_MUT, 0);
-    draw_clipped_text(ren, value, tx, y + 38, x + w - tx - 12, PC_TEXT, 0);
-}
-
-static void draw_notice(SDL_Renderer *ren, const char *message) {
-    int texture_w = 0, h = 0;
-    SDL_Texture *t;
-    SDL_Color bg = { 12, 15, 23, 255 };
-    if (!message || !message[0]) return;
-    t = text_cached(ren, message, PC_TEXT, 0, &texture_w, &h);
-    if (!t) return;
-    int w = texture_w;
-    if (w > 520) w = 520;
-    int x = (PWIN_W - w) / 2;
-    pfill(ren, x - 22, 108, w + 44, h + 18, bg, 235);
-    pfill(ren, x - 22, 108, 4, h + 18, PC_ACC, 255);
-    SDL_Rect src = { 0, 0, w, h };
-    SDL_Rect dst = { x, 116, w, h };
-    SDL_RenderCopy(ren, t, texture_w > w ? &src : NULL, &dst);
-}
-
-static void draw_track_menu(SDL_Renderer *ren, AVFormatContext *fmt, int menu,
-                            const int *indexes, int count, int selected, int current) {
-    const int x = 230, y = 70, w = 820, h = 580;
-    const int visible = 7, row_h = 54, list_y = y + 112;
-    const int total = count + (menu == TRACK_MENU_SUB ? 1 : 0);
-    int scroll = selected - visible / 2;
-    if (scroll < 0) scroll = 0;
-    if (scroll > total - visible) scroll = total - visible;
-    if (scroll < 0) scroll = 0;
-
-    SDL_Color black = { 0, 0, 0, 255 };
-    pfill(ren, 0, 0, PWIN_W, PWIN_H, black, 150);
-    pfill(ren, x, y, w, h, PC_DARK, 248);
-    pfill(ren, x, y, 6, h, PC_ACC, 255);
-    text_draw(ren, menu == TRACK_MENU_AUDIO ? "Escolher audio" : "Escolher legenda",
-              x + 34, y + 24, PC_TEXT, 1);
-    char summary[64];
-    snprintf(summary, sizeof(summary), "%d opcao%s disponive%s", total,
-             total == 1 ? "" : "s", total == 1 ? "l" : "is");
-    text_draw(ren, summary, x + 36, y + 67, PC_MUT, 0);
-
-    for (int row = 0; row < visible; row++) {
-        int option = scroll + row;
-        if (option >= total) break;
-        int yy = list_y + row * row_h;
-        int focused = option == selected, active = option == current;
-        if (focused) pfill(ren, x + 26, yy - 3, w - 52, row_h - 3, PC_CARD, 255);
-        if (focused) pfill(ren, x + 26, yy - 3, 4, row_h - 3, PC_ACC2, 255);
-
-        char primary[128], secondary[128];
-        if (menu == TRACK_MENU_SUB && option == 0) {
-            snprintf(primary, sizeof(primary), "Desligadas");
-            snprintf(secondary, sizeof(secondary), "Reproduzir sem legendas");
-        } else {
-            int list_index = option - (menu == TRACK_MENU_SUB ? 1 : 0);
-            int stream_index = indexes[list_index];
-            AVStream *stream = fmt->streams[stream_index];
-            AVDictionaryEntry *track_title = av_dict_get(stream->metadata, "title", NULL, 0);
-            char language[48];
-            format_language(stream_lang(fmt, stream_index), language, sizeof(language));
-            snprintf(primary, sizeof(primary), "%s", track_title && track_title->value && track_title->value[0]
-                     ? track_title->value : language);
-            if (menu == TRACK_MENU_AUDIO) {
-                snprintf(secondary, sizeof(secondary), "%s  |  %s  |  %d canal%s", language,
-                         avcodec_get_name(stream->codecpar->codec_id), stream->codecpar->ch_layout.nb_channels,
-                         stream->codecpar->ch_layout.nb_channels == 1 ? "" : "is");
-            } else {
-                snprintf(secondary, sizeof(secondary), "%s  |  %s", language,
-                         avcodec_get_name(stream->codecpar->codec_id));
-            }
-        }
-        draw_clipped_text(ren, primary, x + 48, yy + 1, w - 210,
-                          focused ? PC_TEXT : PC_MUT, 0);
-        draw_clipped_text(ren, secondary, x + 48, yy + 26, w - 210, PC_MUT, 0);
-        if (active) text_draw(ren, "ATUAL", x + w - 125, yy + 12, PC_ACC, 0);
-    }
-
-    text_draw(ren, "D-pad escolhe", x + 36, y + h - 44, PC_MUT, 0);
-    text_draw(ren, "A confirma", x + 320, y + h - 44, PC_TEXT, 0);
-    text_draw(ren, "B cancela", x + 590, y + h - 44, PC_MUT, 0);
-}
-
-// HUD organizado em tres zonas: identidade, progresso/status e ferramentas.
-static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double dur,
-                     int paused, int vol, AVFormatContext *fmt, int aidx,
-                     int acur, int naud, int nsub, int scur, int sidx,
-                     int hud_pinned) {
-    const int expanded = paused || hud_pinned;
-    pfill(ren, 0, 0, PWIN_W, 86, PC_DARK, 205);
-    pfill(ren, 0, 0, 6, 86, PC_ACC, 255);
-    text_draw(ren, "NPLAY PLAYER", 46, 10, PC_ACC, 0);
-    draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao", 46, 39, 970, PC_TEXT, 1);
-    text_draw(ren, paused ? "PAUSADO" : "REPRODUZINDO", 1060, 30,
-              paused ? PC_ACC : PC_ACC2, 0);
-
-    const int panel_y = expanded ? 438 : 584;
-    pfill(ren, 0, panel_y, PWIN_W, PWIN_H - panel_y, PC_DARK, 222);
-    int bx = 48, by = panel_y + 27, bw = PWIN_W - 96, bh = 6;
-    pfill(ren, bx, by, bw, bh, PC_CARD, 255);
-    int fw = 0;
-    if (dur > 0) fw = (int)(bw * (pos / dur));
-    if (fw < 0) fw = 0;
-    if (fw > bw) fw = bw;
-    if (fw > 0) pfill(ren, bx, by, fw, bh, PC_ACC, 255);
-    pfill(ren, bx + fw - 3, by - 4, 6, bh + 8, PC_TEXT, 255);
-
-    char now[16], total[16];
-    fmt_time(pos, now, sizeof(now));
-    fmt_time(dur, total, sizeof(total));
-    text_draw(ren, now, bx, by + 12, PC_TEXT, 0);
-    int tw = 0, th = 0;
-    SDL_Texture *tt = text_cached(ren, dur > 0 ? total : "--:--", PC_MUT, 0, &tw, &th);
-    if (tt) { SDL_Rect d = { PWIN_W - 48 - tw, by + 12, tw, th }; SDL_RenderCopy(ren, tt, NULL, &d); }
-
-    if (expanded) {
-        int y = panel_y + 86;
-        draw_control(ren, 48,   y, 190, "A", paused ? "Continuar" : "Pausar", paused);
-        draw_control(ren, 254,  y, 210, "L/R", "- / + 10s", 0);
-        draw_control(ren, 480,  y, 232, "ZL/ZR", "- / + 60s", 0);
-        draw_control(ren, 728,  y, 270, "LS", "Buscar na timeline", 0);
-        draw_control(ren, 1014, y, 218, "B", "Voltar", 0);
-
-        char volume_value[24], audio_value[48], subtitle_value[48];
-        char audio_label[48], subtitle_label[48];
-        snprintf(volume_value, sizeof(volume_value), "%d%%", vol);
-        if (naud <= 0) snprintf(audio_value, sizeof(audio_value), "Indisponivel");
-        else format_language(stream_lang(fmt, aidx), audio_value, sizeof(audio_value));
-        if (nsub <= 0) snprintf(subtitle_value, sizeof(subtitle_value), "Indisponivel");
-        else if (sidx < 0) snprintf(subtitle_value, sizeof(subtitle_value), "Desligada");
-        else format_language(stream_lang(fmt, sidx), subtitle_value, sizeof(subtitle_value));
-        snprintf(audio_label, sizeof(audio_label), "AUDIO  %d/%d", naud ? acur + 1 : 0, naud);
-        snprintf(subtitle_label, sizeof(subtitle_label), "LEGENDAS  %d/%d", scur >= 0 ? scur + 1 : 0, nsub);
-
-        int cy = panel_y + 164;
-        draw_setting_card(ren, 48,  cy, 284, "UP/DN", "VOLUME", volume_value, 0);
-        draw_setting_card(ren, 348, cy, 284, "Y", audio_label, audio_value, 0);
-        draw_setting_card(ren, 648, cy, 284, "X", subtitle_label, subtitle_value, sidx >= 0);
-        draw_setting_card(ren, 948, cy, 284, "+", "MODO DO PAINEL",
-                          hud_pinned ? "Fixo" : "Automatico", hud_pinned);
-    } else {
-        int y = panel_y + 91;
-        draw_control(ren, 48,   y, 190, "A", "Pausar", 0);
-        draw_control(ren, 258,  y, 190, "L/R", "10s", 0);
-        draw_control(ren, 468,  y, 220, "ZL/ZR", "60s", 0);
-        draw_control(ren, 708,  y, 280, "LS/+", "Buscar / Opcoes", 0);
-        draw_control(ren, 1008, y, 224, "B", "Voltar", 0);
-    }
-}
-
-static void draw_center_state(SDL_Renderer *ren, const char *state, const char *detail, int accent) {
-    const int w = 410, h = 108, x = (PWIN_W - w) / 2, y = (PWIN_H - h) / 2 - 15;
-    pfill(ren, x, y, w, h, PC_DARK, 225);
-    pfill(ren, x, y, 6, h, accent ? PC_ACC : PC_ACC2, 255);
-    int sw = 0, sh = 0;
-    SDL_Texture *st = text_cached(ren, state, PC_TEXT, 1, &sw, &sh);
-    if (st) { SDL_Rect d = { x + (w - sw) / 2, y + 18, sw, sh }; SDL_RenderCopy(ren, st, NULL, &d); }
-    int dw = 0, dh = 0;
-    SDL_Texture *dt = text_cached(ren, detail, PC_MUT, 0, &dw, &dh);
-    if (dt) { SDL_Rect d = { x + (w - dw) / 2, y + 65, dw, dh }; SDL_RenderCopy(ren, dt, NULL, &d); }
-}
 
 static int chapter_at(AVFormatContext *fmt, double target, double timeline_origin,
                       char *label, size_t label_cap) {
@@ -424,36 +224,6 @@ static double adjacent_chapter(AVFormatContext *fmt, double target, int forward,
         return 0;
     }
     return target;
-}
-
-static void draw_timeline_seek(SDL_Renderer *ren, AVFormatContext *fmt,
-                               double from, double target, double dur,
-                               double timeline_origin) {
-    const int x = 330, y = 126, w = 620, h = 214;
-    char target_time[20], total_time[20], delta[72];
-    fmt_time(target, target_time, sizeof(target_time));
-    fmt_time(dur, total_time, sizeof(total_time));
-    double difference = target - from;
-    snprintf(delta, sizeof(delta), "%s%.0f segundos  |  %s / %s",
-             difference >= 0 ? "+" : "", difference, target_time, total_time);
-    pfill(ren, x, y, w, h, PC_DARK, 245);
-    pfill(ren, x, y, 6, h, PC_ACC, 255);
-    text_draw(ren, "ESCOLHER PONTO DO VIDEO", x + 34, y + 22, PC_ACC, 0);
-    text_draw(ren, target_time, x + 34, y + 56, PC_TEXT, 1);
-    draw_clipped_text(ren, delta, x + 190, y + 64, w - 224, PC_MUT, 0);
-    char chapter[160];
-    int chapter_index = chapter_at(fmt, target, timeline_origin, chapter, sizeof(chapter));
-    if (chapter_index >= 0) {
-        char chapter_line[196];
-        snprintf(chapter_line, sizeof(chapter_line), "CAPITULO %d/%u  %s", chapter_index + 1, fmt->nb_chapters, chapter);
-        draw_clipped_text(ren, chapter_line, x + 34, y + 104, w - 68, PC_ACC2, 0);
-    } else text_draw(ren, "Mova o analogico para ajustar", x + 34, y + 104, PC_MUT, 0);
-    draw_clipped_text(ren, chapter_index >= 0 ?
-                      "Cima/baixo Capitulos  |  Analogico Ajustar" :
-                      "Analogico Ajustar  |  Nada muda sem confirmar",
-                      x + 34, y + 140, w - 68, PC_MUT, 0);
-    text_draw(ren, "A Ir para este ponto", x + 34, y + 176, PC_TEXT, 0);
-    text_draw(ren, "B Cancelar", x + 382, y + 176, PC_MUT, 0);
 }
 
 static int apply_player_seek(AVFormatContext *fmt, AVCodecContext *vctx,
@@ -538,42 +308,119 @@ static void ass_to_text(const char *ass, char *out, int cap) {
     }
     out[k] = 0;
 }
-// desenha a legenda centralizada perto do rodape (com faixa de fundo).
-static void draw_sub(SDL_Renderer *ren, const char *txt) {
-    if (!txt || !txt[0]) return;
-    SDL_Color white = { 245, 245, 245, 255 };
-    const int maxw = PWIN_W - 100;
-    char line1[512] = {0}, line2[512] = {0};
-    snprintf(line1, sizeof(line1), "%s", txt);
-    int full_w = 0, full_h = 0;
-    text_cached(ren, line1, white, 0, &full_w, &full_h);
-    if (full_w > maxw) {
-        size_t len = strlen(line1), middle = len / 2, split = middle;
-        while (split > 0 && line1[split] != ' ') split--;
-        if (split == 0) { split = middle; while (split < len && line1[split] != ' ') split++; }
-        if (split > 0 && split < len) {
-            snprintf(line2, sizeof(line2), "%s", line1 + split + 1);
-            line1[split] = '\0';
-        }
-    }
-    int w1 = 0, h1 = 0, w2 = 0, h2 = 0;
-    SDL_Texture *t1 = text_cached(ren, line1, white, 0, &w1, &h1);
-    SDL_Texture *t2 = line2[0] ? text_cached(ren, line2, white, 0, &w2, &h2) : NULL;
-    int boxw = w1 > w2 ? w1 : w2; if (boxw > maxw) boxw = maxw;
-    int boxh = h1 + (t2 ? h2 + 4 : 0);
-    int x = (PWIN_W - boxw) / 2, y = PWIN_H - 205 - (t2 ? h2 + 4 : 0);
-    SDL_Color black = { 0, 0, 0, 255 };
-    pfill(ren, x - 16, y - 7, boxw + 32, boxh + 14, black, 175);
-    if (t1) {
-        int rw = w1 > maxw ? maxw : w1;
-        SDL_Rect src = { 0, 0, rw, h1 }, d = { (PWIN_W - rw) / 2, y, rw, h1 };
-        SDL_RenderCopy(ren, t1, w1 > maxw ? &src : NULL, &d);
-    }
-    if (t2) {
-        int rw = w2 > maxw ? maxw : w2;
-        SDL_Rect src = { 0, 0, rw, h2 }, d = { (PWIN_W - rw) / 2, y + h1 + 4, rw, h2 };
-        SDL_RenderCopy(ren, t2, w2 > maxw ? &src : NULL, &d);
-    }
+// ---------------------------------------------------------------- estado do HUD
+#define HUD_TIMEOUT_MS 3500
+#define SCRUB_COMMIT_MS 1000
+#define FLASH_MS 600
+#define NEXT_CARD_SECONDS 30.0
+
+typedef struct {
+    Uint32 last_input, flash_at, notice_until, vol_until, paused_since, scrub_last;
+    Uint32 held_since, held_next, last_anim;
+    float hud_alpha, pause_alpha, vol_alpha, notice_alpha, next_alpha;
+    int focus, pinned, panel_open, panel_col, panel_audio_sel, panel_sub_sel;
+    int flash, flash_seconds, scrubbing, scrub_was_paused, held_button;
+    int next_dismissed, next_was_visible;
+    double scrub_target;
+    char notice[112];
+} PlayerUi;
+
+static void ui_touch(PlayerUi *ui) { ui->last_input = SDL_GetTicks(); }
+
+static void ui_notice(PlayerUi *ui, const char *text, Uint32 ms) {
+    snprintf(ui->notice, sizeof(ui->notice), "%s", text ? text : "");
+    ui->notice_until = SDL_GetTicks() + ms;
+}
+
+static void ui_flash(PlayerUi *ui, int kind, int seconds) {
+    ui->flash = kind; ui->flash_seconds = seconds; ui->flash_at = SDL_GetTicks();
+}
+
+static int ui_hud_wanted(const PlayerUi *ui, int paused, Uint32 now) {
+    return ui->pinned || paused || ui->panel_open || ui->scrubbing ||
+           (Uint32)(now - ui->last_input) < HUD_TIMEOUT_MS;
+}
+
+static float ui_approach(float value, float target, float step) {
+    if (value < target) { value += step; if (value > target) value = target; }
+    else if (value > target) { value -= step; if (value < target) value = target; }
+    return value;
+}
+
+// Transicoes suaves: o HUD aparece/some em ~0,2 s, a sinopse de pausa entra
+// depois de 1,2 s parado e o cartao de proximo episodio desliza.
+static void ui_animate(PlayerUi *ui, int paused, int card_visible, Uint32 now) {
+    float dt = (Uint32)(now - ui->last_anim) / 1000.0f;
+    if (dt > 0.1f) dt = 0.1f;
+    ui->last_anim = now;
+    ui->hud_alpha = ui_approach(ui->hud_alpha, ui_hud_wanted(ui, paused, now) ? 1.0f : 0.0f, dt / 0.22f);
+    int pause_info = paused && !ui->panel_open && !ui->scrubbing && (Uint32)(now - ui->paused_since) > 1200;
+    ui->pause_alpha = ui_approach(ui->pause_alpha, pause_info ? 1.0f : 0.0f, dt / 0.45f);
+    ui->vol_alpha = ui_approach(ui->vol_alpha, SDL_TICKS_PASSED(now, ui->vol_until) ? 0.0f : 1.0f, dt / 0.15f);
+    ui->notice_alpha = ui_approach(ui->notice_alpha, SDL_TICKS_PASSED(now, ui->notice_until) ? 0.0f : 1.0f, dt / 0.2f);
+    ui->next_alpha = ui_approach(ui->next_alpha, card_visible ? 1.0f : 0.0f, dt / 0.3f);
+}
+
+// Ordem dos controles na fileira inferior (mesma ordem visual do HUD).
+static int ui_row(int tracks, int has_next, int card, int *row) {
+    int n = 0;
+    row[n++] = PUI_FOCUS_PLAY; row[n++] = PUI_FOCUS_REW; row[n++] = PUI_FOCUS_FWD; row[n++] = PUI_FOCUS_VOLUME;
+    if (tracks) row[n++] = PUI_FOCUS_TRACKS;
+    if (has_next) row[n++] = PUI_FOCUS_NEXT;
+    if (card) row[n++] = PUI_FOCUS_NEXT_CARD;
+    return n;
+}
+
+static int ui_move_focus(int focus, int dir, const int *row, int n) {
+    int index = -1;
+    for (int i = 0; i < n; i++) if (row[i] == focus) index = i;
+    if (index < 0) return row[0];
+    index += dir;
+    if (index < 0) index = 0;
+    if (index >= n) index = n - 1;
+    return row[index];
+}
+
+// Passo da busca pela timeline: comeca fino e acelera enquanto a direcao e segurada.
+static double ui_scrub_step(Uint32 held_ms, double dur) {
+    double step = held_ms < 1200 ? 10.0 : held_ms < 3000 ? 30.0 : 60.0;
+    if (dur > 0 && dur < 600 && step > 10.0) step = 10.0;
+    return step;
+}
+
+static void sync_hud(PlayerHud *h, PlayerUi *ui, double pos, double dur, int paused, int vol,
+                     int card_visible, int acur, int scur, const char *subtitle_text,
+                     const char *scrub_label, Uint32 now) {
+    h->pos = pos; h->dur = dur; h->paused = paused; h->volume = vol;
+    h->scrubbing = ui->scrubbing; h->scrub_target = ui->scrub_target;
+    h->scrub_label = ui->scrubbing ? scrub_label : NULL;
+    h->hud_alpha = ui->hud_alpha;
+    h->pause_info_alpha = ui->pause_alpha;
+    h->focus = ui->focus;
+    h->volume_popup_alpha = ui->vol_alpha;
+    h->next_card_alpha = ui->next_alpha;
+    double remaining = dur - pos;
+    h->next_card_progress = card_visible ? (float)(1.0 - remaining / NEXT_CARD_SECONDS) : 0.0f;
+    Uint32 flash_age = (Uint32)(now - ui->flash_at);
+    h->flash = flash_age < FLASH_MS ? ui->flash : PUI_FLASH_NONE;
+    h->flash_t = flash_age / (float)FLASH_MS;
+    h->flash_seconds = ui->flash_seconds;
+    h->notice = ui->notice_alpha > 0.01f ? ui->notice : NULL;
+    h->notice_alpha = ui->notice_alpha;
+    h->panel_open = ui->panel_open;
+    h->panel_column = ui->panel_col;
+    h->audio_sel = ui->panel_audio_sel; h->audio_current = acur;
+    h->sub_sel = ui->panel_sub_sel; h->sub_current = scur + 1;
+    h->subtitle_text = subtitle_text;
+}
+
+static void present_player(SDL_Renderer *ren, SDL_Texture *tex, const SDL_Rect *dst,
+                           int have_frame, const PlayerHud *hud) {
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    SDL_RenderClear(ren);
+    if (have_frame && tex) SDL_RenderCopy(ren, tex, NULL, dst);
+    pui_draw(ren, hud, SDL_GetTicks());
+    SDL_RenderPresent(ren);
 }
 
 typedef struct { 
@@ -602,9 +449,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     const char *url = req->url;
     int is_hls = (req->container && !strcmp(req->container, "m3u8"));
     const char *title = req->title;
+    g_hls_io_opened = 0;
+    nplay_curl_avio_trace_reset();
     // Tela de preparacao enquanto abre a conexao e le os metadados.
-    SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
-    draw_center_state(ren, "PREPARANDO VIDEO", "Conectando...  |  B para cancelar", 0);
+    pui_draw_loading(ren, title, "Preparando video", "Conectando ao servidor...", SDL_GetTicks(), 0);
     SDL_RenderPresent(ren);
 
     // Arquivos sdmc:/ usam o protocolo local. HLS remoto delega master, filhos e
@@ -669,7 +517,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         fmt->subtitle_codec_id = AV_CODEC_ID_WEBVTT;
     }
     PlayerOpenDeadline open_watch = {
-        av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL), joy, 0
+        av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL), joy, 0,
+        ren, title, "Preparando video", "Conectando ao servidor...", SDL_GetTicks()
     };
     fmt->interrupt_callback.callback = player_open_interrupted;
     fmt->interrupt_callback.opaque = &open_watch;
@@ -714,8 +563,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     diag_player_event("format", "open-ok", "streams=%u", fmt->nb_streams);
     player_boot_stage("04 fonte aberta");
-    SDL_SetRenderDrawColor(ren, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255); SDL_RenderClear(ren);
-    draw_center_state(ren, "PREPARANDO VIDEO", native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...", 0);
+    open_watch.detail = native_hls ? "Playlist aberta. Lendo video e audio..." : "Fonte aberta. Lendo video e audio...";
+    pui_draw_loading(ren, title, open_watch.headline, open_watch.detail, SDL_GetTicks(), 0);
     SDL_RenderPresent(ren);
     open_watch.deadline_us = av_gettime_relative() + (native_hls ? 20000000LL : 30000000LL);
     // Na abertura HLS, priorize video e um audio. Legendas e audios alternativos
@@ -758,6 +607,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         for (unsigned i = 0; i < saved_count; i++) fmt->streams[i]->discard = saved_discard[i];
     }
     open_watch.deadline_us = 0;
+    open_watch.ren = NULL;  // daqui em diante o callback nao desenha mais
     if (rc < 0) {
         diag_player_event("format", "probe-fail", "rc=%d streams=%u", rc, fmt->nb_streams);
         if (open_watch.cancelled) player_error_message("Abertura cancelada");
@@ -843,6 +693,47 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double timeline_origin = (fmt->start_time != AV_NOPTS_VALUE)
         ? fmt->start_time / (double)AV_TIME_BASE : 0;
     if (out_dur) *out_dur = dur;
+
+    // Rotulos do painel de audio e legendas (titulo da faixa ou idioma).
+    char audio_names[16][96], audio_details[16][96], sub_names[17][96];
+    for (int i = 0; i < naud; i++) {
+        AVStream *st = fmt->streams[aidxs[i]];
+        AVDictionaryEntry *tt = av_dict_get(st->metadata, "title", NULL, 0);
+        const char *lang = stream_lang(fmt, aidxs[i]);
+        const char *name = lang_name(lang);
+        int channels = st->codecpar->ch_layout.nb_channels;
+        snprintf(audio_names[i], sizeof(audio_names[i]), "%s",
+                 tt && tt->value && tt->value[0] ? tt->value : strcmp(name, "Desconhecido") ? name : lang);
+        snprintf(audio_details[i], sizeof(audio_details[i]), "%s  |  %s  |  %d canal%s", lang_label(lang),
+                 avcodec_get_name(st->codecpar->codec_id), channels, channels == 1 ? "" : "is");
+    }
+    snprintf(sub_names[0], sizeof(sub_names[0]), "Desligadas");
+    for (int i = 0; i < nsub; i++) {
+        AVDictionaryEntry *tt = av_dict_get(fmt->streams[sidxs[i]]->metadata, "title", NULL, 0);
+        const char *lang = stream_lang(fmt, sidxs[i]);
+        const char *name = lang_name(lang);
+        snprintf(sub_names[i + 1], sizeof(sub_names[i + 1]), "%s",
+                 tt && tt->value && tt->value[0] ? tt->value : strcmp(name, "Desconhecido") ? name : lang);
+    }
+    double chapter_starts[64];
+    int chapter_count = 0;
+    for (unsigned i = 0; i < fmt->nb_chapters && chapter_count < 64; i++) {
+        AVChapter *chapter = fmt->chapters[i];
+        chapter_starts[chapter_count++] = chapter->start * av_q2d(chapter->time_base) - timeline_origin;
+    }
+    PlayerHud hud;
+    memset(&hud, 0, sizeof(hud));
+    hud.title = title;
+    hud.subtitle = req->subtitle;
+    hud.overview = req->overview;
+    hud.has_next = req->has_next;
+    hud.next_title = req->next_title;
+    hud.audio_count = naud;
+    hud.sub_count = nsub + 1;
+    for (int i = 0; i < naud; i++) { hud.audio_names[i] = audio_names[i]; hud.audio_details[i] = audio_details[i]; }
+    for (int i = 0; i <= nsub; i++) hud.sub_names[i] = sub_names[i];
+    hud.chapters = chapter_starts;
+    hud.chapter_count = chapter_count;
 
     AVCodecContext *vctx = NULL, *actx = NULL;
     struct SwrContext *swr = NULL;
@@ -943,32 +834,35 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double audio_clock = 0, wall_start = av_gettime() / 1000000.0;
     double last_ac = -1, last_ac_wall = av_gettime() / 1000000.0;  // detecta audio travado
     double cur_pos = 0;
-    int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0;
+    int running = 1, paused = 0, vol = 100, reached_end = 0, playback_error = 0, want_next = 0;
     int decoded_video = 0, dropped_video = 0, buffering_events = 0, hardware_decode = 0;
     unsigned max_audio_queue = 0;
     store_load_player_volume(&vol);
     int swr_rate = 0, swr_fmt = -1, swr_ch = 0;   // config atual do resample (do frame real)
     uint8_t *audio_buf = NULL;
     unsigned int audio_buf_cap = 0;                // reutilizado entre frames (evita churn no heap)
-    Uint32 hud_until = SDL_GetTicks() + 4000;   // HUD visivel ao iniciar
     Uint32 buffering_since = 0;
-    Uint32 notice_until = 0;
-    char notice[96] = "";
-    int hud_pinned = 0, have_video_frame = 0;
+    int have_video_frame = 0;
     int logged_first_read = 0, logged_first_video_packet = 0;
     int logged_first_video_frame = 0, logged_first_present = 0;
-    int track_menu = 0, track_sel = 0;
-    int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
-    int seek_arm_dir = 0;
-    double timeline_seek_from = 0, timeline_seek_target = 0;
-    Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
+    int seek_axis_lock = 0, seek_arm_dir = 0;
+    Uint32 seek_arm_since = 0, stick_tick = SDL_GetTicks();
+    char scrub_label[160] = "";
+    PlayerUi ui;
+    memset(&ui, 0, sizeof(ui));
+    ui.last_input = ui.last_anim = SDL_GetTicks();
+    ui.hud_alpha = 1.0f;                 // HUD visivel ao iniciar
+    ui.focus = PUI_FOCUS_PLAY;
+    ui.held_button = -1;
     SDL_Event e;
 
-    // Retoma de onde parou somente quando ha margem suficiente ate o fim.
+    // Retoma de onde parou somente quando ha margem suficiente ate o fim e o
+    // FFmpeg confirma a busca; sem isso o HUD e o progresso salvo mentiriam.
     if (start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
-        av_seek_frame(fmt, -1, (int64_t)((start_sec + timeline_origin) * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
-        audio_clock = start_sec; cur_pos = start_sec;
-        wall_start = av_gettime() / 1000000.0 - start_sec;
+        if (av_seek_frame(fmt, -1, (int64_t)((start_sec + timeline_origin) * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD) >= 0) {
+            audio_clock = start_sec; cur_pos = start_sec;
+            wall_start = av_gettime() / 1000000.0 - start_sec;
+        } else diag_player_event("player", "resume-seek-fail", "target=%.1f", start_sec);
     }
 
     // Heartbeat & Progress tracking are now managed by a separate thread
@@ -976,6 +870,34 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     PlaybackHeartbeat *hb = heartbeat;
     if (hb) SDL_AtomicSet(&hb->pipeline_ready, 1);
     player_boot_stage("09 reproduzindo");
+
+    // Operacoes usadas pelos controles. Macros porque dependem do estado local
+    // do pipeline (clocks, decoders e dispositivo de audio).
+#define SEEK_TO(target) apply_player_seek(fmt, vctx, actx, sctx, adev, (target), timeline_origin, \
+        &wall_start, &audio_clock, &cur_pos, &last_ac, &last_ac_wall, sub_text, &sub_end)
+#define REANCHOR_CLOCKS() do { double rn_ = av_gettime() / 1000000.0; wall_start = rn_ - cur_pos; \
+        last_ac = -1; last_ac_wall = rn_; } while (0)
+#define TOGGLE_PAUSE() do { paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused); \
+        if (paused) { ui.paused_since = SDL_GetTicks(); if (hb) SDL_AtomicSet(&hb->force_progress, 1); } \
+        else REANCHOR_CLOCKS(); \
+        ui_flash(&ui, paused ? PUI_FLASH_PAUSE : PUI_FLASH_PLAY, 0); } while (0)
+#define JUMP(delta) do { double d_ = (delta), t_ = cur_pos + d_; if (t_ < 0) t_ = 0; \
+        if (dur > 0 && t_ > dur - 1) t_ = dur - 1; \
+        if (SEEK_TO(t_) == 0) { ui_flash(&ui, d_ > 0 ? PUI_FLASH_FWD : PUI_FLASH_REW, (int)(d_ > 0 ? d_ : -d_)); \
+            if (hb) SDL_AtomicSet(&hb->force_progress, 1); } \
+        else ui_notice(&ui, "Nao foi possivel buscar neste video", 1800); } while (0)
+#define SCRUB_BEGIN() do { if (!ui.scrubbing && dur > 1) { ui.scrubbing = 1; ui.scrub_was_paused = paused; \
+        ui.scrub_target = cur_pos; ui.focus = PUI_FOCUS_TIMELINE; \
+        if (adev && !paused) { SDL_PauseAudioDevice(adev, 1); } paused = 1; } } while (0)
+#define SCRUB_END(commit) do { if (ui.scrubbing) { ui.scrubbing = 0; paused = ui.scrub_was_paused; \
+        if (commit) { if (SEEK_TO(ui.scrub_target) == 0) { if (hb) SDL_AtomicSet(&hb->force_progress, 1); } \
+            else ui_notice(&ui, "Nao foi possivel buscar neste video", 1800); } \
+        else REANCHOR_CLOCKS(); \
+        if (adev && !paused) { SDL_PauseAudioDevice(adev, 0); } ui.scrub_last = 0; seek_axis_lock = 1; } } while (0)
+#define PANEL_OPEN(column) do { ui.panel_open = 1; ui.panel_col = (column); ui.panel_audio_sel = acur; \
+        ui.panel_sub_sel = scur + 1; if (adev && !paused) SDL_PauseAudioDevice(adev, 1); } while (0)
+#define PANEL_CLOSE() do { ui.panel_open = 0; audio_clock = cur_pos; REANCHOR_CLOCKS(); \
+        if (adev && !paused) SDL_PauseAudioDevice(adev, 0); } while (0)
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
@@ -987,155 +909,194 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
         }
 
+        int tracks_available = naud > 1 || nsub > 0;
+        int card_visible = req->has_next && dur > 60 && dur - cur_pos <= NEXT_CARD_SECONDS &&
+                           !ui.next_dismissed && !ui.panel_open;
+        if (card_visible && !ui.next_was_visible) ui.focus = PUI_FOCUS_NEXT_CARD;
+        if (!card_visible && ui.focus == PUI_FOCUS_NEXT_CARD) ui.focus = PUI_FOCUS_PLAY;
+        ui.next_was_visible = card_visible;
+
+        // Coleta botoes: eventos novos e repeticao do direcional segurado.
+        int pending[16], pending_repeat[16], npending = 0;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0;
-            else if (e.type == SDL_JOYBUTTONDOWN) {
-                int b = e.jbutton.button;
-                hud_until = SDL_GetTicks() + 4000;
-                if (timeline_seek) {
-                    if (b == JOY_A) {
-                        if (apply_player_seek(fmt, vctx, actx, sctx, adev,
-                                              timeline_seek_target, timeline_origin,
-                                              &wall_start, &audio_clock, &cur_pos,
-                                              &last_ac, &last_ac_wall, sub_text, &sub_end) == 0) {
-                            snprintf(notice, sizeof(notice), "Reproducao em %.0f%%",
-                                     dur > 0 ? timeline_seek_target * 100.0 / dur : 0.0);
-                            if (hb) SDL_AtomicSet(&hb->force_progress, 1);
-                        } else snprintf(notice, sizeof(notice), "Nao foi possivel buscar neste video");
-                        notice_until = SDL_GetTicks() + 2000;
-                        timeline_seek = 0; seek_axis_lock = 1;
-                        paused = timeline_seek_was_paused;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
-                    } else if (b == JOY_B || b == JOY_MINUS) {
-                        timeline_seek = 0; seek_axis_lock = 1;
-                        paused = timeline_seek_was_paused;
-                        double resume_now = av_gettime() / 1000000.0;
-                        wall_start = resume_now - cur_pos;
-                        last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
-                        snprintf(notice, sizeof(notice), "Busca cancelada");
-                        notice_until = SDL_GetTicks() + 1500;
-                    } else if ((b == JOY_UP || b == JOY_DOWN) && fmt->nb_chapters > 0) {
-                        timeline_seek_target = adjacent_chapter(fmt, timeline_seek_target,
-                                                               b == JOY_DOWN, timeline_origin);
-                        if (timeline_seek_target < 0) timeline_seek_target = 0;
-                        if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
-                    } else if (b == JOY_DLEFT || b == JOY_DRIGHT ||
-                               b == JOY_L || b == JOY_R || b == JOY_ZL || b == JOY_ZR) {
-                        double step = (b == JOY_ZL || b == JOY_ZR) ? 60.0 : 10.0;
-                        int forward = b == JOY_DRIGHT || b == JOY_R || b == JOY_ZR;
-                        timeline_seek_target += forward ? step : -step;
-                        if (timeline_seek_target < 0) timeline_seek_target = 0;
-                        if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
-                    }
-                    continue;
-                }
-                if (track_menu) {
-                    int total = (track_menu == TRACK_MENU_AUDIO) ? naud : nsub + 1;
-                    if (b == JOY_UP && track_sel > 0) track_sel--;
-                    else if (b == JOY_DOWN && track_sel + 1 < total) track_sel++;
-                    else if (b == JOY_B || b == JOY_MINUS ||
-                             (track_menu == TRACK_MENU_AUDIO && b == JOY_Y) ||
-                             (track_menu == TRACK_MENU_SUB && b == JOY_X)) {
-                        track_menu = 0;
-                        double resume_now = av_gettime() / 1000000.0;
-                        wall_start = resume_now - cur_pos;
-                        audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
-                    } else if (b == JOY_A) {
-                        if (track_menu == TRACK_MENU_AUDIO) {
-                            if (track_sel == acur) {
-                                snprintf(notice, sizeof(notice), "Audio atual mantido");
-                            } else {
-                                int next_idx = aidxs[track_sel];
-                                if (!adev) {
-                                    snprintf(notice, sizeof(notice), "Saida de audio indisponivel");
-                                } else if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
-                                    acur = track_sel; aidx = next_idx;
-                                    atb = fmt->streams[aidx]->time_base;
-                                    if (adev) SDL_ClearQueuedAudio(adev);
-                                    audio_clock = cur_pos; last_ac = -1;
-                                    last_ac_wall = av_gettime() / 1000000.0;
-                                    char lang[48]; format_language(stream_lang(fmt, aidx), lang, sizeof(lang));
-                                    snprintf(notice, sizeof(notice), "Audio %d/%d  %s", acur + 1, naud, lang);
-                                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidx]->metadata, "language", NULL, 0);
-                                    if (tag) store_save_pref_audio(tag->value);
-                                } else snprintf(notice, sizeof(notice), "Nao consegui abrir esta faixa de audio");
-                            }
+            if (e.type == SDL_QUIT) { running = 0; break; }
+            if (e.type != SDL_JOYBUTTONDOWN || npending >= 16) continue;
+            int b = e.jbutton.button;
+            pending[npending] = b; pending_repeat[npending++] = 0;
+            if (b == JOY_UP || b == JOY_DOWN || b == JOY_DLEFT || b == JOY_DRIGHT) {
+                ui.held_button = b; ui.held_since = now_ticks; ui.held_next = now_ticks + 380;
+            }
+        }
+        if (ui.held_button >= 0) {
+            if (!joy || !SDL_JoystickGetButton(joy, ui.held_button)) ui.held_button = -1;
+            else if (SDL_TICKS_PASSED(now_ticks, ui.held_next) && npending < 16) {
+                pending[npending] = ui.held_button; pending_repeat[npending++] = 1;
+                ui.held_next = now_ticks + 110;
+            }
+        }
+
+        for (int k = 0; k < npending && running; k++) {
+            int b = pending[k], repeat = pending_repeat[k];
+            Uint32 tnow = SDL_GetTicks();
+            int was_visible = ui_hud_wanted(&ui, paused, tnow);
+            int vol_popup = !SDL_TICKS_PASSED(tnow, ui.vol_until);
+            if (b == JOY_MINUS) { running = 0; break; }   // saida rapida por compatibilidade
+
+            // ---- painel de audio e legendas
+            if (ui.panel_open) {
+                ui_touch(&ui);
+                if (b == JOY_B || b == JOY_PLUS || (b == JOY_Y && ui.panel_col == 0) ||
+                    (b == JOY_X && ui.panel_col == 1)) { PANEL_CLOSE(); continue; }
+                if (b == JOY_Y && naud > 0) ui.panel_col = 0;
+                else if (b == JOY_X && nsub > 0) ui.panel_col = 1;
+                else if (b == JOY_DLEFT && ui.panel_col == 1 && naud > 0) ui.panel_col = 0;
+                else if (b == JOY_DRIGHT && ui.panel_col == 0 && nsub > 0) ui.panel_col = 1;
+                else if (b == JOY_UP) {
+                    if (ui.panel_col == 0 && ui.panel_audio_sel > 0) ui.panel_audio_sel--;
+                    if (ui.panel_col == 1 && ui.panel_sub_sel > 0) ui.panel_sub_sel--;
+                } else if (b == JOY_DOWN) {
+                    if (ui.panel_col == 0 && ui.panel_audio_sel + 1 < naud) ui.panel_audio_sel++;
+                    if (ui.panel_col == 1 && ui.panel_sub_sel < nsub) ui.panel_sub_sel++;
+                } else if (b == JOY_A && ui.panel_col == 0) {
+                    int sel = ui.panel_audio_sel;
+                    if (sel == acur) ui_notice(&ui, "Este audio ja esta tocando", 1600);
+                    else if (!adev) ui_notice(&ui, "Saida de audio indisponivel", 2000);
+                    else if (open_audio_dec(fmt, aidxs[sel], &actx, &swr, OCH, ORATE) == 0) {
+                        acur = sel; aidx = aidxs[sel];
+                        atb = fmt->streams[aidx]->time_base;
+                        SDL_ClearQueuedAudio(adev);
+                        audio_clock = cur_pos; last_ac = -1;
+                        last_ac_wall = av_gettime() / 1000000.0;
+                        char msg[112]; snprintf(msg, sizeof(msg), "Audio: %s", audio_names[acur]);
+                        ui_notice(&ui, msg, 2000);
+                        AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidx]->metadata, "language", NULL, 0);
+                        if (tag) store_save_pref_audio(tag->value);
+                    } else ui_notice(&ui, "Nao consegui abrir esta faixa de audio", 2200);
+                } else if (b == JOY_A && ui.panel_col == 1) {
+                    int next = ui.panel_sub_sel - 1;
+                    if (next == scur) ui_notice(&ui, "Esta legenda ja esta ativa", 1600);
+                    else if (open_sub_dec(fmt, next >= 0 ? sidxs[next] : -1, &sctx) == 0) {
+                        scur = next; sub_text[0] = 0; sub_end = 0;
+                        char msg[112];
+                        if (scur >= 0) {
+                            snprintf(msg, sizeof(msg), "Legendas: %s", sub_names[scur + 1]);
+                            AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[scur]]->metadata, "language", NULL, 0);
+                            if (tag) store_save_pref_sub(tag->value);
                         } else {
-                            int next = track_sel - 1;
-                            if (next == scur) {
-                                snprintf(notice, sizeof(notice), "Legenda atual mantida");
-                            } else if (open_sub_dec(fmt, next >= 0 ? sidxs[next] : -1, &sctx) == 0) {
-                                scur = next; sub_text[0] = 0; sub_end = 0;
-                                if (scur >= 0) {
-                                    char lang[48]; format_language(stream_lang(fmt, sidxs[scur]), lang, sizeof(lang));
-                                    snprintf(notice, sizeof(notice), "Legenda %d/%d  %s", scur + 1, nsub, lang);
-                                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[scur]]->metadata, "language", NULL, 0);
-                                    if (tag) store_save_pref_sub(tag->value);
-                                } else {
-                                    snprintf(notice, sizeof(notice), "Legendas desligadas");
-                                    store_save_pref_sub("off");
-                                }
-                            } else snprintf(notice, sizeof(notice), "Nao consegui abrir esta legenda");
+                            snprintf(msg, sizeof(msg), "Legendas desligadas");
+                            store_save_pref_sub("off");
                         }
-                        notice_until = SDL_GetTicks() + 2200;
-                        track_menu = 0;
-                        double resume_now = av_gettime() / 1000000.0;
-                        wall_start = resume_now - cur_pos;
-                        audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        ui_notice(&ui, msg, 2000);
+                    } else ui_notice(&ui, "Nao consegui abrir esta legenda", 2200);
+                }
+                continue;
+            }
+
+            // ---- escolhendo um ponto na timeline
+            if (ui.scrubbing) {
+                ui_touch(&ui);
+                if (b == JOY_A) SCRUB_END(1);
+                else if (b == JOY_B) { SCRUB_END(0); ui_notice(&ui, "Busca cancelada", 1400); }
+                else if (b == JOY_DLEFT || b == JOY_DRIGHT || b == JOY_L || b == JOY_R ||
+                         b == JOY_ZL || b == JOY_ZR) {
+                    int forward = b == JOY_DRIGHT || b == JOY_R || b == JOY_ZR;
+                    double step = (b == JOY_ZL || b == JOY_ZR) ? 60.0 :
+                                  (b == JOY_L || b == JOY_R) ? 10.0 :
+                                  ui_scrub_step(repeat ? (Uint32)(tnow - ui.held_since) : 0, dur);
+                    ui.scrub_target += forward ? step : -step;
+                    if (ui.scrub_target < 0) ui.scrub_target = 0;
+                    if (ui.scrub_target > dur - 1) ui.scrub_target = dur - 1;
+                    ui.scrub_last = tnow;
+                } else if ((b == JOY_UP || b == JOY_DOWN) && fmt->nb_chapters > 0) {
+                    ui.scrub_target = adjacent_chapter(fmt, ui.scrub_target, b == JOY_DOWN, timeline_origin);
+                    if (ui.scrub_target < 0) ui.scrub_target = 0;
+                    if (ui.scrub_target > dur - 1) ui.scrub_target = dur - 1;
+                    ui.scrub_last = tnow;
+                } else if (b == JOY_DOWN) SCRUB_END(1);
+                continue;
+            }
+
+            if (b == JOY_B) {
+                if (card_visible && ui.focus == PUI_FOCUS_NEXT_CARD) {
+                    ui.next_dismissed = 1; ui.focus = PUI_FOCUS_PLAY; ui_touch(&ui); continue;
+                }
+                if (vol_popup) { ui.vol_until = tnow; ui_touch(&ui); continue; }
+                running = 0; break;
+            }
+            ui_touch(&ui);
+            int row[8], nrow = ui_row(tracks_available, req->has_next, card_visible, row);
+            switch (b) {
+                case JOY_A:
+                    // O cartao de proximo episodio aparece mesmo com o HUD escondido
+                    // e anuncia "A Assistir agora"; nesse caso A nao pausa.
+                    if (!was_visible && !(card_visible && ui.focus == PUI_FOCUS_NEXT_CARD)) {
+                        TOGGLE_PAUSE(); break;
                     }
-                    continue;
-                }
-                if (b == JOY_B || b == JOY_MINUS) running = 0;
-                else if (b == JOY_PLUS) hud_pinned = !hud_pinned;
-                else if (b == JOY_A) {
-                    paused = !paused;
-                    if (adev) SDL_PauseAudioDevice(adev, paused);
-                    if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
-                }
-                else if (b == JOY_UP || b == JOY_DOWN) {
-                    vol += (b == JOY_UP) ? 10 : -10;
-                    if (vol > 100) vol = 100;
-                    if (vol < 0) vol = 0;
-                    snprintf(notice, sizeof(notice), "Volume  %d%%", vol);
-                    notice_until = SDL_GetTicks() + 1800;
-                }
-                else if (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL) {
-                    double step = (b == JOY_ZR || b == JOY_ZL) ? 60 : 10;
-                    int forward = (b == JOY_R || b == JOY_ZR);
-                    double t = cur_pos + (forward ? step : -step);
-                    if (t < 0) t = 0;
-                    if (dur > 0 && t > dur - 1) t = dur - 1;
-                    if (apply_player_seek(fmt, vctx, actx, sctx, adev, t,
-                                          timeline_origin, &wall_start, &audio_clock,
-                                          &cur_pos, &last_ac, &last_ac_wall,
-                                          sub_text, &sub_end) == 0) {
-                        snprintf(notice, sizeof(notice), "%s %.0f segundos", forward ? "Avancou" : "Voltou", step);
-                        if (hb) SDL_AtomicSet(&hb->force_progress, 1);
-                    } else {
-                        snprintf(notice, sizeof(notice), "Nao foi possivel buscar neste video");
+                    switch (ui.focus) {
+                        case PUI_FOCUS_REW: JUMP(-10.0); break;
+                        case PUI_FOCUS_FWD: JUMP(10.0); break;
+                        case PUI_FOCUS_VOLUME: ui.vol_until = tnow + 2500; break;
+                        case PUI_FOCUS_TRACKS: PANEL_OPEN(naud > 1 ? 0 : 1); break;
+                        case PUI_FOCUS_NEXT:
+                        case PUI_FOCUS_NEXT_CARD:
+                            if (req->has_next) { want_next = 1; running = 0; }
+                            break;
+                        default: TOGGLE_PAUSE(); break;
                     }
-                    notice_until = SDL_GetTicks() + 1800;
+                    break;
+                case JOY_L: JUMP(-10.0); break;
+                case JOY_R: JUMP(10.0); break;
+                case JOY_ZL: JUMP(-60.0); break;
+                case JOY_ZR: JUMP(60.0); break;
+                case JOY_Y:
+                    if (tracks_available) PANEL_OPEN(naud > 1 ? 0 : 1);
+                    else ui_notice(&ui, "Este video possui apenas um audio", 2000);
+                    break;
+                case JOY_X:
+                    if (nsub > 0) PANEL_OPEN(1);
+                    else ui_notice(&ui, "Este video nao possui legendas", 2000);
+                    break;
+                case JOY_PLUS:
+                    ui.pinned = !ui.pinned;
+                    ui_notice(&ui, ui.pinned ? "Controles fixos na tela" : "Controles automaticos", 1600);
+                    break;
+                case JOY_UP:
+                    if (vol_popup) {
+                        vol = vol + 10 > 100 ? 100 : vol + 10; ui.vol_until = tnow + 2200;
+                    } else if (was_visible && ui.focus != PUI_FOCUS_TIMELINE && dur > 1 && !repeat) {
+                        ui.focus = PUI_FOCUS_TIMELINE;
+                    }
+                    break;
+                case JOY_DOWN:
+                    if (vol_popup) {
+                        vol = vol - 10 < 0 ? 0 : vol - 10; ui.vol_until = tnow + 2200;
+                    } else if (was_visible && (ui.focus == PUI_FOCUS_TIMELINE || ui.focus == PUI_FOCUS_NEXT_CARD)) {
+                        ui.focus = PUI_FOCUS_PLAY;
+                    }
+                    break;
+                case JOY_DLEFT:
+                case JOY_DRIGHT: {
+                    int dir = b == JOY_DRIGHT ? 1 : -1;
+                    if ((!was_visible || ui.focus == PUI_FOCUS_TIMELINE) && dur > 1) {
+                        // Como na TV do PC: com o HUD escondido, esquerda/direita ja buscam.
+                        SCRUB_BEGIN();
+                        ui.scrub_target += dir * ui_scrub_step(repeat ? (Uint32)(tnow - ui.held_since) : 0, dur);
+                        if (ui.scrub_target < 0) ui.scrub_target = 0;
+                        if (ui.scrub_target > dur - 1) ui.scrub_target = dur - 1;
+                        ui.scrub_last = tnow;
+                    } else if (was_visible) {
+                        if (vol_popup) ui.vol_until = tnow;
+                        ui.focus = ui_move_focus(ui.focus, dir, row, nrow);
+                    }
+                    break;
                 }
-                else if (b == JOY_Y) {
-                    if (naud > 1) {
-                        track_menu = TRACK_MENU_AUDIO; track_sel = acur;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
-                    } else snprintf(notice, sizeof(notice), "Este video possui apenas um audio");
-                    if (!track_menu) notice_until = SDL_GetTicks() + 2200;
-                }
-                else if (b == JOY_X) {
-                    if (nsub > 0) {
-                        track_menu = TRACK_MENU_SUB; track_sel = scur + 1;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
-                    } else snprintf(notice, sizeof(notice), "Este video nao possui legendas");
-                    if (!track_menu) notice_until = SDL_GetTicks() + 2200;
-                }
+                default: break;
             }
         }
         if (!running) break;
+
+        // Analogico esquerdo: segurar inclinado abre a busca pela timeline. Mantem
+        // a protecao contra drift (75% do curso por 550 ms) das versoes anteriores.
         int stick_x = joy ? SDL_JoystickGetAxis(joy, 0) : 0;
         int stick_abs = stick_x < 0 ? -stick_x : stick_x;
         Uint32 seek_now = SDL_GetTicks();
@@ -1144,72 +1105,57 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             seek_arm_dir = 0;
             seek_arm_since = 0;
         }
-        if (!track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
+        if (!ui.panel_open && dur > 1 && !ui.scrubbing && !seek_axis_lock) {
             if (stick_abs >= SEEK_ENTER_AXIS) {
                 int direction = stick_x > 0 ? 1 : -1;
                 if (seek_arm_dir != direction) {
                     seek_arm_dir = direction;
                     seek_arm_since = seek_now;
                 } else if (seek_now - seek_arm_since >= SEEK_HOLD_MS) {
-                    timeline_seek = 1;
-                    timeline_seek_was_paused = paused;
-                    timeline_seek_from = cur_pos;
-                    timeline_seek_target = cur_pos;
-                    timeline_seek_tick = seek_now;
+                    SCRUB_BEGIN();
+                    ui.scrub_last = seek_now;
+                    stick_tick = seek_now;
                     seek_arm_dir = 0; seek_arm_since = 0;
-                    if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
+                    ui_touch(&ui);
                 } else if (seek_now - seek_arm_since >= 280) {
-                    snprintf(notice, sizeof(notice), "Continue segurando para abrir a timeline");
-                    notice_until = seek_now + 300;
-                    hud_until = seek_now + 1200;
+                    ui_notice(&ui, "Continue segurando para buscar na timeline", 300);
                 }
             } else {
                 seek_arm_dir = 0;
                 seek_arm_since = 0;
             }
         }
-        if (timeline_seek) {
-            double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
+        if (ui.scrubbing) {
+            double elapsed = (seek_now - stick_tick) / 1000.0;
             if (elapsed > 0.08) elapsed = 0.08;
-            timeline_seek_tick = seek_now;
+            stick_tick = seek_now;
             if (stick_abs >= SEEK_MOVE_AXIS) {
                 double amount = (stick_abs - SEEK_MOVE_AXIS) / (32767.0 - SEEK_MOVE_AXIS);
                 if (amount > 1.0) amount = 1.0;
                 double speed = dur * (0.006 + amount * amount * 0.039);
-                timeline_seek_target += (stick_x > 0 ? 1.0 : -1.0) * speed * elapsed;
-                if (timeline_seek_target < 0) timeline_seek_target = 0;
-                if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
+                ui.scrub_target += (stick_x > 0 ? 1.0 : -1.0) * speed * elapsed;
+                if (ui.scrub_target < 0) ui.scrub_target = 0;
+                if (ui.scrub_target > dur - 1) ui.scrub_target = dur - 1;
+                ui.scrub_last = seek_now;
+                ui_touch(&ui);
+            } else if (ui.scrub_last && ui.held_button < 0 &&
+                       (Uint32)(seek_now - ui.scrub_last) > SCRUB_COMMIT_MS) {
+                SCRUB_END(1);   // confirma sozinho depois de uma pausa, como na TV do PC
             }
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-            if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
-            draw_hud(ren, title, timeline_seek_target, dur, 1, vol, fmt, aidx,
-                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, 1);
-            draw_timeline_seek(ren, fmt, timeline_seek_from, timeline_seek_target, dur, timeline_origin);
-            SDL_RenderPresent(ren);
+        }
+
+        if (ui.scrubbing) {
+            int ch = chapter_at(fmt, ui.scrub_target, timeline_origin, scrub_label, sizeof(scrub_label));
+            if (ch < 0) scrub_label[0] = 0;
+        }
+        ui_animate(&ui, paused, card_visible, SDL_GetTicks());
+        const char *visible_sub = scur >= 0 && sub_text[0] && cur_pos < sub_end ? sub_text : NULL;
+        sync_hud(&hud, &ui, cur_pos, dur, paused, vol, card_visible, acur, scur, visible_sub,
+                 scrub_label[0] ? scrub_label : NULL, SDL_GetTicks());
+        hud.buffering = 0;
+        if (paused || ui.panel_open) {   // quadro congelado + HUD animado
+            present_player(ren, tex, &dst, have_video_frame, &hud);
             SDL_Delay(16);
-            continue;
-        }
-        if (track_menu) {
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-            if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
-            if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
-            draw_track_menu(ren, fmt, track_menu,
-                            track_menu == TRACK_MENU_AUDIO ? aidxs : sidxs,
-                            track_menu == TRACK_MENU_AUDIO ? naud : nsub,
-                            track_sel, track_menu == TRACK_MENU_AUDIO ? acur : scur + 1);
-            SDL_RenderPresent(ren);
-            SDL_Delay(30);
-            continue;
-        }
-        if (paused) {   // continua desenhando (quadro congelado + HUD)
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-            if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
-            if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
-            draw_hud(ren, title, cur_pos, dur, 1, vol, fmt, aidx,
-                     acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
-            if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
-            SDL_RenderPresent(ren);
-            SDL_Delay(30);
             continue;
         }
 
@@ -1224,19 +1170,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             Uint32 now_ticks = SDL_GetTicks();
             if (!buffering_since) { buffering_since = now_ticks; buffering_events++; }
             if (now_ticks - buffering_since >= 250) {
-                SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-                if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
-                char dots[48];
-                int ndots = (int)((now_ticks / 350) % 3) + 1;
                 Uint32 stalled = now_ticks - buffering_since;
-                if (stalled < 8000) snprintf(dots, sizeof(dots), "Aguardando dados%.*s", ndots, "...");
-                else if (stalled < 30000) snprintf(dots, sizeof(dots), "Tentando reconectar%.*s", ndots, "...");
-                else snprintf(dots, sizeof(dots), "Conexao lenta  |  B para voltar");
-                draw_center_state(ren, stalled < 8000 ? "CARREGANDO" : "RECUPERANDO", dots, stalled >= 30000);
-                draw_hud(ren, title, cur_pos, dur, 0, vol, fmt, aidx,
-                         acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
-                if (now_ticks < notice_until) draw_notice(ren, notice);
-                SDL_RenderPresent(ren);
+                hud.buffering = 1;
+                hud.buffering_text = stalled < 8000 ? "Carregando..." :
+                                     stalled < 30000 ? "Reconectando..." : "Conexao lenta  |  B para voltar";
+                present_player(ren, tex, &dst, have_video_frame, &hud);
+                hud.buffering = 0;
             }
             SDL_Delay(30);
             continue;
@@ -1389,14 +1328,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     if (upload_rc < 0) { playback_error = -4; running = 0; break; }
                     have_video_frame = 1;
-                    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
-                    SDL_RenderCopy(ren, tex, NULL, &dst);
-                    if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);
-                    if (hud_pinned || SDL_GetTicks() < hud_until)
-                        draw_hud(ren, title, cur_pos, dur, 0, vol, fmt, aidx,
-                                 acur, naud, nsub, scur, scur >= 0 ? sidxs[scur] : -1, hud_pinned);
-                    if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
-                    SDL_RenderPresent(ren);
+                    {
+                        Uint32 frame_now = SDL_GetTicks();
+                        ui_animate(&ui, paused, card_visible, frame_now);
+                        const char *frame_sub = scur >= 0 && sub_text[0] && cur_pos < sub_end ? sub_text : NULL;
+                        sync_hud(&hud, &ui, cur_pos, dur, paused, vol, card_visible, acur, scur, frame_sub,
+                                 NULL, frame_now);
+                        present_player(ren, tex, &dst, 1, &hud);
+                    }
                     if (!logged_first_present) {
                         diag_player_event("render", "first-present", "position=%.2f", cur_pos);
                         logged_first_present = 1;
@@ -1446,7 +1385,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);
     diag_player_event("player", "cleanup-end", NULL);
-    return playback_error ? playback_error : reached_end;
+#undef SEEK_TO
+#undef REANCHOR_CLOCKS
+#undef TOGGLE_PAUSE
+#undef JUMP
+#undef SCRUB_BEGIN
+#undef SCRUB_END
+#undef PANEL_OPEN
+#undef PANEL_CLOSE
+    if (playback_error) return playback_error;
+    if (want_next) return 2;
+    return reached_end;
 }
 
 
@@ -1504,6 +1453,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
 
     int retry_count = 0;
     double current_pos = request->start_sec;
+    double last_failure_pos = -1.0;
     double dur = 0.0;
     int final_rc = 0;
     PlaybackSource active = request->playback;
@@ -1546,6 +1496,11 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             result->final_state = PLAYER_FINISHED;
             final_rc = rc;
             break;
+        } else if (rc == 2) { // Usuario pediu o proximo episodio pelo HUD
+            result->reason = EXIT_REASON_NEXT;
+            result->final_state = PLAYER_FINISHED;
+            final_rc = 0;
+            break;
         } else if (rc == 0) { // Usuario saiu
             result->reason = EXIT_REASON_USER;
             result->final_state = PLAYER_FINISHED;
@@ -1554,6 +1509,14 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         } else { // Erro
             // rc < 0
             int recoverable = rc == -2 || rc == -5 || rc == -10;
+            // O orcamento de recuperacao vale por incidente. Se a reproducao ja
+            // avancou bem alem da falha anterior, uma nova queda de rede recomeca
+            // pela renovacao e nao penaliza no servidor uma fonte que funcionava.
+            if (retry_count > 0 && last_failure_pos >= 0 && current_pos > last_failure_pos + 60.0) {
+                diag_player_event("recover", "budget-reset", "pos=%.1f last=%.1f", current_pos, last_failure_pos);
+                retry_count = 0;
+            }
+            last_failure_pos = current_pos;
             int startup_failure = current_pos <= request->start_sec + 1.0;
             // Na abertura, tentativa 0 renova a mesma sessao e tentativa 1 usa
             // fallback_cb para trocar a fonte. Limite 1 encerrava antes do
@@ -1575,12 +1538,11 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             diag_player_event("recover", use_fallback ? "fallback-begin" : "renew-begin",
                               "retry=%d max=%d", retry_count, max_renew_tries);
             for (int renew_try = 0; renew_try < max_renew_tries && !renewed_ok; renew_try++) {
-                SDL_SetRenderDrawColor(ren, 15, 15, 15, 255);
-                SDL_RenderClear(ren);
                 char detail[96];
+                const char *headline = use_fallback ? "Tentando outra fonte" : "Reconectando";
                 if (use_fallback) snprintf(detail, sizeof(detail), "A fonte atual nao respondeu. Buscando alternativa...");
-                else snprintf(detail, sizeof(detail), "Reconectando com seguranca...  %d/%d", renew_try + 1, max_renew_tries);
-                draw_center_state(ren, use_fallback ? "TENTANDO OUTRA FONTE" : "RECUPERANDO SESSAO", detail, 1);
+                else snprintf(detail, sizeof(detail), "Recuperando a transmissao...  %d/%d", renew_try + 1, max_renew_tries);
+                pui_draw_loading(ren, request->title, headline, detail, SDL_GetTicks(), 1);
                 SDL_RenderPresent(ren);
 
                 if (recovery_cb(&active, &renewed, request->userdata) == 0 && renewed.play_url[0]) {
@@ -1603,7 +1565,9 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                         }
                     }
                     if (cancelled) break;
-                    SDL_Delay(50);
+                    pui_draw_loading(ren, request->title, headline, detail, SDL_GetTicks(), 1);
+                    SDL_RenderPresent(ren);
+                    SDL_Delay(33);
                 }
                 if (cancelled) { recovery_cancelled = 1; break; }
             }

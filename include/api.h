@@ -55,7 +55,18 @@ const char *api_last_error(void);
 
 
 SDL_Texture *cover_get(const char *url);
+// Contexto mostrado pelo HUD do player. Todos os campos sao opcionais.
+typedef struct {
+    const char *title;       // obra ou serie
+    const char *subtitle;    // "T1 E3 - Episodio" ou metadados do filme
+    const char *overview;    // sinopse exibida ao pausar
+    const char *next_title;  // proximo episodio (habilita o botao no player)
+} PlayMeta;
+
+// Retorna 1 quando o video terminou, 2 quando o usuario pediu o proximo
+// episodio pelo player e 0 nos demais casos.
 int resolve_and_play(int item_id, const char *title);
+int resolve_and_play_meta(int item_id, const PlayMeta *meta);
 int is_fav_item(int id);
 void toggle_fav_item(int id);
 int media_list_prompt_add(int id, int is_series, const char *title, const char *logo);

@@ -17,7 +17,8 @@ typedef enum {
 typedef enum {
     EXIT_REASON_NATURAL,
     EXIT_REASON_USER,
-    EXIT_REASON_ERROR
+    EXIT_REASON_ERROR,
+    EXIT_REASON_NEXT      // usuario pediu o proximo episodio pelo player
 } PlayerExitReason;
 
 typedef void (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec, void *userdata);
@@ -35,6 +36,12 @@ typedef struct {
     DeliveryType delivery;
 
     const char *title;
+    // Contexto mostrado no HUD (opcionais): linha secundaria, sinopse ao pausar e
+    // proximo episodio. has_next habilita o botao e o cartao de proximo episodio.
+    const char *subtitle;
+    const char *overview;
+    const char *next_title;
+    int has_next;
     const char *section;
     const char *container;
     const char *url;
