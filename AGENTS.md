@@ -984,3 +984,7 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   dois decodificadores, APIs ausentes e travamento da UI. Validada no Chromium com
   backend simulado; hls.js nao foi exercitado (CDN bloqueado aqui). Proximo passo:
   rodar nas TVs que falharam e fotografar veredito, capacidades e registro.
+- 28/09/2026: causa confirmada no repo `Tonsoaresmt/Nplay`: players de TV usavam so
+  `inset:0` (Chromium 87+) e colapsavam fora da tela em TVs antigas. Correcao e
+  teste na branch `claude/nplay-tv-switch-review-n4drzv` do Nplay (commit 5b24542),
+  ainda nao publicada no `main` (que faz deploy automatico).

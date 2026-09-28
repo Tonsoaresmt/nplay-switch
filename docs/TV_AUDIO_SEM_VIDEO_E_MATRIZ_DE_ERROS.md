@@ -4,6 +4,24 @@ Data: 27/09/2026. Relato: em algumas TVs mais antigas, depois de apertar Assisti
 o áudio do filme toca, mas a tela continua mostrando o detalhe do filme (capa e
 sinopse), parada.
 
+## Atualização 28/09/2026: causa encontrada no código da TV
+
+Com acesso ao `Tonsoaresmt/Nplay`, a causa foi confirmada. Ela é a hipótese T5
+(o player não ocupava a tela), mas por um motivo de CSS: o player do shell
+legado (`public/tv/legacy-shell-v2.js`, usado em Chromium < 80), a página antiga
+`/tv` (`public/tv.html`) e o `#player-modal` do shell moderno eram posicionados
+só com `inset:0`, que existe apenas a partir do Chromium 87. Sem essa
+propriedade, o player colapsava fora da tela: 0×0 no legado, 300×150 no `/tv`,
+0×0 no moderno em Chromium 80–86. O áudio tocava, o detalhe continuava visível
+e as teclas iam para o player invisível. Reproduzido no Chromium removendo
+`inset`.
+
+A correção, com teste de regressão, está na branch
+`claude/nplay-tv-switch-review-n4drzv` do `Tonsoaresmt/Nplay`, commit `5b24542`.
+Ela não foi publicada: push no `main` publica em produção e precisa de
+aprovação. Falta homologar na TV real. A sonda `tools/tv_probe.html` continua
+útil se aparecer outro sintoma.
+
 ## Limites desta investigação
 
 - O código da TV web fica em `C:/iptv`. Ele não está em nenhum repositório
