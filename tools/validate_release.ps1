@@ -51,6 +51,8 @@ Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e inici
 Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior ao primeiro frame.'
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
 Assert-True ($sources -match 'lang_norm' -and $sources -match 'stream_norm') 'Selecao de idioma voltou a comparar tags inconsistentes diretamente.'
+Assert-True ($sources -match 'req->audio_pref == 0 && pt_audio >= 0') 'Preferencia Dublado da conta nao prioriza a faixa em portugues.'
+Assert-True ($sources -match 'REPRODUCAO PAUSADA' -and $sources -match 'NPLAY PLAYER') 'Player perdeu o painel visual ampliado de pausa.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
 Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
 Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'

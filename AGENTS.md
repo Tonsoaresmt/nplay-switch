@@ -245,6 +245,19 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   anime e dorama; testar troca de audio/legenda, episodio seguinte e temporada
   agrupada antes de considerar o comportamento de hardware definitivamente aprovado.
 
+## Correcao 0.12.19 em 28/09/2026
+
+- Teste do usuario mostrou que a 0.12.18 mantinha o HUD anterior e selecionava
+  ingles mesmo com a conta configurada para Dublado.
+- Causa do idioma: o arquivo local criado por versoes antigas ganhava da
+  preferencia atual da conta. A ordem foi corrigida para a conta escolher
+  portugues/estrangeiro primeiro; escolha local e `audio_hint` sao fallback.
+- A pausa agora tem um painel visual amplo no estilo do PC e a barra inferior
+  mostra idioma de audio e estado da legenda, produzindo uma mudanca visivel sem
+  substituir o pipeline 0.12.x pelo `player.c` antigo de `f5296a1`.
+- Versao preparada: 0.12.19. Pendente no hardware: confirmar Dublado em fonte
+  multiaudio, Legendado com legenda PT, troca manual e captura do HUD pausado.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

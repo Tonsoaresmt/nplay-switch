@@ -444,11 +444,7 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
                      int acur, int naud, int nsub, int scur, int sidx,
                      int hud_pinned, int seekable) {
     (void)hud_pinned;
-    (void)fmt;
-    (void)aidx;
     (void)acur;
-    (void)scur;
-    (void)sidx;
     for (int band = 0; band < 12; band++)
         pfill(ren, 0, 360 + band * 30, PWIN_W, 30, PC_DARK,
               10 + band * 18);
@@ -459,9 +455,24 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
     text_draw(ren, "B  Voltar", 88, 27, PC_TEXT, 0);
 
     if (paused) {
-        text_draw(ren, "PAUSADO", 48, 477, PC_ACC, 0);
+        // Painel de pausa inspirado no player do PC: identidade e acao ficam
+        // separadas da timeline, sem transformar o video numa tela de debug.
+        pfill(ren, 42, 146, 704, 286, PC_DARK, 218);
+        pfill(ren, 42, 146, 6, 286, PC_ACC, 255);
+        text_draw(ren, "NPLAY PLAYER", 72, 174, PC_ACC2, 0);
         draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao",
-                          48, 508, 1080, PC_TEXT, 1);
+                          72, 215, 630, PC_TEXT, 1);
+        text_draw(ren, "REPRODUCAO PAUSADA", 72, 274, PC_MUT, 0);
+        pfill(ren, 72, 320, 198, 52, PC_ACC, 245);
+        text_draw(ren, "A  Continuar", 94, 333, PC_TEXT, 0);
+        text_draw(ren, "Y  Audio", 300, 333, naud ? PC_TEXT : PC_MUT, 0);
+        text_draw(ren, "X  Legendas", 430, 333, nsub ? PC_TEXT : PC_MUT, 0);
+        text_draw(ren, "Use o analogico para buscar na timeline", 72, 390, PC_MUT, 0);
+
+        pfill(ren, 842, 210, 164, 164, PC_DARK, 205);
+        pfill(ren, 862, 230, 124, 124, PC_ACC, 225);
+        for (int row = 0; row < 64; row++)
+            hud_line(ren, 905, 260 + row, 905 + row * 3 / 4, 260 + row, PC_TEXT);
     }
     const int bx = 48, by = 600, bw = 1080, bh = 6;
     pfill(ren, bx, by, bw, bh, PC_CARD, 190);
@@ -495,15 +506,20 @@ static void draw_hud(SDL_Renderer *ren, const char *title, double pos, double du
         text_draw(ren, "L", 154, 628, PC_MUT, 0);
         text_draw(ren, "R", 232, 628, PC_MUT, 0);
     }
-    char volume_text[32];
-    snprintf(volume_text, sizeof(volume_text), "VOL %d%%", vol);
+    char volume_text[32], audio_text[64], sub_text[64], lang[48];
+    snprintf(volume_text, sizeof(volume_text), "Volume %d%%", vol);
+    format_language(stream_norm(fmt, aidx), lang, sizeof(lang));
+    snprintf(audio_text, sizeof(audio_text), "%s", naud ? lang : "Sem audio");
+    snprintf(sub_text, sizeof(sub_text), "%s", sidx >= 0 ? lang_label(stream_norm(fmt, sidx)) : "Desligadas");
     text_draw(ren, volume_text, seekable ? 300 : 145, 658, PC_MUT, 0);
     if (!paused)
         draw_clipped_text(ren, (title && title[0]) ? title : "Reproducao",
                           seekable ? 425 : 320, 651, seekable ? 420 : 540, PC_TEXT, 0);
-    text_draw(ren, "Y Audio", 874, 654, naud ? PC_TEXT : PC_MUT, 0);
-    text_draw(ren, "X Legendas", 979, 654, nsub ? PC_TEXT : PC_MUT, 0);
-    text_draw(ren, "+ Painel", 1116, 654, PC_TEXT, 0);
+    draw_clipped_text(ren, audio_text, 846, 650, 118, PC_TEXT, 0);
+    draw_clipped_text(ren, sub_text, 976, 650, 104, PC_MUT, 0);
+    text_draw(ren, "+ Opcoes", 1100, 650, PC_TEXT, 0);
+    text_draw(ren, "Y", 846, 628, PC_ACC2, 0);
+    text_draw(ren, "X", 976, 628, PC_ACC2, 0);
 }
 
 static void draw_center_state(SDL_Renderer *ren, const char *state, const char *detail, int accent) {
@@ -1000,15 +1016,24 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         const char *norm = stream_norm(fmt, aidxs[i]);
         if (norm[0]) known_audio++;
         if (pt_audio < 0 && !strcmp(norm, "pt")) pt_audio = i;
-        if (!audio_chosen && want_audio[0] && !strcmp(norm, want_audio)) { acur = i; audio_chosen = 1; }
+    }
+    // A configuracao da conta e a fonte de verdade. Versoes antigas gravavam
+    // automaticamente "en" no arquivo local e prendiam toda obra em ingles.
+    if (req->audio_pref == 0 && pt_audio >= 0) {
+        acur = pt_audio; audio_chosen = 1;
+    } else if (req->audio_pref == 1) {
+        for (int i = 0; i < naud; i++) {
+            const char *norm = stream_norm(fmt, aidxs[i]);
+            if (norm[0] && strcmp(norm, "pt")) { acur = i; audio_chosen = 1; break; }
+        }
     }
     if (!audio_chosen && known_audio == 0 && req->audio_hint > 0 && req->audio_hint <= naud) {
         acur = req->audio_hint - 1; audio_chosen = 1;
     }
-    if (!audio_chosen && req->audio_pref == 1) {
+    if (!audio_chosen && want_audio[0]) {
         for (int i = 0; i < naud; i++) {
             const char *norm = stream_norm(fmt, aidxs[i]);
-            if (norm[0] && strcmp(norm, "pt")) { acur = i; audio_chosen = 1; break; }
+            if (!strcmp(norm, want_audio)) { acur = i; audio_chosen = 1; break; }
         }
     }
     if (!audio_chosen && pt_audio >= 0) acur = pt_audio;
