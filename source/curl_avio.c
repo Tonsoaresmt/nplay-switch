@@ -35,6 +35,45 @@ static SDL_atomic_t g_traced_resources = {0};
 
 void nplay_curl_avio_trace_reset(void) { SDL_AtomicSet(&g_traced_resources, 0); }
 
+// HLS abre um recurso por segmento. Com um easy handle novo por segmento, cada
+// um pagava DNS + TCP + handshake TLS (mbedTLS, lento no Switch) antes do
+// primeiro byte, o que atrasava seek e troca de audio. Handles devolvidos ficam
+// num pool curto e sao reusados em sequencia: a conexao viva do handle segue
+// para o proximo segmento. Nao ha compartilhamento entre threads simultaneas
+// (CURLSH causou crash em 0.9.5); cada handle tem um unico dono por vez.
+#define CURL_POOL_MAX 4
+static CURL *g_curl_pool[CURL_POOL_MAX];
+static int g_curl_pool_count = 0;
+static SDL_SpinLock g_curl_pool_lock = 0;
+
+static CURL *curl_pool_take(void) {
+    CURL *easy = NULL;
+    SDL_AtomicLock(&g_curl_pool_lock);
+    if (g_curl_pool_count > 0) easy = g_curl_pool[--g_curl_pool_count];
+    SDL_AtomicUnlock(&g_curl_pool_lock);
+    return easy ? easy : curl_easy_init();
+}
+
+static void curl_pool_give(CURL *easy) {
+    if (!easy) return;
+    curl_easy_reset(easy);   // limpa opcoes; mantem conexao, DNS e sessao TLS
+    SDL_AtomicLock(&g_curl_pool_lock);
+    if (g_curl_pool_count < CURL_POOL_MAX) { g_curl_pool[g_curl_pool_count++] = easy; easy = NULL; }
+    SDL_AtomicUnlock(&g_curl_pool_lock);
+    if (easy) curl_easy_cleanup(easy);
+}
+
+void nplay_curl_avio_pool_clear(void) {
+    CURL *handles[CURL_POOL_MAX];
+    int n;
+    SDL_AtomicLock(&g_curl_pool_lock);
+    n = g_curl_pool_count;
+    for (int i = 0; i < n; i++) handles[i] = g_curl_pool[i];
+    g_curl_pool_count = 0;
+    SDL_AtomicUnlock(&g_curl_pool_lock);
+    for (int i = 0; i < n; i++) curl_easy_cleanup(handles[i]);
+}
+
 typedef struct {
     CURL *easy;
     char *url;
@@ -152,7 +191,11 @@ static void free_cio(CurlIO *c) {
                           c->resource_id, c->profile,
                           SDL_AtomicGet(&g_active_contexts), SDL_AtomicGet(&g_reserved_kb));
     if (c->th) { SDL_LockMutex(c->mtx); c->running = 0; SDL_CondSignal(c->c_space); SDL_CondSignal(c->c_data); SDL_UnlockMutex(c->mtx); SDL_WaitThread(c->th, NULL); }
-    if (c->easy) curl_easy_cleanup(c->easy);
+    if (c->easy) {
+        // Handle com erro de rede/HTTP nao volta ao pool: a conexao pode estar ruim.
+        if (c->err || c->write_overflow) curl_easy_cleanup(c->easy);
+        else curl_pool_give(c->easy);
+    }
     if (c->mtx) SDL_DestroyMutex(c->mtx);
     if (c->c_data) SDL_DestroyCond(c->c_data);
     if (c->c_space) SDL_DestroyCond(c->c_space);
@@ -339,7 +382,7 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     c->tmp_cap = block_size;
     c->ring = (unsigned char *)malloc(c->ring_cap);
     c->tmp  = (unsigned char *)malloc(c->tmp_cap);
-    c->easy = curl_easy_init();
+    c->easy = curl_pool_take();
     c->mtx = SDL_CreateMutex();
     c->c_data = SDL_CreateCond();
     c->c_space = SDL_CreateCond();

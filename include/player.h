@@ -42,6 +42,11 @@ typedef struct {
     const char *overview;
     const char *next_title;
     int has_next;
+    // Escolha de audio: audio_pref vem da conta (0 dublado, 1 legendado, 2 tanto faz);
+    // audio_hint (1-based) repete a faixa do episodio anterior quando o pacote nao
+    // informa idioma (tag und), evitando trocar de idioma entre episodios.
+    int audio_pref;
+    int audio_hint;
     const char *section;
     const char *container;
     const char *url;
@@ -64,6 +69,7 @@ typedef struct {
     double duration;
     PlayerState final_state;
     int recovery_count;
+    int audio_index;      // faixa de audio em uso ao sair (1-based, 0 = sem audio)
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);

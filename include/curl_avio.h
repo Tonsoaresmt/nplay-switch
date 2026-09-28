@@ -28,4 +28,7 @@ void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb);
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).
 void nplay_curl_avio_close(AVIOContext *ctx);
 
+// Libera os handles libcurl reaproveitados entre segmentos HLS (fim do player).
+void nplay_curl_avio_pool_clear(void);
+
 #endif

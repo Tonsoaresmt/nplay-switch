@@ -61,6 +61,7 @@ typedef struct {
     const char *subtitle;    // "T1 E3 - Episodio" ou metadados do filme
     const char *overview;    // sinopse exibida ao pausar
     const char *next_title;  // proximo episodio (habilita o botao no player)
+    int audio_hint;          // faixa de audio do episodio anterior (1-based, 0 = nenhuma)
 } PlayMeta;
 
 // Retorna 1 quando o video terminou, 2 quando o usuario pediu o proximo

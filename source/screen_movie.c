@@ -310,7 +310,7 @@ void input_movie(int b) {
                 if (genre && genre[0])
                     snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle), "%s%s",
                              subtitle[0] ? "  |  " : "", genre);
-                PlayMeta meta = { jstr(g_movie, "title"), subtitle, jstr(g_movie, "plot"), NULL };
+                PlayMeta meta = { jstr(g_movie, "title"), subtitle, jstr(g_movie, "plot"), NULL, 0 };
                 resolve_and_play_meta(id, &meta);
             }
             else toggle_fav_item(id);

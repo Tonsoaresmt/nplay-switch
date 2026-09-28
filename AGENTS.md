@@ -1026,3 +1026,36 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente no Switch: navegacao por foco com Joy-Con e Pro Controller, busca pela
   timeline em HLS lento, painel de audio/legendas, cartao de proximo episodio em
   serie, legibilidade do HUD a distancia (dock) e desempenho do fade com 1080p.
+## Idioma, troca de faixa e fluidez em 28/09/2026
+
+- Relato: trocar idioma no player demorava ou fechava o app; ao mudar de temporada
+  e seguir para o proximo episodio o idioma mudou sozinho; tudo parecia lento.
+- Causas encontradas: (1) depois do probe, TODAS as playlists HLS de audio e
+  legenda voltavam a baixar em paralelo na thread do player (banda, handshakes e
+  heap multiplicados; a 0.10.0 ja tinha fechado com ~14 MB livres); (2) cada
+  segmento HLS abria um easy handle novo, pagando DNS+TCP+TLS mbedTLS por segmento;
+  (3) idioma comparado pelos 3 primeiros caracteres (`pt-BR` nao casava com `por`,
+  `und` virava idioma); (4) preferencia de legenda salva (`off`) desligava todo o
+  padrao PT; (5) em series dubladas o backend usa a versao legendada nas temporadas
+  sem dublagem (`season_group`) e o cliente trocava de versao sem avisar; (6) a
+  preferencia de audio da conta so era lida ao abrir Configuracoes; (7) a espera do
+  quadro (ate 350 ms) atrasava a resposta dos botoes.
+- `player.c`: idioma normalizado por `lang_norm`/`stream_norm` (tag e titulo da
+  faixa). Ordem: escolha manual salva > mesma faixa do episodio anterior quando o
+  pacote nao informa idioma (`audio_hint`) > preferencia da conta (`audio_pref`,
+  legendado = audio original + legenda PT) > portugues. Audios/legendas fora de uso
+  recebem `AVDISCARD_ALL`; trocar de faixa reativa a playlist no ponto atual e
+  descarta audio anterior a ele (limite de 5 s). Espera do quadro em fatias de 8 ms
+  que terminam quando um botao e apertado. Recuperacao repete a mesma faixa.
+- `curl_avio.c`: pool de ate 4 easy handles reusados em sequencia (sem CURLSH, sem
+  uso simultaneo); handles com erro nao voltam. O pool e liberado ao sair do player.
+- `main.c`: preferencias da conta pedidas uma vez depois que o Inicio carrega.
+  Series passam a faixa de audio entre episodios. L/R em temporadas agrupadas mantem
+  a versao (Dublado/Legendado) quando existe; senao mostra aviso. ZL/ZR percorrem
+  todas as versoes de audio, nao so as duas primeiras.
+- Build limpo sem avisos; 63 verificacoes do validate_release (emuladas em Python)
+  passaram. `Nplay.nro` 23623047 bytes, SHA-256
+  `5991b041c2ad808c0acf1b352618d74cda2a5555f0c837ef695e9e47087a8277`.
+- Pendente no Switch: trocar audio/legenda varias vezes num HLS de 2+ audios (tempo
+  ate ouvir e memoria no Diagnostico), serie dublada com temporada so legendada,
+  autoplay entre episodios, seek logo apos trocar audio e navegacao longa.

@@ -8,6 +8,7 @@
 #include <switch.h>
 #include <SDL.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <string.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -164,27 +165,81 @@ static enum AVPixelFormat player_select_video_format(AVCodecContext *ctx,
     return avcodec_default_get_format(ctx, formats);
 }
 
-static const char *stream_lang(AVFormatContext *fmt, int idx) {
-    if (idx < 0) return "?";
+// Idioma normalizado ("pt", "en", "ja"...). Os pacotes usam formatos diferentes
+// entre temporadas (por, pt-BR, pt, Portugues, und); comparar os 3 primeiros
+// caracteres fazia "pt-BR" nao casar com "por" e o player escolher outra faixa.
+static const char *lang_norm(const char *value) {
+    static const struct { const char *code, *norm; } codes[] = {
+        { "pt", "pt" }, { "por", "pt" }, { "pob", "pt" }, { "en", "en" }, { "eng", "en" },
+        { "ja", "ja" }, { "jp", "ja" }, { "jpn", "ja" }, { "es", "es" }, { "spa", "es" },
+        { "fr", "fr" }, { "fre", "fr" }, { "fra", "fr" }, { "it", "it" }, { "ita", "it" },
+        { "de", "de" }, { "ger", "de" }, { "deu", "de" }, { "ko", "ko" }, { "kor", "ko" },
+        { "zh", "zh" }, { "chi", "zh" }, { "zho", "zh" }
+    };
+    static const struct { const char *word, *norm; } words[] = {
+        { "portugu", "pt" }, { "brasil", "pt" }, { "brazil", "pt" }, { "dublad", "pt" },
+        { "ingl", "en" }, { "english", "en" }, { "japon", "ja" }, { "japan", "ja" },
+        { "espanh", "es" }, { "spanish", "es" }, { "castel", "es" }, { "latino", "es" },
+        { "franc", "fr" }, { "french", "fr" }, { "italian", "it" }, { "alem", "de" },
+        { "german", "de" }, { "corean", "ko" }, { "korean", "ko" }, { "chin", "zh" }
+    };
+    if (!value || !value[0]) return "";
+    char code[8] = "";
+    size_t n = 0;
+    while (value[n] && value[n] != '-' && value[n] != '_' && n < sizeof(code) - 1) {
+        code[n] = (char)tolower((unsigned char)value[n]);
+        n++;
+    }
+    code[n] = '\0';
+    if (n >= 2 && n <= 3 && (value[n] == '\0' || value[n] == '-' || value[n] == '_')) {
+        for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
+            if (!strcmp(code, codes[i].code)) return codes[i].norm;
+        return "";  // und, mul, zxx e codigos desconhecidos
+    }
+    char lower[64];
+    size_t k = 0;
+    for (; value[k] && k < sizeof(lower) - 1; k++) lower[k] = (char)tolower((unsigned char)value[k]);
+    lower[k] = '\0';
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (strstr(lower, words[i].word)) return words[i].norm;
+    return "";
+}
+
+// Idioma da faixa: tag language e, quando ausente/und, o titulo da faixa.
+static const char *stream_norm(AVFormatContext *fmt, int idx) {
+    if (idx < 0) return "";
     AVDictionaryEntry *e = av_dict_get(fmt->streams[idx]->metadata, "language", NULL, 0);
-    return (e && e->value) ? e->value : "und";
+    const char *norm = lang_norm(e ? e->value : NULL);
+    if (norm[0]) return norm;
+    AVDictionaryEntry *t = av_dict_get(fmt->streams[idx]->metadata, "title", NULL, 0);
+    return lang_norm(t ? t->value : NULL);
 }
 
-static const char *lang_label(const char *lang) {
-    if (!lang) return "?";
-    if (!strncasecmp(lang, "por", 3) || !strncasecmp(lang, "pt", 2)) return "PT";
-    if (!strncasecmp(lang, "eng", 3) || !strncasecmp(lang, "en", 2)) return "EN";
-    if (!strncasecmp(lang, "jpn", 3) || !strncasecmp(lang, "ja", 2)) return "JP";
-    if (!strncasecmp(lang, "spa", 3) || !strncasecmp(lang, "es", 2)) return "ES";
-    return lang[0] ? lang : "?";
+static const char *lang_label(const char *norm) {
+    if (!norm || !norm[0]) return "?";
+    if (!strcmp(norm, "pt")) return "PT";
+    if (!strcmp(norm, "en")) return "EN";
+    if (!strcmp(norm, "ja")) return "JP";
+    if (!strcmp(norm, "es")) return "ES";
+    if (!strcmp(norm, "fr")) return "FR";
+    if (!strcmp(norm, "it")) return "IT";
+    if (!strcmp(norm, "de")) return "DE";
+    if (!strcmp(norm, "ko")) return "KO";
+    if (!strcmp(norm, "zh")) return "ZH";
+    return "?";
 }
 
-static const char *lang_name(const char *lang) {
-    const char *code = lang_label(lang);
-    if (!strcmp(code, "PT")) return "Portugues";
-    if (!strcmp(code, "EN")) return "Ingles";
-    if (!strcmp(code, "JP")) return "Japones";
-    if (!strcmp(code, "ES")) return "Espanhol";
+static const char *lang_name(const char *norm) {
+    if (!norm || !norm[0]) return "Desconhecido";
+    if (!strcmp(norm, "pt")) return "Portugues";
+    if (!strcmp(norm, "en")) return "Ingles";
+    if (!strcmp(norm, "ja")) return "Japones";
+    if (!strcmp(norm, "es")) return "Espanhol";
+    if (!strcmp(norm, "fr")) return "Frances";
+    if (!strcmp(norm, "it")) return "Italiano";
+    if (!strcmp(norm, "de")) return "Alemao";
+    if (!strcmp(norm, "ko")) return "Coreano";
+    if (!strcmp(norm, "zh")) return "Chines";
     return "Desconhecido";
 }
 
@@ -435,6 +490,8 @@ typedef struct {
     PlayerHeartbeatCallback heartbeat_cb;
     void *callback_userdata;
 } PlaybackHeartbeat;
+static int g_player_audio_index = 0;
+
 static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *req,
                                 PlaybackHeartbeat *heartbeat, double start_sec,
                                 double *out_pos, double *out_dur) {
@@ -638,52 +695,67 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
     int acur = 0, best = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     for (int i = 0; i < naud; i++) if (aidxs[i] == best) acur = i;
-    
+
+    // Ordem de escolha do audio:
+    // 1) ultima escolha manual neste Switch (idioma normalizado);
+    // 2) a mesma faixa do episodio anterior, quando o pacote nao informa idioma;
+    // 3) preferencia da conta (dublado/legendado/tanto faz);
+    // 4) portugues, se existir. A legenda PT liga sozinha quando o audio e outro idioma.
+    // Antes, uma preferencia de legenda salva ("off") desativava o padrao PT inteiro.
     char pref_aud[32] = ""; store_load_pref_audio(pref_aud, sizeof(pref_aud));
     char pref_sub[32] = ""; store_load_pref_sub(pref_sub, sizeof(pref_sub));
-    int scur = -1;                       // -1 = legenda desligada
-
-    if (!pref_aud[0] && !pref_sub[0]) {
-        // --- SMART DEFAULT (PORTUGUES) ---
-        int has_pt_audio = 0;
-        for (int i = 0; i < naud; i++) {
-            AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
-            if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
-                acur = i; 
-                has_pt_audio = 1;
-                break; 
-            }
-        }
-        if (!has_pt_audio) {
-            // Se nao tem audio PT, liga a legenda PT (se existir)
-            for (int i = 0; i < nsub; i++) {
-                AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
-                if (tag && (strncasecmp(tag->value, "por", 3) == 0 || strncasecmp(tag->value, "pt", 2) == 0)) { 
-                    scur = i; 
-                    break; 
-                }
-            }
-        }
-    } else {
-        // --- PREFERENCIAS SALVAS ---
-        if (pref_aud[0]) {
+    const char *want_audio = lang_norm(pref_aud);
+    int scur = -1, audio_chosen = 0, sub_chosen = 0, pt_audio = -1, known_audio = 0;
+    for (int i = 0; i < naud; i++) {
+        const char *norm = stream_norm(fmt, aidxs[i]);
+        if (norm[0]) known_audio++;
+        if (pt_audio < 0 && !strcmp(norm, "pt")) pt_audio = i;
+        if (!audio_chosen && want_audio[0] && !strcmp(norm, want_audio)) { acur = i; audio_chosen = 1; }
+    }
+    if (!audio_chosen && known_audio == 0 && req->audio_hint > 0 && req->audio_hint <= naud) {
+        acur = req->audio_hint - 1; audio_chosen = 1;
+    }
+    if (!audio_chosen) {
+        if (req->audio_pref == 1) {          // legendado: audio original + legenda PT
             for (int i = 0; i < naud; i++) {
-                AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidxs[i]]->metadata, "language", NULL, 0);
-                if (tag && strncasecmp(tag->value, pref_aud, 3) == 0) { acur = i; break; }
+                const char *norm = stream_norm(fmt, aidxs[i]);
+                if (norm[0] && strcmp(norm, "pt")) { acur = i; audio_chosen = 1; break; }
             }
         }
-        if (pref_sub[0]) {
-            if (strcasecmp(pref_sub, "off") == 0) scur = -1;
-            else {
-                for (int i = 0; i < nsub; i++) {
-                    AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[i]]->metadata, "language", NULL, 0);
-                    if (tag && strncasecmp(tag->value, pref_sub, 3) == 0) { scur = i; break; }
-                }
-            }
+        if (!audio_chosen && pt_audio >= 0) acur = pt_audio;
+    }
+    if (pref_sub[0]) {
+        if (!strcasecmp(pref_sub, "off")) sub_chosen = 1;
+        else {
+            const char *want_sub = lang_norm(pref_sub);
+            for (int i = 0; want_sub[0] && i < nsub; i++)
+                if (!strcmp(stream_norm(fmt, sidxs[i]), want_sub)) { scur = i; sub_chosen = 1; break; }
         }
     }
-    
+    if (!sub_chosen && naud > 0) {
+        const char *audio_norm = stream_norm(fmt, aidxs[acur]);
+        int foreign_audio = audio_norm[0] && strcmp(audio_norm, "pt");
+        if (foreign_audio || (req->audio_pref == 1 && pt_audio < 0 && known_audio > 0)) {
+            for (int i = 0; i < nsub; i++)
+                if (!strcmp(stream_norm(fmt, sidxs[i]), "pt")) { scur = i; break; }
+        }
+    }
+    // Audios e legendas fora de uso nao sao baixados: em HLS cada idioma e uma
+    // playlist propria. Antes todas as faixas de audio/legenda eram buscadas em
+    // paralelo na thread do player (banda, TLS e heap multiplicados). Trocar de
+    // faixa reativa a playlist pelo FFmpeg a partir do ponto atual.
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        enum AVMediaType type = fmt->streams[i]->codecpar->codec_type;
+        if (type == AVMEDIA_TYPE_SUBTITLE || type == AVMEDIA_TYPE_DATA || type == AVMEDIA_TYPE_ATTACHMENT)
+            fmt->streams[i]->discard = (scur >= 0 && (int)i == sidxs[scur]) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+        else if (type == AVMEDIA_TYPE_AUDIO)
+            fmt->streams[i]->discard = (naud > 0 && (int)i == aidxs[acur]) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+    }
+
     int aidx = naud ? aidxs[acur] : -1;
+    g_player_audio_index = naud ? acur + 1 : 0;
+    double audio_skip_until = -1;   // apos trocar de faixa, ignora audio anterior ao ponto atual
+    Uint32 audio_skip_deadline = 0;
     diag_player_event("streams", "selected", "video=%d audio=%d naud=%d nsub=%d", vidx, aidx, naud, nsub);
     AVCodecContext *sctx = NULL;
     char sub_text[512] = ""; double sub_end = 0;
@@ -699,21 +771,22 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     for (int i = 0; i < naud; i++) {
         AVStream *st = fmt->streams[aidxs[i]];
         AVDictionaryEntry *tt = av_dict_get(st->metadata, "title", NULL, 0);
-        const char *lang = stream_lang(fmt, aidxs[i]);
-        const char *name = lang_name(lang);
+        const char *norm = stream_norm(fmt, aidxs[i]);
         int channels = st->codecpar->ch_layout.nb_channels;
-        snprintf(audio_names[i], sizeof(audio_names[i]), "%s",
-                 tt && tt->value && tt->value[0] ? tt->value : strcmp(name, "Desconhecido") ? name : lang);
-        snprintf(audio_details[i], sizeof(audio_details[i]), "%s  |  %s  |  %d canal%s", lang_label(lang),
+        if (tt && tt->value && tt->value[0] && strncmp(tt->value, "audio_", 6))
+            snprintf(audio_names[i], sizeof(audio_names[i]), "%s", tt->value);
+        else if (norm[0]) snprintf(audio_names[i], sizeof(audio_names[i]), "%s", lang_name(norm));
+        else snprintf(audio_names[i], sizeof(audio_names[i]), "Audio %d", i + 1);
+        snprintf(audio_details[i], sizeof(audio_details[i]), "%s  |  %s  |  %d canal%s", lang_label(norm),
                  avcodec_get_name(st->codecpar->codec_id), channels, channels == 1 ? "" : "is");
     }
     snprintf(sub_names[0], sizeof(sub_names[0]), "Desligadas");
     for (int i = 0; i < nsub; i++) {
         AVDictionaryEntry *tt = av_dict_get(fmt->streams[sidxs[i]]->metadata, "title", NULL, 0);
-        const char *lang = stream_lang(fmt, sidxs[i]);
-        const char *name = lang_name(lang);
-        snprintf(sub_names[i + 1], sizeof(sub_names[i + 1]), "%s",
-                 tt && tt->value && tt->value[0] ? tt->value : strcmp(name, "Desconhecido") ? name : lang);
+        const char *norm = stream_norm(fmt, sidxs[i]);
+        if (tt && tt->value && tt->value[0]) snprintf(sub_names[i + 1], sizeof(sub_names[i + 1]), "%s", tt->value);
+        else if (norm[0]) snprintf(sub_names[i + 1], sizeof(sub_names[i + 1]), "%s", lang_name(norm));
+        else snprintf(sub_names[i + 1], sizeof(sub_names[i + 1]), "Legenda %d", i + 1);
     }
     double chapter_starts[64];
     int chapter_count = 0;
@@ -873,8 +946,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     // Operacoes usadas pelos controles. Macros porque dependem do estado local
     // do pipeline (clocks, decoders e dispositivo de audio).
-#define SEEK_TO(target) apply_player_seek(fmt, vctx, actx, sctx, adev, (target), timeline_origin, \
-        &wall_start, &audio_clock, &cur_pos, &last_ac, &last_ac_wall, sub_text, &sub_end)
+#define SEEK_TO(target) (audio_skip_until = -1, \
+        apply_player_seek(fmt, vctx, actx, sctx, adev, (target), timeline_origin, \
+        &wall_start, &audio_clock, &cur_pos, &last_ac, &last_ac_wall, sub_text, &sub_end))
 #define REANCHOR_CLOCKS() do { double rn_ = av_gettime() / 1000000.0; wall_start = rn_ - cur_pos; \
         last_ac = -1; last_ac_wall = rn_; } while (0)
 #define TOGGLE_PAUSE() do { paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused); \
@@ -962,26 +1036,32 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (sel == acur) ui_notice(&ui, "Este audio ja esta tocando", 1600);
                     else if (!adev) ui_notice(&ui, "Saida de audio indisponivel", 2000);
                     else if (open_audio_dec(fmt, aidxs[sel], &actx, &swr, OCH, ORATE) == 0) {
+                        fmt->streams[aidx]->discard = AVDISCARD_ALL;
                         acur = sel; aidx = aidxs[sel];
+                        fmt->streams[aidx]->discard = AVDISCARD_DEFAULT;
+                        g_player_audio_index = acur + 1;
                         atb = fmt->streams[aidx]->time_base;
                         SDL_ClearQueuedAudio(adev);
-                        audio_clock = cur_pos; last_ac = -1;
-                        last_ac_wall = av_gettime() / 1000000.0;
+                        audio_clock = cur_pos; audio_skip_until = cur_pos - 0.25;
+                        audio_skip_deadline = SDL_GetTicks() + 5000;
+                        REANCHOR_CLOCKS();
                         char msg[112]; snprintf(msg, sizeof(msg), "Audio: %s", audio_names[acur]);
                         ui_notice(&ui, msg, 2000);
-                        AVDictionaryEntry *tag = av_dict_get(fmt->streams[aidx]->metadata, "language", NULL, 0);
-                        if (tag) store_save_pref_audio(tag->value);
+                        const char *norm = stream_norm(fmt, aidx);
+                        if (norm[0]) store_save_pref_audio(norm);
                     } else ui_notice(&ui, "Nao consegui abrir esta faixa de audio", 2200);
                 } else if (b == JOY_A && ui.panel_col == 1) {
                     int next = ui.panel_sub_sel - 1;
                     if (next == scur) ui_notice(&ui, "Esta legenda ja esta ativa", 1600);
                     else if (open_sub_dec(fmt, next >= 0 ? sidxs[next] : -1, &sctx) == 0) {
+                        if (scur >= 0) fmt->streams[sidxs[scur]]->discard = AVDISCARD_ALL;
+                        if (next >= 0) fmt->streams[sidxs[next]]->discard = AVDISCARD_DEFAULT;
                         scur = next; sub_text[0] = 0; sub_end = 0;
                         char msg[112];
                         if (scur >= 0) {
                             snprintf(msg, sizeof(msg), "Legendas: %s", sub_names[scur + 1]);
-                            AVDictionaryEntry *tag = av_dict_get(fmt->streams[sidxs[scur]]->metadata, "language", NULL, 0);
-                            if (tag) store_save_pref_sub(tag->value);
+                            const char *norm = stream_norm(fmt, sidxs[scur]);
+                            if (norm[0]) store_save_pref_sub(norm);
                         } else {
                             snprintf(msg, sizeof(msg), "Legendas desligadas");
                             store_save_pref_sub("off");
@@ -1211,7 +1291,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (!swr) continue;
                     int64_t ats = frame->best_effort_timestamp != AV_NOPTS_VALUE
                         ? frame->best_effort_timestamp : frame->pts;
-                    if (ats != AV_NOPTS_VALUE) audio_clock = ats * av_q2d(atb) - timeline_origin;
+                    if (ats != AV_NOPTS_VALUE) {
+                        double apos = ats * av_q2d(atb) - timeline_origin;
+                        // Faixa recem-ativada: o primeiro segmento comeca antes do
+                        // ponto atual. Tocar esse trecho atrasaria o video.
+                        if (audio_skip_until >= 0 && apos < audio_skip_until &&
+                            !SDL_TICKS_PASSED(SDL_GetTicks(), audio_skip_deadline)) continue;
+                        audio_skip_until = -1;
+                        audio_clock = apos;
+                    }
                     int os = swr_get_out_samples(swr, frame->nb_samples);
                     int bytes = av_samples_get_buffer_size(NULL, OCH, os, AV_SAMPLE_FMT_S16, 0);
                     if (bytes > 0) av_fast_malloc(&audio_buf, &audio_buf_cap, (size_t)bytes);
@@ -1260,7 +1348,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     // este quadro para a GPU so aumenta o atraso. Descartar aqui
                     // permite recuperar sincronismo em fontes pesadas/instaveis.
                     if (delay < -0.12) { dropped_video++; continue; }
-                    if (delay > 0.001) { if (delay > 0.35) delay = 0.35; SDL_Delay((Uint32)(delay * 1000)); }
+                    if (delay > 0.001) {
+                        // Espera em fatias: um botao apertado encerra a espera e e
+                        // tratado ja no proximo ciclo (antes podia esperar 350 ms).
+                        if (delay > 0.35) delay = 0.35;
+                        Uint32 wait_until = SDL_GetTicks() + (Uint32)(delay * 1000);
+                        while (!SDL_TICKS_PASSED(SDL_GetTicks(), wait_until)) {
+                            Uint32 left = wait_until - SDL_GetTicks();
+                            SDL_Delay(left > 8 ? 8 : left);
+                            SDL_PumpEvents();
+                            if (SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT, SDL_JOYBUTTONDOWN, SDL_JOYBUTTONDOWN) > 0) break;
+                        }
+                    }
                     AVFrame *u = frame;
                     if (frame->format == AV_PIX_FMT_NVTEGRA) {
                         av_frame_unref(transfer);
@@ -1456,6 +1555,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     double last_failure_pos = -1.0;
     double dur = 0.0;
     int final_rc = 0;
+    int last_audio = 0;
     PlaybackSource active = request->playback;
     if (active.item_id <= 0) active.item_id = request->item_id;
     if (active.session_id <= 0) active.session_id = request->session_id;
@@ -1483,6 +1583,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.section = active.section;
         attempt.container = active.container;
         attempt.url = active.play_url;
+        if (last_audio > 0) attempt.audio_hint = last_audio;   // recuperacao mantem a faixa
+        g_player_audio_index = 0;
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
                           retry_count + 1, current_pos, active.session_id, active.source_id);
         int rc = player_play_internal(ren, joy, &attempt, &hb, current_pos, &out_pos, &out_dur);
@@ -1490,6 +1592,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                           retry_count + 1, rc, out_pos, out_dur);
         if (out_pos > 0) current_pos = out_pos;
         if (out_dur > 0) dur = out_dur;
+        if (g_player_audio_index > 0) last_audio = g_player_audio_index;
 
         if (rc == 1) { // Terminou naturalmente
             result->reason = EXIT_REASON_NATURAL;
@@ -1594,6 +1697,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
 
     result->position = current_pos;
     result->duration = dur;
+    result->audio_index = last_audio;
+    nplay_curl_avio_pool_clear();   // nao segura conexoes/TLS ociosos fora do player
 
     if (heartbeat) {
         SDL_AtomicSet(&hb.running, 0);

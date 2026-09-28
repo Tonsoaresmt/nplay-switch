@@ -381,6 +381,11 @@ static void do_search(void);
 static void open_series(int id);
 int resolve_and_play(int itemId, const char *title);
 static void enter_main(void);
+static void load_settings_status(void);
+static int g_account_prefs_loaded = 0;   // preferencias da conta pedidas no boot
+static int g_last_audio_index = 0;       // faixa de audio usada no ultimo player (1-based)
+static char g_series_keep_lang[32] = ""; // versao de audio a manter ao trocar de temporada
+static void series_keep_audio_after_switch(void);
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 
 // Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
@@ -480,6 +485,10 @@ static void landing_apply(int tab, cJSON *land) {
 
     if (!g_land) { snprintf(g_status, sizeof(g_status), "Falha ao carregar %s", TAB_NAME[tab]); g_railSel = 0; return; }
     g_status[0] = '\0';
+    // Preferencias da conta (audio, autoplay, +18) antes so chegavam ao abrir
+    // Configuracoes. Pede uma vez, depois que o Inicio ja carregou, para nao
+    // disputar a rede com o primeiro catalogo (problema da 0.7.0).
+    if (!g_account_prefs_loaded) { g_account_prefs_loaded = 1; load_settings_status(); }
 
     if (tab == 0) {
         g_heroesArr = cJSON_GetObjectItem(g_land, "heroes");
@@ -809,7 +818,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
 }
 
 int resolve_and_play(int itemId, const char *title) {
-    PlayMeta meta = { title, NULL, NULL, NULL };
+    PlayMeta meta = { title, NULL, NULL, NULL, 0 };
     return resolve_and_play_meta(itemId, &meta);
 }
 
@@ -826,6 +835,7 @@ int resolve_and_play_meta(int itemId, const PlayMeta *meta) {
     pui_draw_loading(gRen, stable_title, "Abrindo video", "Buscando a melhor fonte para voce...", SDL_GetTicks(), 0);
     SDL_RenderPresent(gRen);
     
+    g_last_audio_index = 0;
     PlaybackSource src = {0};
     if (api_resolve_playback(itemId, NULL, &src) < 0) {
         const char *detail = api_last_error();
@@ -874,6 +884,8 @@ int resolve_and_play_meta(int itemId, const PlayMeta *meta) {
         req.season = src.season;
         req.episode = src.episode;
         req.start_sec = start;
+        req.audio_pref = g_pref_audio;
+        req.audio_hint = meta ? meta->audio_hint : 0;
         req.progress_cb = on_player_progress;
         req.renew_cb = on_player_renew;
         req.fallback_cb = on_player_fallback;
@@ -884,6 +896,7 @@ int resolve_and_play_meta(int itemId, const PlayMeta *meta) {
         appletSetMediaPlaybackState(true);
         PlayerResult res = {0};
         int run_rc = player_run(gRen, g_joy, &req, &res);
+        g_last_audio_index = res.audio_index;
         appletSetMediaPlaybackState(false);
         playback_memory_leave();
         g_download_awake = 0;
@@ -1037,11 +1050,15 @@ static void pump_catalog_fetch(void) {
         applied = 1;
     }
     if (result) cJSON_Delete(result);
+    FetchKind finished = g_fetch_current.kind;
     if (!applied) {
         g_screen = g_fetch_current.kind == FETCH_PROFILES ? SC_PROFILES : g_fetch_current.origin;
         toast(error[0] ? error : "Resposta invalida do servidor");
+        if (finished == FETCH_SERIES) g_series_keep_lang[0] = '\0';
     }
     g_fetch_current.kind = FETCH_NONE;
+    // Pode abrir outra versao da temporada; so depois de liberar g_fetch_current.
+    if (applied && finished == FETCH_SERIES) series_keep_audio_after_switch();
 }
 
 static void open_series(int id) {
@@ -1764,6 +1781,43 @@ static int ser_group_idx(void) {
     cJSON_ArrayForEach(e, g) { if (jint(e, "id") == sid) { k = i; break; } i++; }
     return k;
 }
+// Troca de temporada agrupada abre outra obra. Em series dubladas o servidor
+// usa a versao legendada nas temporadas sem dublagem, e o idioma mudava sem
+// aviso. Guardamos a versao atual e, se a nova temporada tiver essa versao,
+// abrimos ela; senao avisamos a troca.
+static const char *ser_audio_version_lang(cJSON *version) {
+    const char *lang = jstr(version, "language");
+    return lang && lang[0] ? lang : jstr(version, "label");
+}
+static void series_keep_audio_begin(void) {
+    g_series_keep_lang[0] = '\0';
+    cJSON *av;
+    cJSON_ArrayForEach(av, ser_audio()) {
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) continue;
+        const char *lang = ser_audio_version_lang(av);
+        if (lang) snprintf(g_series_keep_lang, sizeof(g_series_keep_lang), "%s", lang);
+    }
+}
+static void series_keep_audio_after_switch(void) {
+    if (!g_series_keep_lang[0]) return;
+    char want[32]; snprintf(want, sizeof(want), "%s", g_series_keep_lang);
+    g_series_keep_lang[0] = '\0';
+    cJSON *au = ser_audio(), *av, *current = NULL;
+    int self = jint(ser_obj(), "id");
+    cJSON_ArrayForEach(av, au)
+        if (cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) current = av;
+    const char *current_lang = current ? ser_audio_version_lang(current) : NULL;
+    if (!current_lang || !strcasecmp(current_lang, want)) return;
+    cJSON_ArrayForEach(av, au) {
+        const char *lang = ser_audio_version_lang(av);
+        int id = jint(av, "id");
+        if (lang && !strcasecmp(lang, want) && id > 0 && id != self) { open_series(id); return; }
+    }
+    const char *label = jstr(current, "label");
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Esta temporada so esta disponivel em: %s", label && label[0] ? label : current_lang);
+    toast(msg);
+}
 static int ser_nseasons(void) { return ser_grouped() ? arr_len(ser_group()) : season_count(); }
 // episodios visiveis: agrupado -> junta as temporadas internas (em geral 1);
 // senao -> a temporada interna selecionada.
@@ -2413,22 +2467,23 @@ static void input_series(int b) {
     else if (b == JOY_X) { cJSON *s = ser_obj(); if (s) toggle_fav_series(jint(s, "id")); }
     else if (b == JOY_PLUS) { cJSON *s = ser_obj(); if (s) media_list_prompt_add(jint(s, "id"), 1, jstr(s, "title"), jstr(s, "logo")); }
     else if (b == JOY_Y) { open_dlmenu(); }       // escolher episodios pra baixar
-    else if (b == JOY_ZL || b == JOY_ZR) {        // troca audio (Legendado <-> Dublado)
-        cJSON *au = ser_audio();
-        if (arr_len(au) > 1) { cJSON *av; cJSON_ArrayForEach(av, au) { if (!cJSON_IsTrue(cJSON_GetObjectItem(av, "current"))) { open_series(jint(av, "id")); break; } } }
+    else if (b == JOY_ZL || b == JOY_ZR) {        // alterna as versoes de audio (Legendado/Dublado/...)
+        cJSON *au = ser_audio(); int n = arr_len(au), cur = 0;
+        for (int i = 0; i < n; i++) if (cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(au, i), "current"))) cur = i;
+        if (n > 1) open_series(jint(cJSON_GetArrayItem(au, (cur + (b == JOY_ZR ? 1 : n - 1)) % n), "id"));
     }
     else if (b == JOY_UP) { if (g_epSel > 0) g_epSel--; }
     else if (b == JOY_DOWN) { if (g_epSel < nep - 1) g_epSel++; }
     else if (b == JOY_L) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); } }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_R) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); } }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_A) {   // assistir + proximo episodio (pelo player ou pela contagem)
-        int idx = g_epSel;
+        int idx = g_epSel, audio_hint = 0;
         cJSON *series = ser_obj();
         while (idx < ser_nep()) {
             cJSON *ep = ser_ep_at(idx); if (!ep) break;
@@ -2441,8 +2496,10 @@ static void input_series(int b) {
             if (!overview || !overview[0]) overview = jstr(series, "plot");
             const char *series_title = jstr(series, "title");
             PlayMeta meta = { series_title && series_title[0] ? series_title : ep_display_title(ep),
-                              subtitle, overview, next_ep ? next_label : NULL };
+                              subtitle, overview, next_ep ? next_label : NULL, audio_hint };
             int ended = resolve_and_play_meta(jint(ep, "id"), &meta);
+            // Pacotes sem tag de idioma: repete a mesma faixa no proximo episodio.
+            if (g_last_audio_index > 0) audio_hint = g_last_audio_index;
             if (!next_ep || (ended != 1 && ended != 2)) break;
             g_epSel = idx + 1;
             // 2 = o usuario ja escolheu o proximo no player; nao pergunta de novo.
