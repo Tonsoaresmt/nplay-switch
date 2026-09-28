@@ -258,6 +258,30 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Versao preparada: 0.12.19. Pendente no hardware: confirmar Dublado em fonte
   multiaudio, Legendado com legenda PT, troca manual e captura do HUD pausado.
 
+## Auditoria profunda do player 0.12.20 em 28/09/2026
+
+- A 0.12.19 nao continha o HUD modular de `f5296a1`; apenas aproximava o layout
+  antigo. `player_ui.c/.h` foi portado sobre o pipeline 0.12.x, preservando HLS,
+  NVTEGRA, limites de memoria, diagnostico e recuperacao de sessao.
+- Pausa, loader, buffering, timeline e painel de audio/legenda usam agora o mesmo
+  sistema visual. O painel tem duas colunas e a busca nao desenha mais o modal
+  antigo por cima da timeline moderna. Area de toque foi alinhada ao novo HUD.
+- Causa adicional do ingles: pacotes R2 antigos usam `eng` na primeira faixa e
+  `und` na segunda dublada. `audio_policy.c` replica o contrato vigente do site,
+  cobre PT explicito, regra legada, original/Legendado e evita comentario.
+- Serie passa a priorizar a versao Dublada/Legendada aberta. Recuperacao e
+  episodio seguinte preservam o idioma, nao apenas a posicao da faixa. Arquivos
+  locais de audio/legenda agora sao separados por perfil.
+- Metadados estaticos do HUD sao montados uma vez por reproducao; nao enumerar
+  streams nem formatar todas as faixas por quadro. O cartao de proximo episodio
+  fica oculto ate possuir foco/confirmacao realmente integrados.
+- Detalhes, matriz de decisao e roteiro de hardware estao em
+  `docs/PLAYER_AUDIO_UI_AUDIT_0_12_20.md`.
+- Suite completa passou antes do bump: build limpo sem warnings, contratos de
+  site/player/API/episodios/remux, teste de audio com `-Werror`, TLS e simbolos.
+  Ainda e obrigatorio testar em hardware filme R2 legado, Legendado, dois
+  episodios, troca manual, pausa, painel, timeline e queda de rede.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

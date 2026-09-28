@@ -262,7 +262,18 @@ void input_movie(int b) {
             if (id > 0) request_related_movie_details(id);
         } else {
             int id = jint(g_movie, "id");
-            if (g_movie_sel == 0) resolve_and_play(id, jstr(g_movie, "title"));
+            if (g_movie_sel == 0) {
+                char subtitle[320] = {0}, genres[240] = {0};
+                int year = jint(g_movie, "year"), duration = jint(g_movie, "duration");
+                movie_genre_label(jstr(g_movie, "genre"), genres, sizeof(genres));
+                if (year > 0) snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle), "%d", year);
+                if (duration > 0) snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle),
+                                           "%s%d min", subtitle[0] ? "  |  " : "", duration);
+                if (genres[0]) snprintf(subtitle + strlen(subtitle), sizeof(subtitle) - strlen(subtitle),
+                                        "%s%s", subtitle[0] ? "  |  " : "", genres);
+                resolve_and_play_details(id, jstr(g_movie, "title"), subtitle,
+                                         jstr(g_movie, "plot"), NULL, 0);
+            }
             else toggle_fav_item(id);
         }
     }

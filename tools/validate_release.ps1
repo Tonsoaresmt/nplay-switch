@@ -51,9 +51,10 @@ Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e inici
 Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior ao primeiro frame.'
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
 Assert-True ($sources -match 'lang_norm' -and $sources -match 'stream_norm') 'Selecao de idioma voltou a comparar tags inconsistentes diretamente.'
-Assert-True ($sources -match 'req->audio_pref == 0 && pt_audio >= 0') 'Preferencia Dublado da conta nao prioriza a faixa em portugues.'
-Assert-True ($sources -match 'REPRODUCAO PAUSADA' -and $sources -match 'NPLAY PLAYER') 'Player perdeu o painel visual ampliado de pausa.'
+Assert-True ($sources -match 'audio_policy_choose') 'Selecao de audio voltou a ficar acoplada ao player e sem testes.'
+Assert-True ($sources -match 'pui_draw\(' -and $sources -match 'pui_draw_loading\(') 'Player nao usa o HUD modular nas telas de reproducao e abertura.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
+Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'
 Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
 Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
@@ -76,9 +77,22 @@ Assert-True ($mainSource -match 'cover_suspend_and_release') 'Workers de capa po
 Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes de um crash nao aparece no diagnostico.'
 Assert-True ($mainSource -match 'diag_read_player_page') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
 Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
-Assert-True ($mainSource -match 'req\.audio_pref = g_pref_audio') 'Player nao recebe a preferencia de audio da conta.'
+Assert-True ($mainSource -match 'req\.audio_pref = g_next_audio_pref_override >= 0 \? g_next_audio_pref_override : g_pref_audio') 'Player nao recebe a preferencia da versao/conta.'
 Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio seguinte nao preserva a faixa de audio anterior.'
+Assert-True ($mainSource -match 'g_next_audio_language') 'Episodio seguinte preserva apenas indice e pode mudar para ingles.'
 Assert-True ($mainSource -match 'series_keep_audio_after_switch') 'Temporada agrupada nao tenta preservar sua versao de audio.'
+
+$storeSource = Get-Content source/store.c -Raw
+Assert-True ($storeSource -match 'pref_audio_%d\.txt' -and $storeSource -match 'pref_sub_%d\.txt') 'Preferencias manuais de audio/legenda vazam entre perfis.'
+
+$playerUiSource = Get-Content source/player_ui.c -Raw
+Assert-True ($playerUiSource -match 'draw_pause_info' -and $playerUiSource -match 'draw_panel') 'HUD modular perdeu pausa detalhada ou painel de faixas.'
+Assert-True ($playerUiSource -match 'draw_track_column.+AUDIO' -or ($playerUiSource -match '"AUDIO"' -and $playerUiSource -match '"LEGENDAS"')) 'Painel nao mostra audio e legendas em duas colunas.'
+Assert-True ($playerUiSource -match 'draw_next_card' -and $playerUiSource -match 'PUI_FOCUS_TIMELINE') 'HUD modular perdeu proximo episodio ou timeline.'
+Assert-True ($sources -match 'PlayerHud hud_base' -and $sources -match 'draw_hud\(ren, &hud_base') 'HUD voltou a enumerar faixas ou montar rotulos a cada quadro.'
+
+$audioPolicySource = Get-Content source/audio_policy.c -Raw
+Assert-True ($audioPolicySource -match 'count == 2' -and $audioPolicySource -match 'AUDIO_KIND_ENGLISH' -and $audioPolicySource -match 'AUDIO_KIND_UNKNOWN') 'Pacotes R2 antigos (ingles + dublagem sem tag) voltaram a selecionar ingles.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
@@ -119,6 +133,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou ao compilar.' }
 & .\build\test_player_clock.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
+& .\build\test_audio_policy.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
 & $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe

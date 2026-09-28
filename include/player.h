@@ -35,6 +35,10 @@ typedef struct {
     DeliveryType delivery;
 
     const char *title;
+    const char *subtitle;
+    const char *overview;
+    const char *next_title;
+    int has_next;
     const char *section;
     const char *container;
     const char *url;
@@ -46,6 +50,7 @@ typedef struct {
     // Preferencia da conta e continuidade entre episodios. audio_hint e 1-based.
     int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
     int audio_hint;
+    const char *audio_hint_language; // pt/en/ja/... ou und; opcional
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;
@@ -62,6 +67,7 @@ typedef struct {
     PlayerState final_state;
     int recovery_count;
     int audio_index; // faixa ativa ao sair (1-based; 0 = sem audio)
+    char audio_language[8]; // idioma normalizado ou "und"
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);

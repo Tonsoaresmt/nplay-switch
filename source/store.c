@@ -420,7 +420,10 @@ static void trim_line(char *s) {
 
 int store_load_pref_audio(char *out, size_t cap) {
     if (!out || cap == 0) return 0;
-    FILE *f = fopen(PREFA_F, "rb");
+    char path[128];
+    if (g_media_profile_id > 0) snprintf(path, sizeof(path), DIR_APP "/pref_audio_%d.txt", g_media_profile_id);
+    else snprintf(path, sizeof(path), "%s", PREFA_F);
+    FILE *f = fopen(path, "rb");
     if (!f) return 0;
     size_t n = fread(out, 1, cap - 1, f);
     fclose(f);
@@ -430,7 +433,10 @@ int store_load_pref_audio(char *out, size_t cap) {
 }
 void store_save_pref_audio(const char *lang) {
     if (!lang) return;
-    FILE *f = fopen(PREFA_F, "wb");
+    char path[128];
+    if (g_media_profile_id > 0) snprintf(path, sizeof(path), DIR_APP "/pref_audio_%d.txt", g_media_profile_id);
+    else snprintf(path, sizeof(path), "%s", PREFA_F);
+    FILE *f = fopen(path, "wb");
     if (!f) return;
     fwrite(lang, 1, strlen(lang), f);
     fclose(f);
@@ -438,7 +444,10 @@ void store_save_pref_audio(const char *lang) {
 
 int store_load_pref_sub(char *out, size_t cap) {
     if (!out || cap == 0) return 0;
-    FILE *f = fopen(PREFS_F, "rb");
+    char path[128];
+    if (g_media_profile_id > 0) snprintf(path, sizeof(path), DIR_APP "/pref_sub_%d.txt", g_media_profile_id);
+    else snprintf(path, sizeof(path), "%s", PREFS_F);
+    FILE *f = fopen(path, "rb");
     if (!f) return 0;
     size_t n = fread(out, 1, cap - 1, f);
     fclose(f);
@@ -448,7 +457,10 @@ int store_load_pref_sub(char *out, size_t cap) {
 }
 void store_save_pref_sub(const char *lang) {
     if (!lang) return;
-    FILE *f = fopen(PREFS_F, "wb");
+    char path[128];
+    if (g_media_profile_id > 0) snprintf(path, sizeof(path), DIR_APP "/pref_sub_%d.txt", g_media_profile_id);
+    else snprintf(path, sizeof(path), "%s", PREFS_F);
+    FILE *f = fopen(path, "wb");
     if (!f) return;
     fwrite(lang, 1, strlen(lang), f);
     fclose(f);

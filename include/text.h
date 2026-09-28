@@ -13,5 +13,8 @@ SDL_Texture *text_make(SDL_Renderer *ren, const char *utf8, SDL_Color color, int
 // Desenha texto direto em (x,y) usando cache interno. estilo: 0/1/2.
 int  text_draw(SDL_Renderer *ren, const char *utf8, int x, int y, SDL_Color color, int big);
 
+// Mede o texto sem criar textura. Retorna 0 em sucesso.
+int text_measure(const char *utf8, int style, int *outW, int *outH);
+
 // Retorna textura do CACHE (NAO destruir). Para desenhar com posicionamento proprio.
 SDL_Texture *text_cached(SDL_Renderer *ren, const char *utf8, SDL_Color color, int big, int *outW, int *outH);

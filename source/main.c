@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -26,6 +27,7 @@
 #include "episode_flow.h"
 #include "brand_bin.h"
 #include "curl_avio.h"
+#include "audio_policy.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -379,6 +381,8 @@ static SDL_atomic_t g_account_ready, g_settings_done;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
+static char g_next_audio_language[8] = "", g_last_audio_language[8] = "";
+static int g_next_audio_pref_override = -1;
 static char g_series_keep_lang[32] = "";
 static int g_prefs_sel = 0;
 static int g_settings_section = 0, g_settings_focus = 1;
@@ -423,6 +427,8 @@ static void open_series(int id);
 static void load_settings_status(void);
 static void series_keep_audio_after_switch(void);
 int resolve_and_play(int itemId, const char *title);
+int resolve_and_play_details(int itemId, const char *title, const char *subtitle,
+                             const char *overview, const char *next_title, int has_next);
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 static void mark_episode_completed_in_detail(int item_id);
 static int choose_next_episode(int series_id, int finished_item_id, int first_in_group,
@@ -885,7 +891,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.title = stable_title;
     req.url = url;
     req.start_sec = start;
-    req.audio_pref = g_pref_audio;
+    req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
     req.progress_cb = on_player_progress;
     req.heartbeat_cb = NULL;
     // Sem renew_cb pois nao e uma stream resolvida via API.
@@ -897,6 +903,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     PlayerResult res = {0};
     int run_rc = player_run(gRen, g_joy, &req, &res);
     g_last_audio_index = res.audio_index;
+    snprintf(g_last_audio_language, sizeof(g_last_audio_language), "%s", res.audio_language);
     appletSetMediaPlaybackState(false);
     playback_memory_leave();
     g_download_awake = 0;
@@ -1013,9 +1020,14 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
 }
 
 // Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
-int resolve_and_play(int itemId, const char *title) {
+int resolve_and_play_details(int itemId, const char *title, const char *subtitle,
+                             const char *overview, const char *next_title, int has_next) {
     char stable_title[256];
+    char stable_subtitle[256], stable_overview[1200], stable_next[256];
     snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
+    snprintf(stable_subtitle, sizeof(stable_subtitle), "%s", subtitle ? subtitle : "");
+    snprintf(stable_overview, sizeof(stable_overview), "%s", overview ? overview : "");
+    snprintf(stable_next, sizeof(stable_next), "%s", next_title ? next_title : "");
     PlaybackSource src = {0};
     int resolved = resolve_open_with_animation(itemId, stable_title, &src);
     if (resolved == -2) return 0;
@@ -1073,14 +1085,19 @@ int resolve_and_play(int itemId, const char *title) {
         req.source_id = src.source_id;
         req.delivery = src.delivery;
         req.title = stable_title;
+        req.subtitle = stable_subtitle[0] ? stable_subtitle : NULL;
+        req.overview = stable_overview[0] ? stable_overview : NULL;
+        req.next_title = stable_next[0] ? stable_next : NULL;
+        req.has_next = has_next && stable_next[0];
         req.section = src.section;
         req.container = src.container;
         req.url = src.play_url;
         req.season = src.season;
         req.episode = src.episode;
         req.start_sec = start;
-        req.audio_pref = g_pref_audio;
+        req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
         req.audio_hint = g_next_audio_hint;
+        req.audio_hint_language = g_next_audio_language[0] ? g_next_audio_language : NULL;
         if (src.sequential_stream) req.start_sec = 0;
         req.progress_cb = on_player_progress;
         // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
@@ -1098,6 +1115,7 @@ int resolve_and_play(int itemId, const char *title) {
         PlayerResult res = {0};
         int run_rc = player_run(gRen, g_joy, &req, &res);
         g_last_audio_index = res.audio_index;
+        snprintf(g_last_audio_language, sizeof(g_last_audio_language), "%s", res.audio_language);
         appletSetMediaPlaybackState(false);
         playback_memory_leave();
         g_download_awake = 0;
@@ -1123,6 +1141,9 @@ int resolve_and_play(int itemId, const char *title) {
     if (src.session_id > 0) api_stop_playback(itemId);
     
     return rc;
+}
+int resolve_and_play(int itemId, const char *title) {
+    return resolve_and_play_details(itemId, title, NULL, NULL, NULL, 0);
 }
 static int episode_completed(cJSON *episode) {
     return jint(episode, "completed") != 0 || cJSON_IsTrue(cJSON_GetObjectItem(episode, "completed"));
@@ -2316,17 +2337,36 @@ static int ser_group_idx(void) {
     cJSON_ArrayForEach(e, g) { if (jint(e, "id") == sid) { k = i; break; } i++; }
     return k;
 }
-static const char *ser_audio_version_lang(cJSON *version) {
+static void ser_audio_version_key(cJSON *version, char *out, size_t cap) {
     const char *lang = jstr(version, "language");
-    return lang && lang[0] ? lang : jstr(version, "label");
+    const char *label = jstr(version, "label");
+    char raw[96];
+    snprintf(raw, sizeof(raw), "%s %s", lang ? lang : "", label ? label : "");
+    for (size_t i = 0; raw[i]; i++) raw[i] = (char)tolower((unsigned char)raw[i]);
+    const char *norm = audio_language_normalize(lang, label);
+    if (!strcmp(norm, "pt") || strstr(raw, "dublad")) snprintf(out, cap, "dub");
+    else if (strstr(raw, "legend") || strstr(raw, "subtit") || strstr(raw, "original")) snprintf(out, cap, "leg");
+    else if (strstr(raw, "dual")) snprintf(out, cap, "dual");
+    else if (norm[0]) snprintf(out, cap, "%s", norm);
+    else if (cap > 0) {
+        size_t copy = strlen(raw);
+        if (copy >= cap) copy = cap - 1;
+        memcpy(out, raw, copy);
+        out[copy] = '\0';
+    }
+}
+static const char *ser_audio_version_label(const char *key) {
+    if (!strcmp(key, "dub")) return "Dublada";
+    if (!strcmp(key, "leg")) return "Legendada";
+    if (!strcmp(key, "dual")) return "Dual audio";
+    return key;
 }
 static void series_keep_audio_begin(void) {
     g_series_keep_lang[0] = '\0';
     cJSON *version;
     cJSON_ArrayForEach(version, ser_audio()) {
         if (!cJSON_IsTrue(cJSON_GetObjectItem(version, "current"))) continue;
-        const char *lang = ser_audio_version_lang(version);
-        if (lang) snprintf(g_series_keep_lang, sizeof(g_series_keep_lang), "%s", lang);
+        ser_audio_version_key(version, g_series_keep_lang, sizeof(g_series_keep_lang));
         break;
     }
 }
@@ -2339,17 +2379,19 @@ static void series_keep_audio_after_switch(void) {
     int current_id = jint(ser_obj(), "id");
     cJSON_ArrayForEach(version, versions)
         if (cJSON_IsTrue(cJSON_GetObjectItem(version, "current"))) current = version;
-    const char *current_lang = current ? ser_audio_version_lang(current) : NULL;
-    if (current_lang && !strcasecmp(current_lang, wanted)) return;
+    char current_lang[32] = "";
+    if (current) ser_audio_version_key(current, current_lang, sizeof(current_lang));
+    if (current_lang[0] && !strcmp(current_lang, wanted)) return;
     cJSON_ArrayForEach(version, versions) {
-        const char *lang = ser_audio_version_lang(version);
+        char lang[32]; ser_audio_version_key(version, lang, sizeof(lang));
         int id = jint(version, "id");
-        if (lang && !strcasecmp(lang, wanted) && id > 0 && id != current_id) {
+        if (!strcmp(lang, wanted) && id > 0 && id != current_id) {
             open_series(id); return;
         }
     }
     char message[128];
-    snprintf(message, sizeof(message), "Esta temporada nao possui a versao %s", wanted);
+    snprintf(message, sizeof(message), "Esta temporada nao possui a versao %s",
+             ser_audio_version_label(wanted));
     toast(message);
 }
 static int ser_nseasons(void) { return ser_grouped() ? arr_len(ser_group()) : season_count(); }
@@ -3276,11 +3318,48 @@ static void play_episode_sequence(int item_id, int series_id, const char *title)
     char current_title[256];
     snprintf(current_title, sizeof(current_title), "%s", title && title[0] ? title : "Episodio");
     int audio_hint = 0;
+    char audio_language[8] = "";
     while (g_running && item_id > 0) {
+        int version_pref = -1;
+        cJSON *audio_version;
+        cJSON_ArrayForEach(audio_version, ser_audio()) {
+            if (!cJSON_IsTrue(cJSON_GetObjectItem(audio_version, "current"))) continue;
+            version_pref = audio_version_preference(jstr(audio_version, "language"),
+                                                    jstr(audio_version, "label"));
+            break;
+        }
+        g_next_audio_pref_override = version_pref;
         g_next_audio_hint = audio_hint;
-        int play_result = resolve_and_play(item_id, current_title);
+        snprintf(g_next_audio_language, sizeof(g_next_audio_language), "%s", audio_language);
+        cJSON *current_episode = NULL, *next_episode = NULL;
+        for (int i = 0; i < ser_nep(); i++) {
+            cJSON *candidate = ser_ep_at(i);
+            if (candidate && jint(candidate, "id") == item_id) {
+                current_episode = candidate;
+                next_episode = i + 1 < ser_nep() ? ser_ep_at(i + 1) : NULL;
+                break;
+            }
+        }
+        char episode_context[256] = "", next_context[256] = "";
+        const char *overview = NULL;
+        if (current_episode) {
+            int season = jint(current_episode, "season"), episode = jint(current_episode, "episode");
+            snprintf(episode_context, sizeof(episode_context), "T%d E%d  |  %s",
+                     season, episode, ep_display_title(current_episode));
+            overview = jstr(current_episode, "ep_overview");
+            if (!overview || !overview[0]) overview = jstr(ser_obj(), "plot");
+        }
+        if (next_episode) snprintf(next_context, sizeof(next_context), "%s", ep_display_title(next_episode));
+        int play_result = resolve_and_play_details(item_id, current_title,
+                                                   episode_context[0] ? episode_context : NULL,
+                                                   overview, next_context,
+                                                   next_episode != NULL);
+        g_next_audio_pref_override = -1;
         g_next_audio_hint = 0;
+        g_next_audio_language[0] = '\0';
         if (g_last_audio_index > 0) audio_hint = g_last_audio_index;
+        if (g_last_audio_language[0])
+            snprintf(audio_language, sizeof(audio_language), "%s", g_last_audio_language);
         if (play_result != 1) return;
         char next_title[256] = {0};
         int next_id = choose_next_episode(series_id, item_id, 0, 1,
