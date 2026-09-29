@@ -891,6 +891,16 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.session_id = 0; // Local ou arquivo direto
     req.title = stable_title;
     req.url = url;
+    const char *query = url ? strchr(url, '?') : NULL;
+    size_t url_len = url ? (query ? (size_t)(query - url) : strlen(url)) : 0;
+    int url_hls = url_len >= 5 && !strncasecmp(url + url_len - 5, ".m3u8", 5);
+    req.container = is_hls || url_hls ? "m3u8" : NULL;
+    // Este caminho recebe o manifesto final de um job preparado. Quando ele e
+    // remoto, usa o mesmo contrato fMP4/AAC/WebVTT do R2 e precisa das mesmas
+    // correcoes de codec/legenda da resolucao normal por /api/stream.
+    if (req.container && url && (!strncmp(url, "http://", 7) ||
+                                 !strncmp(url, "https://", 8)))
+        req.delivery = DELIVERY_R2;
     req.start_sec = start;
     req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
     req.progress_cb = on_player_progress;
@@ -1666,7 +1676,10 @@ static int accel_wait_and_play(int itemId, const char *title) {
                 if (!strncmp(fu, "http", 4)) snprintf(url, sizeof(url), "%s", fu);
                 else snprintf(url, sizeof(url), "%s%s", BASE, fu);
                 appletSetMediaPlaybackState(false); g_download_awake = 0;
-                rc = play_with_progress(itemId, title, url, 0);
+                const char *container = jstr(status, "container");
+                if (!container && job) container = jstr(job, "container");
+                rc = play_with_progress(itemId, title, url,
+                                        container && !strcasecmp(container, "m3u8"));
                 waiting = 0;
                 break;
             }
@@ -1995,13 +2008,16 @@ static void pump_downloads(void) {
 static int dl_play(cJSON *job) {
     char local[180]; local_dl_path(jint(job, "item_id"), local, sizeof(local));
     if (local_dl_exists(jint(job, "item_id")))
-        return play_with_progress(jint(job, "item_id"), jstr(job, "title"), local, 0);
+        return play_with_progress(jint(job, "item_id"), jstr(job, "title"), local,
+                                  strstr(local, ".m3u8") != NULL);
     const char *fu = jstr(job, "file_url");
     if (!fu) { toast("Sem arquivo"); return 0; }
     char url[1400];
     if (strncmp(fu, "http", 4) == 0) snprintf(url, sizeof(url), "%s", fu);
     else snprintf(url, sizeof(url), "%s%s", BASE, fu);
-    return play_with_progress(jint(job, "item_id"), jstr(job, "title"), url, 0);
+    const char *container = jstr(job, "container");
+    return play_with_progress(jint(job, "item_id"), jstr(job, "title"), url,
+                              container && !strcasecmp(container, "m3u8"));
 }
 
 // ------------------------------------------------------------- busca
@@ -4599,6 +4615,7 @@ static void handle_touch_tap(int x, int y) {
     if (g_screen == SC_MOVIE && y >= 461 && y < 659) movie_touch_related(x, y);
 }
 static void handle_touch_swipe(int x, int y, int dx, int dy) {
+    (void)x;
     if (g_screen == SC_SEARCH && y >= 205) {
         int rows = (srch_count_for(g_srchFilter) + GCOLS - 1) / GCOLS;
         int max_scroll = 221 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);

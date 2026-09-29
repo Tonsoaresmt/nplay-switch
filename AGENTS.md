@@ -1277,3 +1277,36 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   release. Ele contem `/releases/latest`, download `.nro` e busca dos caminhos
   Nplay/Meruem. A versao instalada pelo usuario ainda precisa ser identificada
   e a atualizacao confirmada no console; o build local nao prova essa etapa.
+
+## Consolidacao do player em 29/09/2026 (0.12.26)
+
+- Worktree usada: `C:/NplaySwitch/.codex-tmp/switch-0.12.18`, branch
+  `codex/switch-0.12.18`, baseada em `origin/codex/switch-rebuild` 0.12.25.
+- `source/player.c`: o worker de demux ganhou barreira cooperativa. Seek e troca
+  de faixa so alteram `AVFormatContext` depois que `av_read_frame` confirmou
+  pausa; pacotes antigos sao limpos antes da nova geracao. Operacoes normais nao
+  reabrem mais manifesto, probe e decoders completos.
+- Falha/cancelamento depois de tocar o demuxer nunca retoma estado parcial:
+  aciona a reabertura controlada na posicao segura. Se nenhum quadro reaparecer
+  em 20 s, ha fallback automatico. `SDL_QUIT` nao e mais consumido como B.
+- O callback de interrupcao so le estado nao atomico na thread de render; a
+  thread de demux observa exclusivamente `demux_abort` atomico.
+- A fila SDL fica pausada durante preroll e so volta no primeiro quadro novo.
+  `SDL_QueueAudio` e verificado. Pausa longa e reancoragem do relogio possuem
+  simulacao de regressao.
+- Renditions HLS usam metadata `title`, `comment` e `name`; o fixture confirmou
+  que FFmpeg publica `NAME` como `comment`. A politica seleciona PT-BR mesmo com
+  ingles DEFAULT quando a conta pede Dublado.
+- Legendas recebem `pkt_timebase`, calculam WebVTT por `AVSubtitle.pts`/PTS e
+  duracao do pacote, registram pacotes/cues e mantem 32 cues (aprox. 17 KB).
+- `source/main.c`: Historico/Biblioteca propagam `m3u8` e `DELIVERY_R2` ao abrir
+  um item preparado, evitando o caminho de arquivo simples.
+- `tools/test_hls_player_fixture.mjs` gera localmente HLS fMP4 com dois audios e
+  duas legendas, testa metadata, abertura, seeks e decodificacao. Foi integrado
+  a `tools/validate_release.ps1`.
+- Validacao limpa final: build ARM64 `-Werror` e suite completa passaram;
+  fixture: 5 faixas/2 cues; remux: 203 quadros. `Nplay.nro` tem 24.155.983 bytes,
+  SHA-256 `42601cc290c2f145a555d24d169f5fbf395ffce216fed61b0d5dfd48f8f844a7`.
+- Pendente obrigatorio: teste no Switch real de filme, serie, anime e dorama,
+  pausa/retomada, seeks, audio PT-BR, legendas e perda curta de Wi-Fi. Nao afirmar
+  comprovacao em hardware com base apenas no build local.

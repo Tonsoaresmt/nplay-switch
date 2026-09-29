@@ -1,4 +1,5 @@
 #include "subtitle_queue.h"
+#include <math.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -72,4 +73,24 @@ const char *subtitle_queue_text(SubtitleQueue *queue, double position) {
         strncat(queue->composed, cue->text, remaining - 1);
     }
     return queue->composed;
+}
+
+void subtitle_cue_times(double decoded_pts, double packet_pts,
+                        double packet_duration, unsigned start_display_ms,
+                        unsigned end_display_ms, double timeline_origin,
+                        double *start, double *end) {
+    double base = isfinite(decoded_pts) ? decoded_pts :
+                  isfinite(packet_pts) ? packet_pts : 0.0;
+    base -= isfinite(timeline_origin) ? timeline_origin : 0.0;
+    double cue_start = base + start_display_ms / 1000.0;
+    double cue_end;
+    if (end_display_ms > start_display_ms)
+        cue_end = base + end_display_ms / 1000.0;
+    else if (isfinite(packet_duration) && packet_duration > 0.01)
+        cue_end = base + packet_duration;
+    else
+        cue_end = cue_start + 4.0;
+    if (cue_end <= cue_start) cue_end = cue_start + 4.0;
+    if (start) *start = cue_start;
+    if (end) *end = cue_end;
 }

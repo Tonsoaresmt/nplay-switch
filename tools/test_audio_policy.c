@@ -17,6 +17,10 @@ int main(void) {
 
     AudioTrackInfo title_only[] = { t("und", "English", 1), t("und", "Dublado Nacional", 0) };
     assert(audio_policy_choose(title_only, 2, 0, NULL, NULL, 0, 0, 0) == 1);
+    AudioTrackInfo hls_name_in_comment[] = {
+        t("und", "English", 1), t("und", "Portugues (Brasil)", 0)
+    };
+    assert(audio_policy_choose(hls_name_in_comment, 2, 0, NULL, NULL, 0, 0, 0) == 1);
 
     AudioTrackInfo anime[] = { t("por", "Dublado", 1), t("jpn", "Original", 0) };
     assert(audio_policy_choose(anime, 2, 1, NULL, NULL, 0, 0, 0) == 1);

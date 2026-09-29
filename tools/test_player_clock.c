@@ -42,6 +42,14 @@ int main(void) {
     // Pausing and seeking explicitly rebase; the first frame is never dropped.
     master = player_clock_master(250.0, 121.0, 0, 0, 0, &anchor, 1);
     assert(fabs(master - 121.0) < 0.00001);
+
+    // Uma pausa longa nao envelhece o relogio da midia. Retomar quinze minutos
+    // depois no mesmo quadro apenas reancora a parede.
+    master = player_clock_master(1150.0, 121.04, 0, 0, 0, &anchor, 1);
+    assert(fabs(master - 121.04) < 0.00001);
+    assert(fabs(anchor - 1028.96) < 0.00001);
+    master = player_clock_master(1150.04, 121.08, 0, 0, 0, &anchor, 0);
+    assert(fabs(master - 121.08) < 0.00001);
     puts("player clock simulation: ok");
     return 0;
 }

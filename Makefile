@@ -11,7 +11,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #--------------------------------------------------------------------------------- metadados
 APP_TITLE	:=	Nplay
 APP_AUTHOR	:=	Nplay
-APP_VERSION := 0.12.25
+APP_VERSION := 0.12.26
 UPDATE_REPO_OWNER	?=	Tonsoaresmt
 UPDATE_REPO_NAME	?=	nplay-switch
 
@@ -27,7 +27,7 @@ PKGS	:=	sdl2 SDL2_image SDL2_ttf libcurl libavformat libavcodec libswscale libsw
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
+CFLAGS	:=	-g -Wall -Wextra -Werror -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES) `$(PKGCONF) --cflags $(PKGS)`
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 CFLAGS	+=	-DAPP_VERSION_STR=\"$(APP_VERSION)\"

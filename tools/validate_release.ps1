@@ -59,11 +59,18 @@ Assert-True ($sources -match 'last_audio_priority \? last_audio_priority : 1') '
 Assert-True ($sources -match 'player_select_hls_streams\(fmt, vidx, aidx') 'A reabertura nao descarta faixas HLS fora de uso.'
 Assert-True ($sources -match 'avformat_seek_file' -and $sources -match 'window-fallback') 'Seek perdeu a janela multi-stream ou o fallback compativel.'
 Assert-True ($sources -match 'demux_worker_thread' -and $sources -match 'DEMUX_QUEUE_BYTES') 'Rede/demux voltou a bloquear a thread dos controles.'
-Assert-True ($sources -match 'PLAYER_RESTART_SEEK' -and $sources -match 'controlled-restart') 'Seek voltou a mutar uma pipeline HLS ativa.'
-Assert-True ($sources -match 'audio-restart-request' -and $sources -match 'subtitle-restart-request') 'Troca de faixa voltou a mutar o demuxer durante leitura.'
+Assert-True ($sources -match 'pause_request' -and $sources -match 'demux_worker_wait_paused') 'Seek/troca de faixa perdeu a barreira da thread de demux.'
+Assert-True ($sources -match 'demux_worker_clear' -and $sources -match 'player_seek_with_barrier') 'Seek pode misturar pacotes anteriores com a nova geracao.'
+Assert-True ($sources -match 'if \(!on_render_thread\) return 0') 'Callback do FFmpeg voltou a ler estado nao atomico na thread de demux.'
+Assert-True ($sources -match 'audio-inplace-applied' -and $sources -match 'subtitle-inplace-applied') 'Troca de faixa voltou a reabrir toda a sessao HLS.'
+Assert-True ($sources -match 'inplace-resume-timeout' -and $sources -match 'PLAYER_RESTART_TRACK') 'Operacao interna pode voltar a prender o player sem fallback.'
 Assert-True ($sources -match 'subtitle_hint_priority' -and $sources -match 'last_audio_priority = 2') 'Reabertura nao preserva exatamente as faixas escolhidas.'
 Assert-True ($sources -match 'nplay_curl_avio_hls_media_counts' -and $sources -match 'master_subtitle_count == 0') 'Legendas anunciadas no master podem voltar a ser descartadas antes do probe.'
+Assert-True ($sources -match 'subtitle_cue_times' -and $sources -match 'pkt_timebase') 'Timestamp/tempo-base das legendas voltou a ficar implicito.'
+Assert-True ($sources -match 'stream_track_title' -and $sources -match '"comment"') 'Nome LANGUAGE/NAME das renditions HLS voltou a ser ignorado.'
 Assert-True ($sources -match 'cid == AV_CODEC_ID_NONE' -and $sources -match 'AV_CODEC_ID_WEBVTT' -and $sources -match 'repaired_subtitles') 'Legendas WebVTT sem probe completo podem voltar a desaparecer do painel.'
+$subtitleHeader = Get-Content include/subtitle_queue.h -Raw
+Assert-True ($subtitleHeader -match 'SUBTITLE_QUEUE_CAP 32') 'Fila de legendas voltou a descartar cues cedo demais.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
 
 $diagSource = Get-Content source/diag.c -Raw
@@ -85,6 +92,8 @@ Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes 
 Assert-True ($mainSource -match 'diag_read_player_page') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
 Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
 Assert-True ($mainSource -match 'req\.audio_pref = g_next_audio_pref_override >= 0 \? g_next_audio_pref_override : g_pref_audio') 'Player nao recebe a preferencia da versao/conta.'
+Assert-True ($mainSource -match 'req\.container = is_hls \|\| url_hls \? "m3u8" : NULL') 'Fluxo preparado voltou a ignorar que a URL e HLS.'
+Assert-True ($mainSource -match 'req\.delivery = DELIVERY_R2') 'Fluxo HLS preparado nao recebe o contrato R2 de codecs/legendas.'
 Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio seguinte nao preserva a faixa de audio anterior.'
 Assert-True ($mainSource -match 'g_next_audio_language') 'Episodio seguinte preserva apenas indice e pode mudar para ingles.'
 Assert-True ($mainSource -match 'series_keep_audio_after_switch') 'Temporada agrupada nao tenta preservar sua versao de audio.'
@@ -95,6 +104,7 @@ Assert-True ($storeSource -match 'pref_audio_%d\.txt' -and $storeSource -match '
 
 $playerUiSource = Get-Content source/player_ui.c -Raw
 Assert-True ($playerUiSource -match 'draw_pause_info' -and $playerUiSource -match 'draw_panel') 'HUD modular perdeu pausa detalhada ou painel de faixas.'
+Assert-True ($playerUiSource -match 'ui_popcorn_draw') 'Tela de preparacao perdeu a animacao de pipoca do Nplay.'
 Assert-True ($playerUiSource -match 'draw_track_column.+AUDIO' -or ($playerUiSource -match '"AUDIO"' -and $playerUiSource -match '"LEGENDAS"')) 'Painel nao mostra audio e legendas em duas colunas.'
 Assert-True ($playerUiSource -match 'draw_next_card' -and $playerUiSource -match 'PUI_FOCUS_TIMELINE') 'HUD modular perdeu proximo episodio ou timeline.'
 Assert-True ($playerUiSource -match 'ui_popcorn_draw') 'Tela de preparacao perdeu a animacao de pipoca do Nplay.'
@@ -151,7 +161,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/cont
 if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao compilar.' }
 & .\build\test_hls_manifest.exe
 if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao detectar audio/legendas.' }
-& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c tools/test_subtitle_queue.c -o build/test_subtitle_queue.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c tools/test_subtitle_queue.c -lm -o build/test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
 & .\build\test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou nos cenarios de tempo e sobreposicao.' }
@@ -167,6 +177,8 @@ if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
     (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
     & node tools/test_chunked_remux.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Simulacao local do remux chunked falhou.' }
+    & node tools/test_hls_player_fixture.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Fixture HLS multifaixa/seek/legendas falhou.' }
 }
 $nm = 'C:\devkitPro\devkitA64\bin\aarch64-none-elf-nm.exe'
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
