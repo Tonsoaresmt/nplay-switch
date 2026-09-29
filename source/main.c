@@ -2215,7 +2215,7 @@ static void draw_profile_avatar_style(cJSON *profile, int x, int y, int size,
 static void draw_profile_avatar(cJSON *profile, int x, int y, int size) {
     draw_profile_avatar_style(profile, x, y, size,
                               (SDL_Color){230, 234, 248, 220},
-                              size >= 100 ? 4 : 2);
+                              size >= 60 ? 4 : 2);
 }
 static void draw_topbar(void) {
     fill_rect(0, 0, WIN_W, 95, C_BAR);
@@ -2231,9 +2231,14 @@ static void draw_topbar(void) {
         }
         tx += w + 33;
     }
-    text_draw(gRen, "Y Buscar", 1040, 33, C_TEXT, 0);
+    text_draw(gRen, "Y Buscar", 1026, 33, C_TEXT, 0);
     cJSON *active = profile_by_id(g_profile_id);
-    draw_profile_avatar(active, 1188, 24, 46);
+    // O perfil precisa continuar reconhecivel a distancia sem aumentar o
+    // cabecalho. O retrato ocupa quase toda a altura util e ganha um pequeno
+    // indicador de sessao, no mesmo vocabulario visual dos apps de streaming.
+    draw_profile_avatar_style(active, 1184, 12, 70, C_ACC2, 5);
+    SDL_Rect profile_status = { 1237, 65, 16, 16 };
+    ui_avatar(NULL, &profile_status, C_GREEN, C_BAR, 3);
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 static void draw_profile_menu(void) {
@@ -2241,10 +2246,10 @@ static void draw_profile_menu(void) {
     fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 160});
     ui_panel(844, 87, 390, 310, C_ACC2);
     cJSON *active = profile_by_id(g_profile_id);
-    draw_profile_avatar(active, 864, 104, 72);
+    draw_profile_avatar(active, 856, 99, 86);
     text_clip(jstr(active, "name") ? jstr(active, "name") : g_user,
-              954, 111, C_TEXT, 1, 246);
-    text_draw(gRen, "Perfil ativo", 954, 151, C_MUT, 0);
+              960, 108, C_TEXT, 1, 240);
+    text_draw(gRen, "Perfil ativo", 960, 150, C_MUT, 0);
     static const char *items[] = { "Alterar perfil", "Configuracoes", "Sair da conta" };
     for (int i = 0; i < 3; i++) {
         int y = 190 + i * 63;

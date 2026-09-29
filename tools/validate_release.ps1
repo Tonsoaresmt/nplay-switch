@@ -110,6 +110,8 @@ Assert-True ($mainSource -match 'g_avatar_lookup\[512\]' -and $mainSource -match
 Assert-True ($mainSource -match 'dicebear\.com/9\.x/%\.\*s/png\?seed=%s&size=256') 'Avatares DiceBear deixaram de solicitar uma imagem raster compativel com o Switch.'
 Assert-True ($mainSource -match 'AVATAR_PICKER_COLS 5' -and $mainSource -match 'avatar_size = selected \? 184 : 164') 'Seletor de perfis perdeu o destaque visual da foto selecionada.'
 Assert-True ($mainSource -match 'g_screen == SC_PROFILES \? 0u : 1200u' -and $mainSource -match 'g_screen == SC_PROFILES && !g_avatar_catalog') 'Catalogo de fotos pode voltar a iniciar tarde demais no seletor de perfis.'
+Assert-True ($mainSource -match 'draw_profile_avatar_style\(active, 1184, 12, 70' -and $mainSource -match 'profile_status = \{ 1237, 65, 16, 16 \}') 'Avatar do cabecalho voltou a ficar pequeno ou sem destaque de sessao.'
+Assert-True ($mainSource -match 'draw_profile_avatar\(active, 856, 99, 86\)') 'Menu rapido voltou a esconder a foto do perfil ativo.'
 
 $uiSource = Get-Content source/ui.c -Raw
 Assert-True ($uiSource -match 'void ui_avatar' -and $uiSource -match 'SDL_RenderGeometry') 'Avatares circulares deixaram de usar recorte acelerado pela GPU.'

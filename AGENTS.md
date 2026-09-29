@@ -1470,3 +1470,17 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente obrigatorio no hardware: capturar seletor com 1/3/4 perfis, avatar
   `char:`, `img:` e `dice:`, aguardar retentativa sem Wi-Fi, trocar avatar e
   conferir topbar/menu/editor em 1280x720 sem overscan.
+
+## Destaque do perfil no cabecalho em 29/09/2026 (0.12.33)
+
+- Relato no hardware confirmou que a foto voltou, mas os 46 px anteriores ainda
+  pareciam um icone escondido ao lado da busca. O retrato ativo agora usa 70 px,
+  quase toda a altura util do cabecalho de 95 px, sem deslocar as prateleiras.
+- O aro passou a 5 px na cor de destaque e ganhou um indicador circular de sessao
+  no canto inferior. A busca foi deslocada apenas 14 px para manter respiro; a
+  ordem e as dimensoes do restante da navegacao nao mudaram.
+- O menu rapido ampliou a foto de 72 para 86 px e reposicionou nome/subtitulo,
+  mantendo as tres acoes e os hit-tests anteriores.
+- A validacao de release agora impede regressao silenciosa para o avatar pequeno.
+  Pendente no hardware: conferir a topbar em todas as cinco abas, nome longo no
+  menu rapido e overscan nos modos portatil e dock.
