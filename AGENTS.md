@@ -1447,3 +1447,26 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   de master, simulacoes de clock/sync, remux e fixture HLS/WebVTT passaram. Pendente
   obrigatorio no hardware: abrir a mesma obra das capturas, conferir tres legendas,
   alternar audio/legenda repetidamente e buscar inicio/meio/fim sem crash.
+
+## Avatares e seletor de perfis em 29/09/2026 (0.12.32)
+
+- Causa da foto ausente: chaves `char:` dependiam de `/api/account/avatars`, mas
+  essa consulta so iniciava tres segundos depois da Home. No seletor inicial o
+  mapa ainda nao existia. Agora a consulta comeca assim que os perfis chegam,
+  sem bloquear a UI, e tem ate duas retentativas espaçadas se a rede falhar.
+- Avatares `dice:` do site apontam para SVG, formato nao decodificado pelo
+  SDL_image do NRO. O Switch pede a variante PNG 256 px pelo espelho `/api/img`.
+  Imagens locais e personagens continuam usando as URLs do catalogo.
+- `profile_avatar_url` deixou de varrer ate 256 itens a cada avatar/quadro. Um
+  hash fixo de 512 entradas e montado uma vez ao instalar o catalogo; nao aloca
+  memoria por frame e continua integrado ao cache/LRU de capas.
+- `ui_avatar` usa `SDL_RenderGeometry` para crop cover circular com aro, sem criar
+  textura-alvo ou mascara por quadro. Seno/cosseno dos 48 segmentos sao calculados
+  uma unica vez. A inicial de fallback escolhe cor clara/escura por luminancia.
+- O seletor mostra quatro perfis com retratos de 164 px; o selecionado cresce para
+  184 px e recebe aro/foco. O picker passou de 18 miniaturas de 84 px para dez
+  retratos circulares de 130 px por pagina. Topbar, menu e editor tambem ficaram
+  circulares. Coordenadas de toque e D-pad foram atualizadas junto.
+- Pendente obrigatorio no hardware: capturar seletor com 1/3/4 perfis, avatar
+  `char:`, `img:` e `dice:`, aguardar retentativa sem Wi-Fi, trocar avatar e
+  conferir topbar/menu/editor em 1280x720 sem overscan.

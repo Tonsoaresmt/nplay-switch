@@ -44,6 +44,10 @@ extern char g_toast[160];
 void fill_rect(int x, int y, int w, int h, SDL_Color c);
 void border_rect(int x, int y, int w, int h, int th, SDL_Color c);
 void ui_cover(SDL_Texture *texture, const SDL_Rect *dst);
+// Avatar circular com crop cover executado em uma unica geometria na GPU.
+// texture pode ser NULL; nesse caso desenha apenas o fundo circular.
+void ui_avatar(SDL_Texture *texture, const SDL_Rect *dst, SDL_Color background,
+               SDL_Color border, int border_width);
 void ui_contain(SDL_Texture *texture, const SDL_Rect *dst);
 void ui_backdrop(SDL_Texture *texture, const SDL_Rect *dst);
 void text_clip(const char *s, int x, int y, SDL_Color c, int big, int maxw);

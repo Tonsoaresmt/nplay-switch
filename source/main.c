@@ -335,15 +335,20 @@ static Screen g_profiles_return = SC_CONFIG;
 static cJSON *g_avatar_catalog = NULL;
 static cJSON *g_avatar_items[256];
 static int g_avatar_item_n = 0;
+typedef struct { const char *key; const char *url; } AvatarLookup;
+static AvatarLookup g_avatar_lookup[512];
 static cJSON *g_avatar_pending = NULL;
 static SDL_Thread *g_avatar_thread = NULL;
 static SDL_atomic_t g_avatar_done;
 static Uint32 g_avatar_due = 0;
-static int g_avatar_attempted = 0, g_avatar_picker_await = 0;
+static int g_avatar_attempted = 0, g_avatar_failures = 0, g_avatar_picker_await = 0;
 static int g_profile_menu = 0, g_profile_menu_sel = 0;
 static int g_profile_editor = 0, g_profile_edit_sel = 0, g_profile_edit_id = 0;
 static Screen g_profile_editor_return = SC_CONFIG;
 static int g_avatar_picker = 0, g_avatar_sel = 0, g_avatar_page = 0;
+#define AVATAR_PICKER_COLS 5
+#define AVATAR_PICKER_ROWS 2
+#define AVATAR_PICKER_PAGE (AVATAR_PICKER_COLS * AVATAR_PICKER_ROWS)
 static int g_profile_delete_confirm = 0;
 
 // --- downloads (acelerador) ---
@@ -1262,15 +1267,26 @@ static void install_avatar_catalog(cJSON *catalog) {
     if (g_avatar_catalog) cJSON_Delete(g_avatar_catalog);
     g_avatar_catalog = catalog;
     g_avatar_item_n = 0;
+    memset(g_avatar_lookup, 0, sizeof(g_avatar_lookup));
     cJSON *groups = cJSON_GetObjectItemCaseSensitive(catalog, "catalog");
     for (int g = 0; g < arr_len(groups) && g_avatar_item_n < 256; g++) {
         cJSON *items = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(groups, g), "items");
         for (int i = 0; i < arr_len(items) && g_avatar_item_n < 256; i++) {
             cJSON *item = cJSON_GetArrayItem(items, i);
             const char *key = jstr(item, "k"), *url = jstr(item, "url");
-            if ((!key || (strncmp(key, "char:", 5) && strncmp(key, "img:", 4))) || !url) continue;
-            if (strstr(url, ".svg")) continue; // SDL_image do NRO nao decodifica SVG.
+            if ((!key || (strncmp(key, "char:", 5) && strncmp(key, "img:", 4) &&
+                          strncmp(key, "dice:", 5))) || !url) continue;
+            // DiceBear chega como SVG no site; o resolvedor do Switch troca por
+            // PNG antes do download. Outros SVG continuam fora do SDL_image.
+            if (strstr(url, ".svg") && strncmp(key, "dice:", 5)) continue;
             g_avatar_items[g_avatar_item_n++] = item;
+            unsigned hash = 2166136261u;
+            for (const unsigned char *p = (const unsigned char *)key; *p; p++)
+                hash = (hash ^ *p) * 16777619u;
+            for (unsigned probe = 0; probe < 512; probe++) {
+                AvatarLookup *slot = &g_avatar_lookup[(hash + probe) & 511u];
+                if (!slot->key) { slot->key = key; slot->url = url; break; }
+            }
         }
     }
 }
@@ -1291,12 +1307,18 @@ static void pump_avatar_fetch(void) {
     if (g_avatar_pending && cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(g_avatar_pending, "catalog"))) {
         install_avatar_catalog(g_avatar_pending);
         g_avatar_pending = NULL;
+        g_avatar_failures = 0;
         if (g_avatar_picker_await && g_screen == SC_CONFIG) {
             g_avatar_picker = 1; g_avatar_sel = 0; g_avatar_page = 0;
         }
     } else {
         if (g_avatar_pending) { cJSON_Delete(g_avatar_pending); g_avatar_pending = NULL; }
         if (g_avatar_picker_await) toast("Avatares indisponiveis. Tente novamente.");
+        g_avatar_failures++;
+        if (g_avatar_failures < 3) {
+            g_avatar_attempted = 0;
+            g_avatar_due = SDL_GetTicks() + 10000;
+        }
     }
     g_avatar_picker_await = 0;
 }
@@ -1364,8 +1386,6 @@ static void pump_catalog_fetch(void) {
         for (int i = 0; i < arr_len(profiles); i++) {
             if (jint(cJSON_GetArrayItem(profiles, i), "id") == g_profile_id) g_profile_sel = i;
         }
-        g_avatar_due = SDL_GetTicks() + 3000;
-        g_avatar_attempted = 0;
         if (g_profile_required && g_profile_id > 0 && arr_len(profiles) > 0 &&
             jint(cJSON_GetArrayItem(profiles, g_profile_sel), "id") == g_profile_id) {
             // O backend usa o primeiro perfil como fallback para um ID apagado.
@@ -1374,6 +1394,15 @@ static void pump_catalog_fetch(void) {
             store_select_profile(g_profile_id, g_user);
             load_favs(); g_screen = SC_MAIN; enter_tab(0);
         } else g_screen = SC_PROFILES;
+        // A foto e parte principal do seletor. Nessa tela, consulte o catalogo
+        // imediatamente e em paralelo com o desenho. No auto-login, espere a
+        // carga pessoal terminar para nao disputar HTTPS com favoritos/Home.
+        g_avatar_attempted = g_avatar_catalog != NULL;
+        g_avatar_due = SDL_GetTicks() + (g_screen == SC_PROFILES ? 0u : 1200u);
+        if (g_screen == SC_PROFILES && !g_avatar_catalog && !g_avatar_thread) {
+            start_avatar_fetch();
+            g_avatar_attempted = g_avatar_thread != NULL;
+        }
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_AVATARS &&
                cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(result, "catalog"))) {
@@ -2123,42 +2152,70 @@ static cJSON *profile_by_id(int id) {
     }
     return NULL;
 }
-static const char *profile_avatar_url(cJSON *profile) {
-    const char *key = jstr(profile, "avatar");
+static const char *profile_avatar_key_url(const char *key) {
     if (!key || !key[0]) return NULL;
     if (!strncmp(key, "img:", 4) && !strchr(key + 4, '/') && !strchr(key + 4, '\\')) {
         static char local_url[320];
         snprintf(local_url, sizeof(local_url), "/img/avatars/%s", key + 4);
         return local_url;
     }
-    cJSON *groups = g_avatar_catalog ? cJSON_GetObjectItemCaseSensitive(g_avatar_catalog, "catalog") : NULL;
-    for (int g = 0; g < arr_len(groups); g++) {
-        cJSON *items = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(groups, g), "items");
-        for (int i = 0; i < arr_len(items); i++) {
-            cJSON *item = cJSON_GetArrayItem(items, i);
-            const char *candidate = jstr(item, "k");
-            if (candidate && !strcmp(candidate, key)) return jstr(item, "url");
+    if (!strncmp(key, "dice:", 5)) {
+        const char *style = key + 5;
+        const char *separator = strchr(style, ':');
+        if (separator && separator > style && separator[1]) {
+            char raw[420], encoded[900];
+            snprintf(raw, sizeof(raw),
+                     "https://api.dicebear.com/9.x/%.*s/png?seed=%s&size=256",
+                     (int)(separator - style), style, separator + 1);
+            url_encode_utf8(raw, encoded, sizeof(encoded));
+            static char dice_url[960];
+            snprintf(dice_url, sizeof(dice_url), "/api/img?u=%s", encoded);
+            return dice_url;
+        }
+    }
+    if (g_avatar_catalog) {
+        unsigned hash = 2166136261u;
+        for (const unsigned char *p = (const unsigned char *)key; *p; p++)
+            hash = (hash ^ *p) * 16777619u;
+        for (unsigned probe = 0; probe < 512; probe++) {
+            AvatarLookup *slot = &g_avatar_lookup[(hash + probe) & 511u];
+            if (!slot->key) break;
+            if (!strcmp(slot->key, key)) return slot->url;
         }
     }
     return NULL;
 }
-static void draw_profile_avatar(cJSON *profile, int x, int y, int size) {
+static const char *profile_avatar_url(cJSON *profile) {
+    const char *direct = jstr(profile, "avatar_url");
+    if (!direct || !direct[0]) direct = jstr(profile, "avatarUrl");
+    if (direct && direct[0] && !strstr(direct, ".svg")) return direct;
+    return profile_avatar_key_url(jstr(profile, "avatar"));
+}
+static void draw_profile_avatar_style(cJSON *profile, int x, int y, int size,
+                                      SDL_Color border, int border_width) {
     const char *name = jstr(profile, "name");
     SDL_Color bg = C_ACC2;
     const char *hex = jstr(profile, "color");
-    unsigned red, green, blue;
+    unsigned red = bg.r, green = bg.g, blue = bg.b;
     if (hex && strlen(hex) == 7 && hex[0] == '#' &&
         sscanf(hex + 1, "%02x%02x%02x", &red, &green, &blue) == 3) {
         bg = (SDL_Color){(Uint8)red, (Uint8)green, (Uint8)blue, 255};
     }
-    fill_rect(x, y, size, size, bg);
     const char *url = profile_avatar_url(profile);
     SDL_Texture *tex = url ? cover_get(url) : NULL;
-    if (tex) { SDL_Rect dst = { x, y, size, size }; ui_cover(tex, &dst); }
-    else {
+    SDL_Rect dst = { x, y, size, size };
+    ui_avatar(tex, &dst, bg, border, border_width);
+    if (!tex) {
         char initial[2] = { name && name[0] ? name[0] : '?', 0 };
-        text_center_at(initial, x, size, y + size / 2 - 16, C_TEXT, 1);
+        unsigned luminance = red * 299u + green * 587u + blue * 114u;
+        SDL_Color initial_color = luminance > 185000u ? C_BG : C_TEXT;
+        text_center_at(initial, x, size, y + size / 2 - 17, initial_color, 1);
     }
+}
+static void draw_profile_avatar(cJSON *profile, int x, int y, int size) {
+    draw_profile_avatar_style(profile, x, y, size,
+                              (SDL_Color){230, 234, 248, 220},
+                              size >= 100 ? 4 : 2);
 }
 static void draw_topbar(void) {
     fill_rect(0, 0, WIN_W, 95, C_BAR);
@@ -2177,7 +2234,6 @@ static void draw_topbar(void) {
     text_draw(gRen, "Y Buscar", 1040, 33, C_TEXT, 0);
     cJSON *active = profile_by_id(g_profile_id);
     draw_profile_avatar(active, 1188, 24, 46);
-    border_rect(1186, 22, 50, 50, 2, C_ACC2);
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 static void draw_profile_menu(void) {
@@ -2185,10 +2241,10 @@ static void draw_profile_menu(void) {
     fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 160});
     ui_panel(844, 87, 390, 310, C_ACC2);
     cJSON *active = profile_by_id(g_profile_id);
-    draw_profile_avatar(active, 868, 110, 58);
+    draw_profile_avatar(active, 864, 104, 72);
     text_clip(jstr(active, "name") ? jstr(active, "name") : g_user,
-              942, 113, C_TEXT, 1, 260);
-    text_draw(gRen, "Perfil ativo", 942, 147, C_MUT, 0);
+              954, 111, C_TEXT, 1, 246);
+    text_draw(gRen, "Perfil ativo", 954, 151, C_MUT, 0);
     static const char *items[] = { "Alterar perfil", "Configuracoes", "Sair da conta" };
     for (int i = 0; i < 3; i++) {
         int y = 190 + i * 63;
@@ -4000,22 +4056,38 @@ static void draw_avatar_picker(void) {
     fill_rect(0, 95, WIN_W, WIN_H - 95, (SDL_Color){4, 5, 12, 190});
     ui_panel(146, 76, 988, 574, C_ACC2);
     text_draw(gRen, "Escolher avatar", 176, 101, C_TEXT, 1);
-    char page[72]; snprintf(page, sizeof(page), "Pagina %d de %d", g_avatar_page + 1, (g_avatar_item_n + 18) / 18);
+    int total = g_avatar_item_n + 1;
+    int pages = (total + AVATAR_PICKER_PAGE - 1) / AVATAR_PICKER_PAGE;
+    char page[72]; snprintf(page, sizeof(page), "Pagina %d de %d", g_avatar_page + 1, pages);
     text_right(page, 1096, 108, C_MUT, 0);
-    for (int slot = 0; slot < 18; slot++) {
-        int idx = g_avatar_page * 18 + slot;
+    for (int slot = 0; slot < AVATAR_PICKER_PAGE; slot++) {
+        int idx = g_avatar_page * AVATAR_PICKER_PAGE + slot;
         if (idx > g_avatar_item_n) break;
-        int col = slot % 6, row = slot / 6;
-        int x = 177 + col * 155, y = 168 + row * 137;
-        fill_rect(x, y, 133, 124, C_BAR);
-        if (idx == g_avatar_sel) ui_focus(x - 3, y - 3, 139, 130);
-        if (idx == 0) text_center_at("Sem avatar", x + 4, 125, y + 49, C_TEXT, 0);
+        int col = slot % AVATAR_PICKER_COLS, row = slot / AVATAR_PICKER_COLS;
+        int x = 176 + col * 190, y = 157 + row * 218;
+        int selected = idx == g_avatar_sel;
+        if (selected) {
+            fill_rect(x, y, 166, 194, (SDL_Color){34, 38, 59, 245});
+            ui_focus(x - 4, y - 4, 174, 202);
+        }
+        if (idx == 0) {
+            SDL_Rect fallback = { x + 18, y + 10, 130, 130 };
+            ui_avatar(NULL, &fallback, C_CARD,
+                      selected ? C_ACC2 : C_MUT, selected ? 5 : 2);
+            text_center_at("?", x + 18, 130, y + 56, C_TEXT, 1);
+            text_center_at("Usar inicial", x + 4, 158, y + 156, C_MUT, 2);
+        }
         else {
             cJSON *item = g_avatar_items[idx - 1];
-            SDL_Texture *tex = cover_get(jstr(item, "url"));
-            if (tex) { SDL_Rect dst = { x + 24, y + 7, 84, 84 }; ui_cover(tex, &dst); }
-            else text_center_at("...", x + 4, 125, y + 39, C_MUT, 1);
-            text_clip(jstr(item, "label"), x + 6, y + 98, C_MUT, 2, 121);
+            const char *item_url = profile_avatar_key_url(jstr(item, "k"));
+            if (!item_url) item_url = jstr(item, "url");
+            SDL_Texture *tex = item_url ? cover_get(item_url) : NULL;
+            SDL_Rect avatar = { x + 18, y + 10, 130, 130 };
+            ui_avatar(tex, &avatar, C_CARD,
+                      selected ? C_ACC2 : C_MUT, selected ? 5 : 2);
+            if (!tex) text_center_at("...", x + 18, 130, y + 56, C_MUT, 1);
+            text_center_at(jstr(item, "label") ? jstr(item, "label") : "Avatar",
+                           x + 4, 158, y + 156, selected ? C_TEXT : C_MUT, 2);
         }
     }
     text_center_at("A Escolher    L/R Pagina    B Voltar", 176, 928, 613, C_MUT, 0);
@@ -4142,19 +4214,19 @@ static void input_settings(int b) {
     if (g_avatar_picker) {
         int total = g_avatar_item_n + 1;
         if (b == JOY_B || b == JOY_MINUS) { g_avatar_picker = 0; return; }
-        if (b == JOY_L && g_avatar_page > 0) g_avatar_sel = (g_avatar_page - 1) * 18;
-        else if (b == JOY_R && (g_avatar_page + 1) * 18 < total) g_avatar_sel = (g_avatar_page + 1) * 18;
+        if (b == JOY_L && g_avatar_page > 0) g_avatar_sel = (g_avatar_page - 1) * AVATAR_PICKER_PAGE;
+        else if (b == JOY_R && (g_avatar_page + 1) * AVATAR_PICKER_PAGE < total) g_avatar_sel = (g_avatar_page + 1) * AVATAR_PICKER_PAGE;
         else if (b == JOY_DLEFT && g_avatar_sel > 0) g_avatar_sel--;
         else if (b == JOY_DRIGHT && g_avatar_sel + 1 < total) g_avatar_sel++;
-        else if (b == JOY_UP && g_avatar_sel >= 6) g_avatar_sel -= 6;
-        else if (b == JOY_DOWN && g_avatar_sel + 6 < total) g_avatar_sel += 6;
+        else if (b == JOY_UP && g_avatar_sel >= AVATAR_PICKER_COLS) g_avatar_sel -= AVATAR_PICKER_COLS;
+        else if (b == JOY_DOWN && g_avatar_sel + AVATAR_PICKER_COLS < total) g_avatar_sel += AVATAR_PICKER_COLS;
         else if (b == JOY_A) {
             const char *key = g_avatar_sel == 0 ? "" : jstr(g_avatar_items[g_avatar_sel - 1], "k");
             cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "avatar", key ? key : "");
             if (patch_profile(body)) g_avatar_picker = 0;
             cJSON_Delete(body);
         }
-        g_avatar_page = g_avatar_sel / 18;
+        g_avatar_page = g_avatar_sel / AVATAR_PICKER_PAGE;
         return;
     }
     if (g_profile_editor) {
@@ -4235,22 +4307,41 @@ static void draw_profiles(void) {
     if (count <= 0) {
         ui_empty_state("Perfis indisponiveis", "A Tentar novamente   B Sair da conta");
     } else {
-        int width = count * 240 - 20;
+        int shown = count > 4 ? 4 : count;
+        int width = shown * 264 - 28;
         int left = (WIN_W - width) / 2;
-        for (int i = 0; i < count && i < 4; i++) {
+        for (int i = 0; i < shown; i++) {
             cJSON *profile = cJSON_GetArrayItem(profiles, i);
-            int x = left + i * 240;
+            int x = left + i * 264;
             const char *name = jstr(profile, "name");
-            ui_panel(x, 227, 220, 240, i == g_profile_sel ? C_ACC2 : C_ACC);
-            if (i == g_profile_sel) ui_focus(x - 5, 222, 230, 250);
-            draw_profile_avatar(profile, x + 76, 263, 68);
-            text_clip(name && name[0] ? name : "Perfil", x + 20, 365, C_TEXT, 0, 180);
-            if (jint(profile, "id") == g_profile_id) text_center_at("Atual", x + 20, 180, 411, C_GREEN, 0);
+            int selected = i == g_profile_sel;
+            int avatar_size = selected ? 184 : 164;
+            int avatar_x = x + (236 - avatar_size) / 2;
+            int avatar_y = selected ? 184 : 194;
+            if (selected) {
+                fill_rect(x, 166, 236, 320, (SDL_Color){25, 29, 47, 230});
+                ui_focus(x - 5, 161, 246, 330);
+            }
+            draw_profile_avatar_style(profile, avatar_x, avatar_y, avatar_size,
+                                      selected ? C_ACC2 : (SDL_Color){140, 148, 170, 255},
+                                      selected ? 7 : 3);
+            text_center_at(name && name[0] ? name : "Perfil", x + 12, 212,
+                           390, selected ? C_TEXT : C_MUT, selected);
+            if (jint(profile, "id") == g_profile_id) {
+                fill_rect(x + 70, 438, 96, 30, (SDL_Color){20, 68, 61, 255});
+                text_center_at("ATUAL", x + 70, 96, 442, C_GREEN, 2);
+            } else if (selected) {
+                text_center_at("A ENTRAR", x + 48, 140, 444, C_ACC2, 2);
+            }
         }
+        if (!g_avatar_catalog && g_avatar_thread)
+            text_center_at("Carregando fotos dos perfis...", 260, 760, 498, C_MUT, 0);
     }
     if (!g_profile_required && count > 0) {
-        fill_rect(418, 513, 444, 48, C_CARD);
-        text_center_at("X Editar o perfil selecionado", 418, 444, 522, C_TEXT, 0);
+        fill_rect(424, 526, 208, 46, C_CARD);
+        fill_rect(648, 526, 208, 46, C_CARD);
+        text_center_at("X Editar perfil", 424, 208, 535, C_TEXT, 0);
+        text_center_at("Y Adicionar", 648, 208, 535, C_TEXT, 0);
     }
     if (g_status[0]) text_center_at(g_status, 120, WIN_W - 240, 608, C_ACC, 0);
     ui_footer(g_profile_required ? "Esquerda/direita Escolher    A Entrar    B Sair da conta" :
@@ -4557,23 +4648,27 @@ static void handle_touch_tap(int x, int y) {
         cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
         int count = arr_len(profiles);
         if (count > 4) count = 4;
-        int left = (WIN_W - (count * 240 - 20)) / 2;
-        if (y >= 227 && y < 467 && x >= left) {
-            int relative = x - left, index = relative / 240;
-            if (index < count && relative % 240 < 220) {
+        int left = (WIN_W - (count * 264 - 28)) / 2;
+        if (y >= 161 && y < 491 && x >= left) {
+            int relative = x - left, index = relative / 264;
+            if (index < count && relative % 264 < 236) {
                 g_profile_sel = index;
                 input_profiles(JOY_A);
             }
         } else if (count <= 0 && y >= 220 && y < 540) input_profiles(JOY_A);
-        else if (!g_profile_required && y >= 513 && y < 561 && x >= 418 && x < 862) handle_button(JOY_X);
+        else if (!g_profile_required && y >= 526 && y < 572 && x >= 424 && x < 632) handle_button(JOY_X);
+        else if (!g_profile_required && y >= 526 && y < 572 && x >= 648 && x < 856) handle_button(JOY_Y);
         return;
     }
     if (g_screen == SC_CONFIG) {
         if (g_avatar_picker) {
-            if (x >= 177 && x < 1107 && y >= 168 && y < 566) {
-                int col = (x - 177) / 155, row = (y - 168) / 137;
-                int index = g_avatar_page * 18 + row * 6 + col;
-                if (col < 6 && row < 3 && (x - 177) % 155 < 133 && (y - 168) % 137 < 124 && index <= g_avatar_item_n) {
+            if (x >= 176 && x < 1126 && y >= 157 && y < 593) {
+                int col = (x - 176) / 190, row = (y - 157) / 218;
+                int index = g_avatar_page * AVATAR_PICKER_PAGE +
+                            row * AVATAR_PICKER_COLS + col;
+                if (col < AVATAR_PICKER_COLS && row < AVATAR_PICKER_ROWS &&
+                    (x - 176) % 190 < 166 && (y - 157) % 218 < 194 &&
+                    index <= g_avatar_item_n) {
                     g_avatar_sel = index; input_settings(JOY_A);
                 }
             } else input_settings(JOY_B);
@@ -4802,10 +4897,9 @@ int main(int argc, char **argv) {
         pump_landing();
         pump_catalog_fetch();
         if (!g_avatar_attempted && g_avatar_due && SDL_GetTicks() >= g_avatar_due &&
-            g_screen == SC_MAIN && g_land) {
+            (g_screen == SC_PROFILES || (g_screen == SC_MAIN && g_land))) {
             g_avatar_attempted = 1;
-            const char *avatar = jstr(profile_by_id(g_profile_id), "avatar");
-            if (avatar && !strncmp(avatar, "char:", 5)) start_avatar_fetch();
+            start_avatar_fetch();
         }
         update_download_awake();
         // Aplique criacoes/expulsoes do cache antes de enfileirar o desenho.

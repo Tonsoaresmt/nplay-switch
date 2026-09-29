@@ -106,6 +106,14 @@ Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio segu
 Assert-True ($mainSource -match 'g_next_audio_language') 'Episodio seguinte preserva apenas indice e pode mudar para ingles.'
 Assert-True ($mainSource -match 'series_keep_audio_after_switch') 'Temporada agrupada nao tenta preservar sua versao de audio.'
 Assert-True ($mainSource -match 'play_episode_sequence\([^\)]*cJSON \*episode_hint' -and $mainSource -match 'src\.season > 0 \|\| src\.episode > 0') 'HUD de episodio pode voltar a perder temporada e episodio em acessos diretos.'
+Assert-True ($mainSource -match 'g_avatar_lookup\[512\]' -and $mainSource -match 'profile_avatar_key_url') 'Avatares voltaram a varrer todo o catalogo em cada quadro.'
+Assert-True ($mainSource -match 'dicebear\.com/9\.x/%\.\*s/png\?seed=%s&size=256') 'Avatares DiceBear deixaram de solicitar uma imagem raster compativel com o Switch.'
+Assert-True ($mainSource -match 'AVATAR_PICKER_COLS 5' -and $mainSource -match 'avatar_size = selected \? 184 : 164') 'Seletor de perfis perdeu o destaque visual da foto selecionada.'
+Assert-True ($mainSource -match 'g_screen == SC_PROFILES \? 0u : 1200u' -and $mainSource -match 'g_screen == SC_PROFILES && !g_avatar_catalog') 'Catalogo de fotos pode voltar a iniciar tarde demais no seletor de perfis.'
+
+$uiSource = Get-Content source/ui.c -Raw
+Assert-True ($uiSource -match 'void ui_avatar' -and $uiSource -match 'SDL_RenderGeometry') 'Avatares circulares deixaram de usar recorte acelerado pela GPU.'
+Assert-True ($uiSource -match 'static float unit_x' -and $uiSource -match 'unit_ready') 'Geometria circular dos avatares voltou a recalcular trigonometria por quadro.'
 
 $storeSource = Get-Content source/store.c -Raw
 Assert-True ($storeSource -match 'pref_audio_%d\.txt' -and $storeSource -match 'pref_sub_%d\.txt') 'Preferencias manuais de audio/legenda vazam entre perfis.'

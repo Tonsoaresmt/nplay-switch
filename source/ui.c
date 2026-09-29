@@ -4,6 +4,7 @@
 #include <SDL_image.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 const SDL_Color C_BG   = {  8, 10, 15, 255 };
 const SDL_Color C_BAR  = { 12, 15, 23, 255 };
@@ -77,6 +78,70 @@ void ui_cover(SDL_Texture *texture, const SDL_Rect *dst) {
     if (lhs > rhs) { src.w = th * dst->w / dst->h; src.x = (tw - src.w) / 2; }
     else if (lhs < rhs) { src.h = tw * dst->h / dst->w; src.y = (th - src.h) / 2; }
     SDL_RenderCopy(gRen, texture, &src, dst);
+}
+
+static void ui_circle_geometry(SDL_Texture *texture, const SDL_Rect *dst,
+                               SDL_Color color, float u0, float v0,
+                               float u1, float v1) {
+    enum { SEGMENTS = 48 };
+    static float unit_x[SEGMENTS + 1], unit_y[SEGMENTS + 1];
+    static int unit_ready = 0;
+    if (!unit_ready) {
+        for (int i = 0; i <= SEGMENTS; i++) {
+            float angle = (float)i * 6.28318530718f / SEGMENTS;
+            unit_x[i] = cosf(angle);
+            unit_y[i] = sinf(angle);
+        }
+        unit_ready = 1;
+    }
+    SDL_Vertex vertices[SEGMENTS + 2];
+    int indices[SEGMENTS * 3];
+    float cx = dst->x + dst->w * 0.5f;
+    float cy = dst->y + dst->h * 0.5f;
+    float rx = dst->w * 0.5f;
+    float ry = dst->h * 0.5f;
+    float uc = (u0 + u1) * 0.5f, vc = (v0 + v1) * 0.5f;
+    vertices[0] = (SDL_Vertex){ {cx, cy}, color, {uc, vc} };
+    for (int i = 0; i <= SEGMENTS; i++) {
+        float cs = unit_x[i], sn = unit_y[i];
+        vertices[i + 1] = (SDL_Vertex){
+            { cx + cs * rx, cy + sn * ry }, color,
+            { uc + cs * (u1 - u0) * 0.5f,
+              vc + sn * (v1 - v0) * 0.5f }
+        };
+        if (i < SEGMENTS) {
+            indices[i * 3] = 0;
+            indices[i * 3 + 1] = i + 1;
+            indices[i * 3 + 2] = i + 2;
+        }
+    }
+    SDL_RenderGeometry(gRen, texture, vertices, SEGMENTS + 2,
+                       indices, SEGMENTS * 3);
+}
+
+void ui_avatar(SDL_Texture *texture, const SDL_Rect *dst, SDL_Color background,
+               SDL_Color border, int border_width) {
+    if (!gRen || !dst || dst->w <= 0 || dst->h <= 0) return;
+    ui_circle_geometry(NULL, dst, border, 0, 0, 1, 1);
+    SDL_Rect inner = *dst;
+    int inset = border_width < 0 ? 0 : border_width;
+    if (inset * 2 >= inner.w || inset * 2 >= inner.h) inset = 0;
+    inner.x += inset; inner.y += inset;
+    inner.w -= inset * 2; inner.h -= inset * 2;
+    ui_circle_geometry(NULL, &inner, background, 0, 0, 1, 1);
+    int tw = 0, th = 0;
+    if (!texture || SDL_QueryTexture(texture, NULL, NULL, &tw, &th) != 0 ||
+        tw <= 0 || th <= 0) return;
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+    if ((long long)tw * inner.h > (long long)th * inner.w) {
+        float visible = (float)th * inner.w / ((float)tw * inner.h);
+        u0 = (1.0f - visible) * 0.5f; u1 = 1.0f - u0;
+    } else if ((long long)tw * inner.h < (long long)th * inner.w) {
+        float visible = (float)tw * inner.h / ((float)th * inner.w);
+        v0 = (1.0f - visible) * 0.5f; v1 = 1.0f - v0;
+    }
+    ui_circle_geometry(texture, &inner, (SDL_Color){255, 255, 255, 255},
+                       u0, v0, u1, v1);
 }
 
 void ui_contain(SDL_Texture *texture, const SDL_Rect *dst) {
