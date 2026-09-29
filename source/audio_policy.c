@@ -91,6 +91,19 @@ int audio_version_preference(const char *language, const char *label) {
     return -1;
 }
 
+int audio_effective_preference(int account_pref, int version_pref,
+                               int version_explicit) {
+    if (account_pref < 0 || account_pref > 2) account_pref = 0;
+    if (version_pref < 0 || version_pref > 1) version_pref = -1;
+
+    // Trocar Dublado/Legendado conscientemente no detalhe deve ser respeitado.
+    // Na entrada normal, porem, a variante-base do catalogo e apenas contexto:
+    // ela nao pode transformar uma conta Dublado em ingles episodio apos episodio.
+    if (version_explicit && version_pref >= 0) return version_pref;
+    if (account_pref != 2) return account_pref;
+    return version_pref >= 0 ? version_pref : account_pref;
+}
+
 static int title_has(const AudioTrackInfo *track, const char *word) {
     char title[128];
     ascii_lower(track ? track->title : NULL, title, sizeof(title));

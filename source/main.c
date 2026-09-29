@@ -324,6 +324,7 @@ typedef struct {
     Screen origin;
     char path[512];
     char query[128];
+    int series_audio_explicit;
 } FetchIntent;
 static CatalogFetch g_fetch = {0};
 static FetchIntent g_fetch_current = {0}, g_fetch_queued = {0};
@@ -384,6 +385,7 @@ static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index
 static char g_next_audio_language[8] = "", g_last_audio_language[8] = "";
 static int g_next_audio_pref_override = -1;
 static char g_series_keep_lang[32] = "";
+static int g_series_audio_explicit = 0;
 static int g_prefs_sel = 0;
 static int g_settings_section = 0, g_settings_focus = 1;
 static Screen g_settings_return = SC_MAIN;
@@ -1210,10 +1212,13 @@ static void select_series_resume_target(cJSON *detail) {
     g_epScroll = 0;
 }
 
-static void begin_catalog_fetch(FetchKind kind, const char *path, const char *query) {
+static void begin_catalog_fetch_mode(FetchKind kind, const char *path,
+                                     const char *query,
+                                     int series_audio_explicit) {
     FetchIntent intent = {0};
     intent.kind = kind;
     intent.origin = g_screen == SC_LOADING ? g_fetch_current.origin : g_screen;
+    intent.series_audio_explicit = kind == FETCH_SERIES && series_audio_explicit;
     snprintf(intent.path, sizeof(intent.path), "%s", path);
     if (query) snprintf(intent.query, sizeof(intent.query), "%s", query);
     // Mantem o ultimo perfil visivel se a atualizacao da lista falhar/cancelar.
@@ -1234,6 +1239,10 @@ static void begin_catalog_fetch(FetchKind kind, const char *path, const char *qu
         }
     }
     g_screen = SC_LOADING;
+}
+
+static void begin_catalog_fetch(FetchKind kind, const char *path, const char *query) {
+    begin_catalog_fetch_mode(kind, path, query, 0);
 }
 
 static void install_avatar_catalog(cJSON *catalog) {
@@ -1312,6 +1321,7 @@ static void pump_catalog_fetch(void) {
         result = NULL;
         select_series_resume_target(g_ser);
         rebuild_series_plot();
+        g_series_audio_explicit = g_fetch_current.series_audio_explicit;
         g_screen = SC_SERIES;
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_SEARCH && cJSON_IsObject(result)) {
@@ -1389,12 +1399,15 @@ static void pump_catalog_fetch(void) {
     }
 }
 
-static void open_series(int id) {
+static void open_series_mode(int id, int audio_explicit) {
     if (id <= 0) return;
     // Navegacao explicita invalida um autoavanco anterior ainda pendente.
     g_episode_pending.active = 0;
     char path[96]; snprintf(path, sizeof(path), "/api/catalog/series/%d", id);
-    begin_catalog_fetch(FETCH_SERIES, path, NULL);
+    begin_catalog_fetch_mode(FETCH_SERIES, path, NULL, audio_explicit);
+}
+static void open_series(int id) {
+    open_series_mode(id, 0);
 }
 void request_related_movie_details(int id) {
     if (id <= 0) return;
@@ -2411,7 +2424,7 @@ static void series_keep_audio_after_switch(void) {
         char lang[32]; ser_audio_version_key(version, lang, sizeof(lang));
         int id = jint(version, "id");
         if (!strcmp(lang, wanted) && id > 0 && id != current_id) {
-            open_series(id); return;
+            open_series_mode(id, g_series_audio_explicit); return;
         }
     }
     char message[128];
@@ -3363,7 +3376,8 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
                 break;
             }
         }
-        g_next_audio_pref_override = version_pref;
+        g_next_audio_pref_override = audio_effective_preference(
+            g_pref_audio, version_pref, g_series_audio_explicit);
         g_next_audio_hint = audio_hint;
         snprintf(g_next_audio_language, sizeof(g_next_audio_language), "%s", audio_language);
         cJSON *current_episode = NULL, *next_episode = NULL;
@@ -3429,7 +3443,7 @@ static void input_series(int b) {
             if (cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(versions, i), "current"))) current = i;
         if (count > 1) {
             int next = (current + (b == JOY_ZR ? 1 : count - 1)) % count;
-            open_series(jint(cJSON_GetArrayItem(versions, next), "id"));
+            open_series_mode(jint(cJSON_GetArrayItem(versions, next), "id"), 1);
         }
     }
     else if (b == JOY_DLEFT) { if (g_epSel > 0) g_epSel--; }
@@ -3437,11 +3451,11 @@ static void input_series(int b) {
     else if (b == JOY_UP) { if (g_ep_plot_scroll > 0) g_ep_plot_scroll--; }
     else if (b == JOY_DOWN) { if (g_ep_plot_scroll + 4 < g_ep_plot_count) g_ep_plot_scroll++; }
     else if (b == JOY_L) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id")); } }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) { series_keep_audio_begin(); open_series_mode(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id"), g_series_audio_explicit); } }
         else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_R) {
-        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) { series_keep_audio_begin(); open_series(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id")); } }
+        if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) { series_keep_audio_begin(); open_series_mode(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id"), g_series_audio_explicit); } }
         else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
     }
     else if (b == JOY_A) {
@@ -4581,7 +4595,9 @@ static void handle_touch_tap(int x, int y) {
             int first = current > 5 ? current - 5 : 0;
             int target = first + index;
             if (x >= 54 && index >= 0 && target < ser_nseasons()) {
-                if (ser_grouped()) open_series(jint(cJSON_GetArrayItem(ser_group(), target), "id"));
+                if (ser_grouped()) open_series_mode(
+                    jint(cJSON_GetArrayItem(ser_group(), target), "id"),
+                    g_series_audio_explicit);
                 else { g_seasonIdx = target; g_epSel = 0; g_ep_plot_id = -1; }
             }
             return;

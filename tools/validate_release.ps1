@@ -62,6 +62,7 @@ Assert-True ($sources -match 'demux_worker_thread' -and $sources -match 'DEMUX_Q
 Assert-True ($sources -match 'pause_request' -and $sources -match 'demux_worker_wait_paused') 'Seek/troca de faixa perdeu a barreira da thread de demux.'
 Assert-True ($sources -match 'demux_worker_clear' -and $sources -match 'player_seek_with_barrier') 'Seek pode misturar pacotes anteriores com a nova geracao.'
 Assert-True ($sources -match 'if \(!on_render_thread\) return 0') 'Callback do FFmpeg voltou a ler estado nao atomico na thread de demux.'
+Assert-True ($sources -match 'loading_owner = PLAYER_LOADING_PLAYBACK' -and $sources -match 'player_loading_interrupt_can_draw') 'Loader de abertura pode voltar a disputar a tela com buffering/video.'
 Assert-True ($sources -match 'audio-inplace-applied' -and $sources -match 'subtitle-inplace-applied') 'Troca de faixa voltou a reabrir toda a sessao HLS.'
 Assert-True ($sources -match 'inplace-resume-timeout' -and $sources -match 'PLAYER_RESTART_TRACK') 'Operacao interna pode voltar a prender o player sem fallback.'
 Assert-True ($sources -match 'subtitle_hint_priority' -and $sources -match 'last_audio_priority = 2') 'Reabertura nao preserva exatamente as faixas escolhidas.'
@@ -94,6 +95,7 @@ Assert-True ($mainSource -match 'load_player_boot_stage') 'A ultima etapa antes 
 Assert-True ($mainSource -match 'diag_read_player_page') 'Tela de diagnostico nao mostra o trace preservado apos crash.'
 Assert-True ($mainSource -match 'diag_read_network_tail') 'Tela de diagnostico nao mostra latencia das requisicoes.'
 Assert-True ($mainSource -match 'req\.audio_pref = g_next_audio_pref_override >= 0 \? g_next_audio_pref_override : g_pref_audio') 'Player nao recebe a preferencia da versao/conta.'
+Assert-True ($mainSource -match 'audio_effective_preference\(' -and $mainSource -match 'g_series_audio_explicit') 'Variante-base pode voltar a sobrescrever a preferencia de audio da conta.'
 Assert-True ($mainSource -match 'req\.container = is_hls \|\| url_hls \? "m3u8" : NULL') 'Fluxo preparado voltou a ignorar que a URL e HLS.'
 Assert-True ($mainSource -match 'req\.delivery = DELIVERY_R2') 'Fluxo HLS preparado nao recebe o contrato R2 de codecs/legendas.'
 Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio seguinte nao preserva a faixa de audio anterior.'
@@ -159,6 +161,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou ao compilar.' }
 & .\build\test_player_next.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/player_loading.c tools/test_player_loading.c -o build/test_player_loading.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao da propriedade da tela de carregamento falhou ao compilar.' }
+& .\build\test_player_loading.exe
+if ($LASTEXITCODE -ne 0) { throw 'Loader de abertura voltou a disputar a tela com o buffering.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe

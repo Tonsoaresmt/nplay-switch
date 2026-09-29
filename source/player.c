@@ -32,6 +32,7 @@
 #include "player_ui.h"
 #include "subtitle_queue.h"
 #include "player_next.h"
+#include "player_loading.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -116,6 +117,7 @@ typedef struct {
     const char *detail;
     const char *title;
     int force_loading;
+    PlayerLoadingOwner loading_owner;
     const char *headline;
     int operation_active;
     int operation_cancelled;
@@ -190,9 +192,9 @@ static int player_open_interrupted(void *userdata) {
     // avformat_open_input, find_stream_info e o seek de retomada bloqueiam
     // o loop normal. O interrupt callback roda nessas esperas; redesenhe
     // a pipoca aqui para que ela continue animada ate o primeiro quadro.
-    if (watch->renderer &&
-        (!g_player_presented_frame || watch->force_loading) &&
-        now - watch->last_render_tick >= 80u) {
+    if (watch->renderer && player_loading_interrupt_can_draw(
+            watch->loading_owner, on_render_thread, g_player_presented_frame,
+            watch->force_loading, now, watch->last_render_tick, 80u)) {
         SDL_SetRenderDrawColor(watch->renderer, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255);
         SDL_RenderClear(watch->renderer);
         pui_draw_loading(watch->renderer, watch->title,
@@ -227,6 +229,7 @@ static void track_operation_begin(PlayerOpenDeadline *watch,
     watch->operation_deadline_us = av_gettime_relative() +
                                    (int64_t)timeout_ms * 1000;
     watch->force_loading = 1;
+    watch->loading_owner = PLAYER_LOADING_OPERATION;
     watch->headline = headline;
     watch->detail = detail;
     watch->last_render_tick = 0;
@@ -242,6 +245,7 @@ static int track_operation_end(PlayerOpenDeadline *watch) {
     watch->operation_cancelled = 0;
     watch->operation_timed_out = 0;
     watch->force_loading = 0;
+    watch->loading_owner = PLAYER_LOADING_PLAYBACK;
     watch->headline = NULL;
     watch->detail = "Lendo os primeiros quadros...  |  B para cancelar";
     if (result == 1) SDL_FlushEvent(SDL_JOYBUTTONDOWN);
@@ -973,7 +977,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         .render_thread = SDL_ThreadID(),
         .last_render_tick = SDL_GetTicks(),
         .detail = "Conectando...",
-        .title = title
+        .title = title,
+        .loading_owner = PLAYER_LOADING_OPENING
     };
     nplay_curl_avio_set_abort_check(native_hls ? player_open_interrupted : NULL,
                                     native_hls ? &open_watch : NULL);
@@ -1563,6 +1568,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     DemuxWorker demux = {0};
     int demux_started = 0;
     if (running) {
+        // A partir daqui o loop principal desenha buffering/video/HUD. O
+        // interrupt callback continua cancelando I/O, mas nao pode apresentar
+        // o loader antigo por cima de "Aguardando dados" antes do primeiro frame.
+        open_watch.loading_owner = PLAYER_LOADING_PLAYBACK;
         if (demux_worker_start(&demux, fmt, &open_watch) == 0) {
             demux_started = 1;
             diag_player_event("demux", "worker-start", "queue=%d cap=%dKB",

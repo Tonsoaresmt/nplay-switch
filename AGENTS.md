@@ -1335,3 +1335,30 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   AniSkip externo no site. Implementar isso sem contrato nativo seria regressao.
 - Pendente obrigatorio no Switch real: serie com 2+ episodios, abrir/cancelar/
   confirmar o cartao, autoexibicao nos 45 s finais e continuidade PT-BR/legenda.
+
+## Correcao de piscar e audio inicial em 29/09/2026 (0.12.28)
+
+- Teste real da 0.12.27 em X-Men mostrou `Preparando video` e `Aguardando dados`
+  alternando na mesma tela antes do primeiro quadro. A causa era dupla
+  apresentacao: o loop principal desenhava buffering enquanto o callback de
+  interrupcao ainda apresentava o loader de abertura.
+- `player_loading.c/.h` define o dono da tela. O callback desenha somente em
+  `OPENING` ou em uma `OPERATION` sincrona; ao iniciar o worker de demux, muda
+  para `PLAYBACK` e somente o loop principal pode chamar `SDL_RenderPresent`.
+  O callback continua ativo para cancelamento e timeout, sem tocar no renderer.
+- A serie podia abrir em ingles porque a variante-base `Legendado` sobrescrevia
+  `audioPref=dub`. `audio_effective_preference` estabelece: versao escolhida
+  explicitamente por ZL/ZR > conta > variante automatica. `Tanto faz` continua
+  usando a versao atual; escolha manual no player continua acima dessas regras
+  durante a mesma reproducao.
+- `FetchIntent.series_audio_explicit` acompanha a intencao pela consulta
+  assincrona, inclusive quando ha uma requisicao enfileirada. Troca de temporada
+  conserva essa intencao sem fazer uma entrada normal parecer escolha manual.
+- Testes nativos `test_player_loading` e `test_audio_policy` reproduzem os dois
+  defeitos. `tools/validate_release.ps1` passou apos rebuild limpo: contrato do
+  site, relogio, proximo episodio, HLS, WebVTT, TorBox/R2, ordem de episodios,
+  remux (203 quadros) e fixture HLS (5 faixas/2 cues/inicio+seek).
+- Artefato 0.12.28: `Nplay.nro`, 24.160.079 bytes, SHA-256
+  `1b58ad6d8d51fcee844f36d2f0c2796767aed2c0d22080818ed3a98a2ef05040`.
+- Pendente obrigatorio no Switch: Series > X-Men > episodio, confirmar uma unica
+  tela de espera e PT-BR inicial; depois ZL/ZR para Legendado deve abrir original.

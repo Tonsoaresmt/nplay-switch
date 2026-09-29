@@ -23,6 +23,10 @@ const char *audio_language_normalize(const char *language, const char *title);
 AudioLanguageKind audio_language_kind(const char *language, const char *title);
 // Preferencia declarada por uma versao de serie: 0=dub, 1=leg, -1=dual/indefinida.
 int audio_version_preference(const char *language, const char *label);
+// Escolha explicita da versao vence a conta; na entrada normal a conta vence
+// a variante-base do catalogo. Retorna sempre 0=dub, 1=leg ou 2=tanto faz.
+int audio_effective_preference(int account_pref, int version_pref,
+                               int version_explicit);
 
 // account_pref: 0=dublado, 1=legendado/original, 2=tanto faz.
 // continuity_language/index descrevem a faixa escolhida no episodio anterior;

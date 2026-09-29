@@ -8,6 +8,12 @@ static AudioTrackInfo t(const char *lang, const char *title, int def) {
 }
 
 int main(void) {
+    assert(audio_effective_preference(0, 1, 0) == 0);
+    assert(audio_effective_preference(1, 0, 0) == 1);
+    assert(audio_effective_preference(0, 1, 1) == 1);
+    assert(audio_effective_preference(2, 0, 0) == 0);
+    assert(audio_effective_preference(2, -1, 0) == 2);
+
     AudioTrackInfo dual[] = { t("eng", "English", 1), t("und", "Audio 2", 0) };
     assert(audio_policy_choose(dual, 2, 0, "en", NULL, 0, 0, 0) == 1);
 
