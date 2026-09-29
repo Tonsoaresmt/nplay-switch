@@ -51,7 +51,9 @@ typedef struct {
     int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
     int audio_hint;
     const char *audio_hint_language; // pt/en/ja/... ou und; opcional
-    int audio_hint_priority; // somente recuperacao da mesma reproducao
+    int audio_hint_priority; // 1=mesma reproducao/idioma; 2=faixa manual exata
+    int subtitle_hint; // 0=desligada; >0=faixa exata (1-based)
+    int subtitle_hint_priority; // 1 quando subtitle_hint deve vencer a preferencia salva
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;
@@ -69,6 +71,7 @@ typedef struct {
     int recovery_count;
     int audio_index; // faixa ativa ao sair (1-based; 0 = sem audio)
     char audio_language[8]; // idioma normalizado ou "und"
+    int subtitle_index; // 0=desligada; >0=faixa ativa (1-based)
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);

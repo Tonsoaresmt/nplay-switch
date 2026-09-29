@@ -142,12 +142,18 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
     if (count > AUDIO_POLICY_MAX_TRACKS) count = AUDIO_POLICY_MAX_TRACKS;
     int best = safe_best(best_index, count);
 
+    // Uma escolha manual dentro da mesma fonte e mais especifica que idioma:
+    // duas faixas PT-BR podem ser dublagem comum e audiodescricao. Ao reabrir
+    // a pipeline para aplicar a troca, preserve o indice exato escolhido.
+    if (continuity_priority >= 2 && continuity_index > 0 &&
+        continuity_index <= count) return continuity_index - 1;
+
     int continued = continuity_choice(tracks, count, continuity_language,
                                       continuity_index);
     // Somente uma recuperacao da MESMA reproducao pode preservar uma escolha
     // manual acima da conta. A pista herdada de outro episodio nao pode fazer
     // ingles vencer PT-BR quando o perfil esta em Dublado.
-    if (continuity_priority && continued >= 0) return continued;
+    if (continuity_priority == 1 && continued >= 0) return continued;
 
     if (account_pref == 0) { // Dublado
         for (int i = 0; i < count; i++)

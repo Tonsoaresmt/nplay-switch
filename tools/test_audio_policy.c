@@ -41,6 +41,12 @@ int main(void) {
     assert(audio_policy_choose(swapped, 2, 0, NULL, "en", 1, 0, 0) == 0);
     // Na recuperacao da MESMA reproducao, a escolha manual continua valida.
     assert(audio_policy_choose(swapped, 2, 0, NULL, "en", 1, 1, 0) == 1);
+    // Reabertura apos escolha manual preserva o indice, inclusive quando duas
+    // faixas compartilham o mesmo idioma.
+    AudioTrackInfo same_language[] = {
+        t("pt-BR", "Dublado", 1), t("pt-BR", "Audiodescricao", 0)
+    };
+    assert(audio_policy_choose(same_language, 2, 0, NULL, "pt", 2, 2, 0) == 1);
 
     AudioTrackInfo unknown_swapped[] = { t("und", "Audio 1", 0), t("eng", "English", 1) };
     assert(audio_policy_choose(unknown_swapped, 2, 0, NULL, "und", 2, 0, 1) == 0);

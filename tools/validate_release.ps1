@@ -55,14 +55,14 @@ Assert-True ($sources -match 'audio_policy_choose') 'Selecao de audio voltou a f
 Assert-True ($sources -match 'pui_draw\(' -and $sources -match 'pui_draw_loading\(') 'Player nao usa o HUD modular nas telas de reproducao e abertura.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
 Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'
-Assert-True ($sources -match 'attempt\.audio_hint_priority = 1') 'Recuperacao da mesma reproducao perdeu prioridade sobre a preferencia geral.'
-Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
-Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
-Assert-True ($sources -match 'audio-switch-seek' -and $sources -match 'cur_pos, 1, timeline_origin') 'Troca de audio HLS nao realinha a nova rendition no ponto atual.'
+Assert-True ($sources -match 'last_audio_priority \? last_audio_priority : 1') 'Recuperacao da mesma reproducao perdeu prioridade sobre a preferencia geral.'
+Assert-True ($sources -match 'player_select_hls_streams\(fmt, vidx, aidx') 'A reabertura nao descarta faixas HLS fora de uso.'
 Assert-True ($sources -match 'avformat_seek_file' -and $sources -match 'window-fallback') 'Seek perdeu a janela multi-stream ou o fallback compativel.'
-Assert-True ($sources -match 'track_operation_begin' -and $sources -match 'track_operation_end') 'Troca de faixa voltou a poder bloquear sem operacao cancelavel.'
-Assert-True ($sources -match 'operation_deadline_us' -and $sources -match '10000u') 'Troca de faixa nao possui limite de tempo no hardware.'
-Assert-True ($sources -match 'audio-switch-rollback' -and $sources -match 'subtitle-switch-rollback') 'Falha de faixa nao restaura audio/legenda anterior.'
+Assert-True ($sources -match 'demux_worker_thread' -and $sources -match 'DEMUX_QUEUE_BYTES') 'Rede/demux voltou a bloquear a thread dos controles.'
+Assert-True ($sources -match 'PLAYER_RESTART_SEEK' -and $sources -match 'controlled-restart') 'Seek voltou a mutar uma pipeline HLS ativa.'
+Assert-True ($sources -match 'audio-restart-request' -and $sources -match 'subtitle-restart-request') 'Troca de faixa voltou a mutar o demuxer durante leitura.'
+Assert-True ($sources -match 'subtitle_hint_priority' -and $sources -match 'last_audio_priority = 2') 'Reabertura nao preserva exatamente as faixas escolhidas.'
+Assert-True ($sources -match 'nplay_curl_avio_hls_media_counts' -and $sources -match 'master_subtitle_count == 0') 'Legendas anunciadas no master podem voltar a ser descartadas antes do probe.'
 Assert-True ($sources -match 'cid == AV_CODEC_ID_NONE' -and $sources -match 'AV_CODEC_ID_WEBVTT' -and $sources -match 'repaired_subtitles') 'Legendas WebVTT sem probe completo podem voltar a desaparecer do painel.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
 
@@ -147,6 +147,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hls_manifest.c tools/test_hls_manifest.c -o build/test_hls_manifest.exe
+if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao compilar.' }
+& .\build\test_hls_manifest.exe
+if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao detectar audio/legendas.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c tools/test_subtitle_queue.c -o build/test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
 & .\build\test_subtitle_queue.exe

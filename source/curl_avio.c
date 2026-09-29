@@ -9,6 +9,7 @@
 #include "curl_avio.h"
 #include "net.h"
 #include "diag.h"
+#include "hls_manifest.h"
 #include <curl/curl.h>
 #include <SDL.h>
 #include <libavutil/mem.h>
@@ -798,6 +799,16 @@ AVIOContext *nplay_curl_avio_open_hls(const char *url) {
     if (hls_is_metadata_url(url))
         return curl_avio_open_profile(url, -1, HLS_META_INITIAL, 0, 32768, "meta", 1);
     return curl_avio_open_profile(url, -1, 0, HLS_MEDIA_RINGCAP, 65536, "media", 0);
+}
+
+int nplay_curl_avio_hls_media_counts(AVIOContext *ctx, int *audio, int *subtitles) {
+    if (audio) *audio = 0;
+    if (subtitles) *subtitles = 0;
+    if (!ctx || !ctx->opaque) return 0;
+    CurlIO *c = (CurlIO *)ctx->opaque;
+    if (!c->static_data || !c->ring || c->static_len == 0) return 0;
+    return hls_manifest_media_counts((const char *)c->ring, c->static_len,
+                                     audio, subtitles);
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

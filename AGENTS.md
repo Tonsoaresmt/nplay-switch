@@ -365,6 +365,33 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   filme dublado, dois episodios em sequencia, troca manual seguida de queda de rede
   e captura do diagnostico se o mapa nao mostrar uma faixa `pt`.
 
+## Player resiliente em 0.12.25 em 28/09/2026
+
+- Causa estrutural dos controles congelados: `av_read_frame` fazia rede e demux
+  na mesma thread que processava SDL. Playlist/segmento lento impedia pausa,
+  retorno e HUD. A leitura agora roda em worker proprio e entrega pacotes por
+  fila limitada a 32 itens/4 MB; pausar nao causa consumo indefinido de memoria.
+- Seek e troca de audio/legenda nao mutam mais um demuxer HLS ativo. A tentativa
+  atual fecha de modo controlado e a mesma fonte reabre na posicao atual. Isso
+  elimina o falso rollback que restaurava decoders, mas deixava playlists em
+  estado interno invalido depois de seek interrompido.
+- Audio manual recebe prioridade de indice exato durante a reabertura, inclusive
+  quando duas faixas possuem o mesmo idioma. Legenda preserva faixa exata ou o
+  estado desligado, sem ser substituida pela preferencia salva.
+- O manifesto raiz ja baixado e inspecionado sem nova requisicao. Se anuncia
+  `EXT-X-MEDIA:TYPE=SUBTITLES` mas o FFmpeg ainda nao criou as AVStreams, o probe
+  completo e habilitado. Se as faixas ja existem, a abertura rapida e mantida.
+- Latencia da thread de demux nao altera mais `wall_start`: a leitura e paralela
+  e soma-la ao relogio atrasava o video a cada segmento lento. Ao sair, o player
+  sinaliza o callback de interrupcao antes de aguardar o worker.
+- Testes novos cobrem o parser de renditions do master HLS e escolha manual exata
+  entre faixas do mesmo idioma. Build e contratos locais devem passar antes da
+  release; teste de comportamento ainda depende do Switch real.
+- Pendente no hardware: pausa por 30/120 s, retomada, L/R/ZL/ZR, timeline, todas
+  as faixas de audio e legenda ligada/desligada em filme e episodio. Em falha,
+  fotografar o diagnostico e informar titulo/tempo; procurar no trace
+  `demux worker-start`, `controlled-restart` e `hls-master renditions`.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).
