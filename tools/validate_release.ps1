@@ -141,6 +141,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c tools/test_subtitle_queue.c -o build/test_subtitle_queue.exe
+if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
+& .\build\test_subtitle_queue.exe
+if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou nos cenarios de tempo e sobreposicao.' }
 & $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe

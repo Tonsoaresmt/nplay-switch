@@ -303,6 +303,26 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   de audio no meio de R2 e um master com
   varias legendas; a maquina local nao substitui essa confirmacao de hardware.
 
+## Legendas temporizadas e rollback de faixas 0.12.22 em 28/09/2026
+
+- `source/subtitle_queue.c` introduz uma fila limitada de oito cues. Legendas
+  futuras nao aparecem antes da hora, cues sobrepostos podem coexistir e itens
+  vencidos sao removidos sem crescimento continuo de memoria.
+- O tempo passa a respeitar `start_display_time` e `end_display_time`; ausencia de
+  duracao recebe fallback de quatro segundos. Quebras `ASS \\N` sao preservadas.
+- O renderer antigo duplicado foi removido. Legendas passam exclusivamente pelo
+  `PlayerHud`, inclusive com HUD oculto, pausado, buffering, timeline e painel de
+  faixas. O cache de quebra de texto agora invalida pelo conteudo, nao pelo endereco
+  reutilizado do buffer, evitando manter uma fala anterior na tela.
+- Trocas de audio e legenda agora abrem um decoder candidato. O decoder atual so e
+  descartado depois que a sincronizacao HLS confirma sucesso; falha de abertura ou
+  seek restaura os streams anteriores e informa rollback ao usuario.
+- `tools/test_subtitle_queue.c` cobre cue futuro, sobreposicao, expiracao, duracao
+  ausente e reset. A validacao de release executa o teste automaticamente.
+- Pendente no hardware: conferir WebVTT e ASS reais, duas falas simultaneas, seek
+  durante legenda, ativar/desativar faixa e forcar falha de uma rendition HLS para
+  confirmar que audio/legenda anteriores continuam funcionando.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

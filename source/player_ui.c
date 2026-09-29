@@ -190,13 +190,33 @@ static void text_right_a(SDL_Renderer *r, const char *s, int right, int y, SDL_C
 
 // Quebra por palavra usando a medida real da fonte. Resultado pequeno e em cache:
 // o HUD redesenha a cada quadro e nao pode medir a sinopse inteira sempre.
-typedef struct { const char *src; int style, width, max_lines, count; char lines[4][200]; } WrapCache;
+typedef struct {
+    unsigned long signature;
+    int style, width, max_lines, count;
+    char lines[4][200];
+} WrapCache;
+
+static unsigned long wrap_signature(const char *text) {
+    unsigned long hash = 2166136261u;
+    if (!text) return 0;
+    while (*text) {
+        hash ^= (unsigned char)*text++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
 
 static int wrap(WrapCache *cache, const char *text, int style, int width, int max_lines) {
-    if (!text) { cache->count = 0; cache->src = NULL; return 0; }
-    if (cache->src == text && cache->style == style && cache->width == width && cache->max_lines == max_lines)
+    if (!text) { cache->count = 0; cache->signature = 0; return 0; }
+    unsigned long signature = wrap_signature(text);
+    if (cache->signature == signature && cache->style == style &&
+        cache->width == width && cache->max_lines == max_lines)
         return cache->count;
-    cache->src = text; cache->style = style; cache->width = width; cache->max_lines = max_lines; cache->count = 0;
+    cache->signature = signature;
+    cache->style = style;
+    cache->width = width;
+    cache->max_lines = max_lines;
+    cache->count = 0;
     if (max_lines > 4) max_lines = 4;
     const char *p = text;
     while (*p && cache->count < max_lines) {
