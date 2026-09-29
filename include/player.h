@@ -21,9 +21,13 @@ typedef enum {
     EXIT_REASON_NEXT_EPISODE
 } PlayerExitReason;
 
-typedef void (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec, void *userdata);
-typedef int (*PlayerRenewCallback)(const PlaybackSource *current, PlaybackSource *out, void *userdata);
-typedef int (*PlayerHeartbeatCallback)(int session_id, void *userdata);
+typedef int (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec,
+                                      SDL_atomic_t *cancel, void *userdata);
+typedef int (*PlayerRenewCallback)(const PlaybackSource *current, PlaybackSource *out,
+                                   SDL_atomic_t *cancel, void *userdata);
+typedef int (*PlayerHeartbeatCallback)(int session_id, SDL_atomic_t *cancel, void *userdata);
+typedef int (*PlayerStopCallback)(int item_id, int session_id,
+                                  SDL_atomic_t *cancel, void *userdata);
 
 typedef struct {
     // Snapshot completo do contrato da API. Para arquivos locais, fica zerado e
@@ -60,6 +64,7 @@ typedef struct {
     PlayerRenewCallback renew_cb;
     PlayerRenewCallback fallback_cb;
     PlayerHeartbeatCallback heartbeat_cb;
+    PlayerStopCallback stop_cb;
     void *userdata;
 } PlayerRequest;
 

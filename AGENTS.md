@@ -1362,3 +1362,35 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   `1b58ad6d8d51fcee844f36d2f0c2796767aed2c0d22080818ed3a98a2ef05040`.
 - Pendente obrigatorio no Switch: Series > X-Men > episodio, confirmar uma unica
   tela de espera e PT-BR inicial; depois ZL/ZR para Legendado deve abrir original.
+
+## Auditoria ponta a ponta do player em 29/09/2026 (0.12.29)
+
+- A auditoria completa esta em `docs/PLAYER_END_TO_END_AUDIT_0_12_29.md`. Ela
+  acompanha resolucao, HLS/arquivo, demux, decode, clocks, pausa, seek, faixas,
+  recuperacao, proximo episodio, sincronizacao e liberacao de recursos.
+- Falha concreta corrigida: sair podia esperar heartbeat (ate 6 s), fazer outro
+  POST de progresso (ate 6 s) e depois `/stop` sincrono. Progresso final e stop
+  agora rodam no worker; a UI concede 1.200 ms e cancela libcurl depois disso.
+  Posicao ja salva nao e enviada novamente.
+- Falha concreta corrigida: refresh/fail/fallback eram sincronos na thread SDL.
+  `player-recovery` executa rede; a UI anima a cada 16 ms e `B`/`-` cancela DNS,
+  TLS ou transferencia usando `net_request_timeout_cancel` em todas as etapas.
+- `PlayerProgressCallback`, `PlayerHeartbeatCallback`, `PlayerRenewCallback` e o
+  novo `PlayerStopCallback` recebem cancelamento atomico. Ao alterar esses
+  contratos, manter o userdata do chamador e reunir a thread antes de liberar a
+  struct local.
+- `player_sync.c` isola a politica testavel: progresso final somente com quadro e
+  avancos de 2 s; tolerancia maxima de saida de 1.200 ms. O teste host e
+  `tools/test_player_sync.c` e faz parte de `validate_release.ps1`.
+- Validacao limpa completa passou: build ARM64 `-Werror`, contrato do site,
+  relogio, sync, proximo episodio, loader, PT-BR, HLS, WebVTT, hot stream,
+  episodios, remux (203 quadros) e fixture (5 faixas/2 cues/inicio+seek).
+  `Nplay.nro`: 24.160.079 bytes; SHA-256
+  `16e67bfaa630183d6be8a929229011dc95d854b8deeda35ca389bb8fb074fffc`.
+- A fila SDL de audio continua apenas instrumentada. Nao impor descarte/teto sem
+  medir `max_audio_queue`, underruns e timestamp no hardware: descartar amostras
+  adiantadas cria silencio e dessincronizacao mais tarde.
+- Pendente obrigatorio: executar o roteiro de hardware da auditoria, sobretudo
+  cancelamento durante Wi-Fi desligado, retorno depois de pausa/seek, PT-BR,
+  legendas e tempo de saida. Build/simulacao local nao valida NVDEC, driver SDL
+  de audio nem a pilha Wi-Fi do console.

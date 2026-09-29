@@ -44,7 +44,10 @@ Assert-True ($sources -notmatch 'seamless_reopen') 'Recuperacao interna por goto
 Assert-True ($sources -notmatch 'req->renew_cb\(&req->playback') 'Decodificador voltou a renovar sessao fora do supervisor.'
 Assert-True ($sources -match 'SDL_JoystickGetButton\(watch->joy, JOY_B\)') 'Preparacao do player nao pode ser cancelada por B.'
 Assert-True ($sources -match 'pipeline_ready') 'Heartbeat pode voltar a disputar rede durante a abertura.'
+Assert-True ($sources -match 'player_sync_exit_should_cancel' -and $sources -match 'cancel_io') 'Saida do player pode voltar a aguardar o timeout integral da rede.'
+Assert-True ($sources -notmatch 'Save progress once at the end') 'Progresso final voltou a ser salvo de forma sincrona na thread da interface.'
 Assert-True ($sources -match 'retry_limit = startup_failure \? 2 : 3') 'Falha inicial voltou a encerrar antes de tentar a fonte alternativa.'
+Assert-True ($sources -match 'player_recovery_thread' -and $sources -match 'player_recovery_call') 'Renovacao de sessao voltou a bloquear a interface do player.'
 Assert-True ($sources -match 'player_boot_stage\("03 abrindo fonte"\)') 'Crash do player voltou a nao deixar diagnostico persistente.'
 Assert-True ($sources -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnostico de crash depende de uma subpasta opcional.'
 Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e iniciado para cada reproducao.'
@@ -119,6 +122,7 @@ Assert-True ($audioPolicySource -match 'count == 2' -and $audioPolicySource -mat
 Assert-True ($audioPolicySource -match 'continuity_priority' -and $audioPolicySource -match 'outro episodio') 'Pista de outro episodio pode voltar a vencer PT-BR em Dublado.'
 
 $apiSource = Get-Content source/api.c -Raw
+Assert-True ($apiSource -match 'api_refresh_playback_cancel' -and $apiSource -match 'api_fail_playback_cancel') 'Recuperacao de sessao nao pode ser cancelada por B.'
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
 Assert-True ($apiSource -match '/api/stream/session/%d/fail') 'Failover para outra fonte nao esta implementado.'
 Assert-True ($apiSource -match '/api/stream/session/%d/heartbeat') 'Heartbeat da sessao nao esta implementado.'
@@ -157,6 +161,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou ao compilar.' }
 & .\build\test_player_clock.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/player_sync.c tools/test_player_sync.c -o build/test_player_sync.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de encerramento/sincronizacao falhou ao compilar.' }
+& .\build\test_player_sync.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao de encerramento/sincronizacao falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/player_next.c tools/test_player_next.c -lm -o build/test_player_next.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou ao compilar.' }
 & .\build\test_player_next.exe

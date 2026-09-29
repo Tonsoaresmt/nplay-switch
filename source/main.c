@@ -766,14 +766,16 @@ static void playback_memory_leave(void) {
 }
 
 typedef struct { int item_id, saved, completed; } PlaybackSyncStatus;
-static void on_player_progress(int item_id, int pos, int dur, void *u) {
-    int saved = api_playback_progress(item_id, pos, dur) == 0;
+static int on_player_progress(int item_id, int pos, int dur,
+                              SDL_atomic_t *cancel, void *u) {
+    int saved = api_playback_progress_cancel(item_id, pos, dur, cancel) == 0;
     PlaybackSyncStatus *status = (PlaybackSyncStatus *)u;
     if (status) {
         status->item_id = item_id;
         status->saved = saved;
         status->completed = saved && dur > 0 && (double)pos / dur >= 0.92;
     }
+    return saved ? 0 : -1;
 }
 
 // HLS pode chegar ao EOF sem duracao conhecida. Nesse caso, /progress deixa
@@ -792,23 +794,33 @@ static int finalize_natural_playback(int item_id, const PlayerResult *result,
     return saved;
 }
 
-static int on_player_heartbeat(int session_id, void *u) {
+static int on_player_heartbeat(int session_id, SDL_atomic_t *cancel, void *u) {
     (void)u;
-    return api_playback_heartbeat(session_id);
+    return api_playback_heartbeat_cancel(session_id, cancel);
 }
 
-static int on_player_renew(const PlaybackSource *current, PlaybackSource *out, void *u) {
+static int on_player_stop(int item_id, int session_id,
+                          SDL_atomic_t *cancel, void *u) {
+    (void)session_id;
+    (void)u;
+    return api_stop_playback_cancel(item_id, cancel);
+}
+
+static int on_player_renew(const PlaybackSource *current, PlaybackSource *out,
+                           SDL_atomic_t *cancel, void *u) {
     (void)u;
     if (!current) return -1;
     if (current->delivery == DELIVERY_R2 && current->session_id > 0)
-        return api_refresh_playback(current, out);
-    return api_reresolve_playback(current->item_id,
-                                  current->quality[0] ? current->quality : NULL, out);
+        return api_refresh_playback_cancel(current, cancel, out);
+    return api_reresolve_playback_cancel(current->item_id,
+                                         current->quality[0] ? current->quality : NULL,
+                                         cancel, out);
 }
 
-static int on_player_fallback(const PlaybackSource *current, PlaybackSource *out, void *u) {
+static int on_player_fallback(const PlaybackSource *current, PlaybackSource *out,
+                              SDL_atomic_t *cancel, void *u) {
     (void)u;
-    return api_fail_playback(current, out);
+    return api_fail_playback_cancel(current, cancel, out);
 }
 
 static void format_short_time(int seconds, char *out, size_t cap) {
@@ -1127,6 +1139,7 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
             ? NULL : on_player_renew;
         req.fallback_cb = req.renew_cb ? on_player_fallback : NULL;
         req.heartbeat_cb = src.session_id > 0 ? on_player_heartbeat : NULL;
+        req.stop_cb = src.session_id > 0 ? on_player_stop : NULL;
         PlaybackSyncStatus sync = {0};
         req.userdata = &sync;
 
@@ -1157,9 +1170,6 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
     } else {
         toast("Este titulo esta indisponivel no momento");
     }
-    
-    // Stop the session if we had one
-    if (src.session_id > 0) api_stop_playback(itemId);
     
     return rc;
 }

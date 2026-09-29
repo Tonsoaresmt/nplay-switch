@@ -60,12 +60,22 @@ int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out);
 int api_resolve_playback_cancel(int item_id, const char *quality,
                                 SDL_atomic_t *cancel, PlaybackSource *out);
 int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out);
+int api_reresolve_playback_cancel(int item_id, const char *quality,
+                                  SDL_atomic_t *cancel, PlaybackSource *out);
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out);
+int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                                PlaybackSource *out);
 int api_fail_playback(const PlaybackSource *current, PlaybackSource *out);
+int api_fail_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                             PlaybackSource *out);
 int api_playback_heartbeat(int session_id);
+int api_playback_heartbeat_cancel(int session_id, SDL_atomic_t *cancel);
 int api_playback_progress(int item_id, int position_sec, int duration_sec);
+int api_playback_progress_cancel(int item_id, int position_sec, int duration_sec,
+                                 SDL_atomic_t *cancel);
 int api_mark_watched(int item_id);
 int api_stop_playback(int item_id);
+int api_stop_playback_cancel(int item_id, SDL_atomic_t *cancel);
 const char *api_last_error(void);
 
 

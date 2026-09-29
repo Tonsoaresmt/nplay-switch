@@ -33,6 +33,7 @@
 #include "subtitle_queue.h"
 #include "player_next.h"
 #include "player_loading.h"
+#include "player_sync.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -99,7 +100,8 @@ static void player_error_text(const char *stage, int code) {
 }
 
 static void player_error_message(const char *message) {
-    snprintf(g_player_last_error, sizeof(g_player_last_error), "%s", message);
+    snprintf(g_player_last_error, sizeof(g_player_last_error), "%.*s",
+             (int)sizeof(g_player_last_error) - 1, message ? message : "");
 }
 
 typedef struct {
@@ -652,10 +654,90 @@ typedef struct {
     SDL_atomic_t duration;
     SDL_atomic_t force_progress;
     SDL_atomic_t pipeline_ready;
+    SDL_atomic_t final_progress;
+    SDL_atomic_t cancel_io;
+    SDL_atomic_t finished;
     PlayerProgressCallback progress_cb;
     PlayerHeartbeatCallback heartbeat_cb;
+    PlayerStopCallback stop_cb;
     void *callback_userdata;
 } PlaybackHeartbeat;
+
+typedef struct {
+    PlayerRenewCallback callback;
+    PlaybackSource current;
+    PlaybackSource renewed;
+    void *callback_userdata;
+    SDL_atomic_t cancel;
+    SDL_atomic_t done;
+    int rc;
+    char error[192];
+} PlayerRecoveryJob;
+
+static int player_recovery_thread(void *userdata) {
+    PlayerRecoveryJob *job = (PlayerRecoveryJob *)userdata;
+    job->rc = job->callback(&job->current, &job->renewed, &job->cancel,
+                            job->callback_userdata);
+    if (job->rc != 0) {
+        const char *error = api_last_error();
+        if (error && error[0])
+            snprintf(job->error, sizeof(job->error), "%s", error);
+    }
+    SDL_AtomicSet(&job->done, 1);
+    return 0;
+}
+
+// Executa rede fora da thread que desenha. Retorna 0=concluiu, 1=cancelou,
+// -1=falhou. A thread e sempre reunida antes de a struct local sair de escopo.
+static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
+                                const char *title, const char *headline,
+                                const char *detail, PlayerRenewCallback callback,
+                                const PlaybackSource *current, PlaybackSource *renewed,
+                                void *callback_userdata) {
+    if (!callback || !current || !renewed) return -1;
+    PlayerRecoveryJob job = {0};
+    job.callback = callback;
+    job.current = *current;
+    job.callback_userdata = callback_userdata;
+    SDL_AtomicSet(&job.cancel, 0);
+    SDL_AtomicSet(&job.done, 0);
+    SDL_Thread *thread = SDL_CreateThread(player_recovery_thread,
+                                          "player-recovery", &job);
+    if (!thread) return -1;
+
+    int cancelled = 0;
+    while (!SDL_AtomicGet(&job.done)) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT ||
+                (event.type == SDL_JOYBUTTONDOWN &&
+                 (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS))) {
+                cancelled = 1;
+                SDL_AtomicSet(&job.cancel, 1);
+                break;
+            }
+        }
+        if (!cancelled && joy && (SDL_JoystickGetButton(joy, JOY_B) ||
+                                  SDL_JoystickGetButton(joy, JOY_MINUS))) {
+            cancelled = 1;
+            SDL_AtomicSet(&job.cancel, 1);
+        }
+        pui_draw_loading(ren, title, headline, detail, SDL_GetTicks(), 1);
+        SDL_RenderPresent(ren);
+        SDL_Delay(16);
+    }
+    SDL_WaitThread(thread, NULL);
+    if (cancelled) {
+        SDL_FlushEvent(SDL_JOYBUTTONDOWN);
+        return 1;
+    }
+    if (job.rc != 0 || !job.renewed.play_url[0]) {
+        if (job.error[0]) player_error_message(job.error);
+        return -1;
+    }
+    *renewed = job.renewed;
+    return 0;
+}
 
 typedef struct {
     AVPacket *packet;
@@ -2712,32 +2794,49 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 static int playback_heartbeat_thread(void *userdata) {
     PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
     int elapsed_ms = 0, progress_ms = 0;
+    int last_saved_pos = -1;
     while (SDL_AtomicGet(&hb->running)) {
-        SDL_Delay(500);
+        SDL_Delay(100);
         if (!SDL_AtomicGet(&hb->running)) break;
         if (!SDL_AtomicGet(&hb->pipeline_ready)) {
             elapsed_ms = 0;
             progress_ms = 0;
             continue;
         }
-        elapsed_ms += 500;
-        progress_ms += 500;
+        elapsed_ms += 100;
+        progress_ms += 100;
 
         if (elapsed_ms >= 20000) {
             int session_id = SDL_AtomicGet(&hb->session_id);
             if (session_id > 0 && hb->heartbeat_cb)
-                hb->heartbeat_cb(session_id, hb->callback_userdata);
+                hb->heartbeat_cb(session_id, &hb->cancel_io, hb->callback_userdata);
             elapsed_ms = 0;
         }
 
         if (progress_ms >= 15000 || SDL_AtomicCAS(&hb->force_progress, 1, 0)) {
             int pos = SDL_AtomicGet(&hb->current_pos);
             int dur = SDL_AtomicGet(&hb->duration);
-            if (hb->progress_cb && pos > 5)
-                hb->progress_cb(hb->item_id, pos, dur, hb->callback_userdata);
+            if (hb->progress_cb && pos > 5 &&
+                hb->progress_cb(hb->item_id, pos, dur, &hb->cancel_io,
+                                hb->callback_userdata) == 0)
+                last_saved_pos = pos;
             progress_ms = 0;
         }
     }
+    int final_pos = SDL_AtomicGet(&hb->current_pos);
+    int final_dur = SDL_AtomicGet(&hb->duration);
+    if (SDL_AtomicGet(&hb->final_progress) && hb->progress_cb &&
+        player_sync_final_progress_needed(1, final_pos, last_saved_pos)) {
+        if (hb->progress_cb(hb->item_id, final_pos, final_dur, &hb->cancel_io,
+                            hb->callback_userdata) == 0)
+            last_saved_pos = final_pos;
+    }
+    int session_id = SDL_AtomicGet(&hb->session_id);
+    if (session_id > 0 && hb->stop_cb)
+        hb->stop_cb(hb->item_id, session_id, &hb->cancel_io,
+                    hb->callback_userdata);
+    (void)last_saved_pos;
+    SDL_AtomicSet(&hb->finished, 1);
     return 0;
 }
 
@@ -2752,8 +2851,12 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     SDL_AtomicSet(&hb.duration, 0);
     SDL_AtomicSet(&hb.force_progress, 0);
     SDL_AtomicSet(&hb.pipeline_ready, 0);
+    SDL_AtomicSet(&hb.final_progress, 0);
+    SDL_AtomicSet(&hb.cancel_io, 0);
+    SDL_AtomicSet(&hb.finished, 0);
     hb.progress_cb = request->progress_cb;
     hb.heartbeat_cb = request->heartbeat_cb;
+    hb.stop_cb = request->stop_cb;
     hb.callback_userdata = request->userdata;
     
     SDL_Thread *heartbeat = NULL;
@@ -2935,10 +3038,18 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                                  detail, SDL_GetTicks(), 1);
                 SDL_RenderPresent(ren);
 
-                if (recovery_cb(&active, &renewed, request->userdata) == 0 && renewed.play_url[0]) {
+                int recovery_rc = player_recovery_call(
+                    ren, joy, request->title,
+                    use_fallback ? "Tentando outra fonte" : "Recuperando sessao",
+                    detail, recovery_cb, &active, &renewed, request->userdata);
+                if (recovery_rc == 0) {
                     diag_player_event("recover", "resolve-ok", "try=%d session=%d source=%d",
                                       renew_try + 1, renewed.session_id, renewed.source_id);
                     renewed_ok = 1;
+                    break;
+                }
+                if (recovery_rc == 1) {
+                    recovery_cancelled = 1;
                     break;
                 }
                 if (use_fallback) break;
@@ -2993,14 +3104,34 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     result->subtitle_index = last_subtitle;
     result->presented_frame = ever_presented_frame;
 
+    SDL_AtomicSet(&hb.current_pos, (int)current_pos);
+    SDL_AtomicSet(&hb.duration, (int)dur);
+    SDL_AtomicSet(&hb.final_progress, ever_presented_frame ? 1 : 0);
+
+    // Uma falha rara ao criar a thread no inicio nao deve vazar a sessao nem
+    // perder todo o progresso. Tente uma thread curta apenas para o fechamento.
+    if (!heartbeat && (hb.progress_cb || hb.stop_cb)) {
+        SDL_AtomicSet(&hb.running, 0);
+        heartbeat = SDL_CreateThread(playback_heartbeat_thread,
+                                     "play-sync-exit", &hb);
+    }
     if (heartbeat) {
         SDL_AtomicSet(&hb.running, 0);
+        Uint32 sync_started = SDL_GetTicks();
+        while (!SDL_AtomicGet(&hb.finished) &&
+               !player_sync_exit_should_cancel(SDL_GetTicks() - sync_started, 0))
+            SDL_Delay(10);
+        if (!SDL_AtomicGet(&hb.finished)) {
+            diag_player_event("sync", "exit-cancel",
+                              "waited=%u pos=%d", SDL_GetTicks() - sync_started,
+                              SDL_AtomicGet(&hb.current_pos));
+            SDL_AtomicSet(&hb.cancel_io, 1);
+        }
         SDL_WaitThread(heartbeat, NULL);
-    }
-    
-    // Save progress once at the end
-    if (request->progress_cb && ever_presented_frame) {
-        request->progress_cb(request->item_id, (int)current_pos, (int)dur, request->userdata);
+        diag_player_event("sync", "exit-finished", "ms=%u",
+                          SDL_GetTicks() - sync_started);
+    } else {
+        diag_player_event("sync", "thread-unavailable", NULL);
     }
 
     if (final_rc < 0)

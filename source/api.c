@@ -65,15 +65,18 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     out->is_cam = jint(j, "is_cam");
 }
 
-cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeout) {
+static cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
+                                     long total_timeout, SDL_atomic_t *cancel) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
     g_api_last_error[0] = '\0';
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, connect_timeout, total_timeout);
+    long code = net_request_timeout_cancel(url, "GET", NULL,
+                                           g_token[0] ? g_token : NULL,
+                                           &out, &err, connect_timeout,
+                                           total_timeout, cancel);
     diag_network_event("GET", path, code, SDL_GetTicks() - started, out.len);
     cJSON *j = NULL;
     if (code == 200 && out.data) j = cJSON_Parse(out.data);
@@ -83,6 +86,10 @@ cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeou
     }
     membuf_free(&out);
     return j;
+}
+
+cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeout) {
+    return api_get_timeout_cancel(path, connect_timeout, total_timeout, NULL);
 }
 
 static int hot_sequential_file(const char *name) {
@@ -250,7 +257,13 @@ int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out
     return resolve_playback_with_timeout(item_id, quality, 4L, 8L, NULL, out);
 }
 
-int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
+int api_reresolve_playback_cancel(int item_id, const char *quality,
+                                  SDL_atomic_t *cancel, PlaybackSource *out) {
+    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, cancel, out);
+}
+
+int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                                PlaybackSource *out) {
     if (!current || !out || current->session_id <= 0) return -1;
     *out = *current;
     out->play_url[0] = '\0';
@@ -261,8 +274,9 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     struct membuf resp = {0};
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
-                                    &resp, &err, 4L, 8L);
+    long code = net_request_timeout_cancel(url, "POST", body,
+                                           g_token[0] ? g_token : NULL,
+                                           &resp, &err, 4L, 8L, cancel);
     diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
     cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
     if (code != 200 || !json) {
@@ -277,11 +291,15 @@ int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     return out->play_url[0] ? 0 : -1;
 }
 
-static int has_playable_fallback(const PlaybackSource *current) {
+int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
+    return api_refresh_playback_cancel(current, NULL, out);
+}
+
+static int has_playable_fallback(const PlaybackSource *current, SDL_atomic_t *cancel) {
     char path[128];
     snprintf(path, sizeof(path), "/api/stream/%d/variants?sid=%d",
              current->item_id, current->session_id);
-    cJSON *response = api_get_timeout(path, 3L, 6L);
+    cJSON *response = api_get_timeout_cancel(path, 3L, 6L, cancel);
     if (!response) return 0;
     cJSON *variants = cJSON_GetObjectItemCaseSensitive(response, "variants");
     if (!cJSON_IsArray(variants)) {
@@ -304,9 +322,10 @@ static int has_playable_fallback(const PlaybackSource *current) {
     return compatible;
 }
 
-int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
+int api_fail_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                             PlaybackSource *out) {
     if (!current || !out || current->session_id <= 0) return -1;
-    if (!has_playable_fallback(current)) {
+    if (!has_playable_fallback(current, cancel)) {
         snprintf(g_api_last_error, sizeof(g_api_last_error),
                  "Nenhuma fonte alternativa compativel com o Switch");
         return -1;
@@ -318,8 +337,9 @@ int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
     struct membuf resp = {0};
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
-                                    &resp, &err, 4L, 8L);
+    long code = net_request_timeout_cancel(url, "POST", body,
+                                           g_token[0] ? g_token : NULL,
+                                           &resp, &err, 4L, 8L, cancel);
     diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
     cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
     if (code != 200 || !json) {
@@ -336,9 +356,9 @@ int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
     membuf_free(&resp);
     if (next_source_id <= 0 || !has_pointer) return -1;
     PlaybackSource complete = {0};
-    if (api_reresolve_playback(current->item_id,
-                              current->quality[0] ? current->quality : NULL,
-                              &complete) != 0 || !complete.play_url[0] ||
+    if (api_reresolve_playback_cancel(current->item_id,
+                                     current->quality[0] ? current->quality : NULL,
+                                     cancel, &complete) != 0 || !complete.play_url[0] ||
         complete.source_id != next_source_id || !complete.container[0] ||
         !strcmp(complete.container, "embed") ||
         !strcmp(complete.container, "torrent")) {
@@ -350,21 +370,31 @@ int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
     return 0;
 }
 
-int api_playback_heartbeat(int session_id) {
+int api_fail_playback(const PlaybackSource *current, PlaybackSource *out) {
+    return api_fail_playback_cancel(current, NULL, out);
+}
+
+int api_playback_heartbeat_cancel(int session_id, SDL_atomic_t *cancel) {
     if (session_id <= 0) return 0;
     char path[112], url[1024];
     snprintf(path, sizeof(path), "/api/stream/session/%d/heartbeat", session_id);
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = {0}; const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 6L);
+    long code = net_request_timeout_cancel(url, "POST", "{}",
+                                           g_token[0] ? g_token : NULL,
+                                           &out, &err, 3L, 6L, cancel);
     diag_network_event("POST", path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
 }
 
-int api_playback_progress(int item_id, int position_sec, int duration_sec) {
+int api_playback_heartbeat(int session_id) {
+    return api_playback_heartbeat_cancel(session_id, NULL);
+}
+
+int api_playback_progress_cancel(int item_id, int position_sec, int duration_sec,
+                                 SDL_atomic_t *cancel) {
     // O backend aceita duracao zero e guarda o ponto sem marcar conclusao.
     // HLS pode nao conhecer a duracao quando o usuario sai do player.
     if (item_id <= 0 || position_sec <= 5) return 0;
@@ -375,11 +405,16 @@ int api_playback_progress(int item_id, int position_sec, int duration_sec) {
     snprintf(url, sizeof(url), "%s/api/sync/progress", BASE);
     struct membuf out = {0}; const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", body, g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 6L);
+    long code = net_request_timeout_cancel(url, "POST", body,
+                                           g_token[0] ? g_token : NULL,
+                                           &out, &err, 3L, 6L, cancel);
     diag_network_event("POST", "/api/sync/progress", code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
+}
+
+int api_playback_progress(int item_id, int position_sec, int duration_sec) {
+    return api_playback_progress_cancel(item_id, position_sec, duration_sec, NULL);
 }
 
 int api_mark_watched(int item_id) {
@@ -397,15 +432,20 @@ int api_mark_watched(int item_id) {
     return code == 200 ? 0 : -1;
 }
 
-int api_stop_playback(int item_id) {
+int api_stop_playback_cancel(int item_id, SDL_atomic_t *cancel) {
     if (item_id <= 0) return 0;
     char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d/stop", BASE, item_id);
     struct membuf out = {0}; const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, "POST", "{}", g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 6L);
+    long code = net_request_timeout_cancel(url, "POST", "{}",
+                                           g_token[0] ? g_token : NULL,
+                                           &out, &err, 3L, 6L, cancel);
     char path[96]; snprintf(path, sizeof(path), "/api/stream/%d/stop", item_id);
     diag_network_event("POST", path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code == 200 ? 0 : -1;
+}
+
+int api_stop_playback(int item_id) {
+    return api_stop_playback_cancel(item_id, NULL);
 }
