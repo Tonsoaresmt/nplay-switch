@@ -26,8 +26,10 @@ int audio_version_preference(const char *language, const char *label);
 
 // account_pref: 0=dublado, 1=legendado/original, 2=tanto faz.
 // continuity_language/index descrevem a faixa escolhida no episodio anterior;
-// continuity_index e 1-based. best_index e 0-based (FFmpeg).
+// continuity_index e 1-based. continuity_priority so deve ser 1 ao reabrir a
+// mesma reproducao depois de uma falha; em outro episodio a conta vence.
+// best_index e 0-based (FFmpeg).
 int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pref,
                         const char *saved_language,
                         const char *continuity_language, int continuity_index,
-                        int best_index);
+                        int continuity_priority, int best_index);

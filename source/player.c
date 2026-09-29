@@ -901,6 +901,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     char pref_sub[32] = ""; store_load_pref_sub(pref_sub, sizeof(pref_sub));
     int scur = -1, sub_chosen = 0, pt_audio = -1, known_audio = 0;
     AudioTrackInfo audio_tracks[AUDIO_POLICY_MAX_TRACKS] = {0};
+    char audio_map[192] = "";
     for (int i = 0; i < naud; i++) {
         AVStream *stream = fmt->streams[aidxs[i]];
         AVDictionaryEntry *language = av_dict_get(stream->metadata, "language", NULL, 0);
@@ -911,9 +912,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         const char *norm = audio_language_normalize(audio_tracks[i].language, audio_tracks[i].title);
         if (norm[0]) known_audio++;
         if (pt_audio < 0 && !strcmp(norm, "pt")) pt_audio = i;
+        char part[24];
+        snprintf(part, sizeof(part), "%s%d:%s%s",
+                 audio_map[0] ? "," : "", i + 1, norm[0] ? norm : "und",
+                 audio_tracks[i].is_default ? "*" : "");
+        strncat(audio_map, part, sizeof(audio_map) - strlen(audio_map) - 1);
     }
     acur = audio_policy_choose(audio_tracks, naud, req->audio_pref, pref_aud,
-                               req->audio_hint_language, req->audio_hint, best_audio);
+                               req->audio_hint_language, req->audio_hint,
+                               req->audio_hint_priority, best_audio);
     if (acur < 0) acur = 0;
     int inferred_dub = -1;
     if (naud == 2 && pt_audio < 0) {
@@ -925,7 +932,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             else if (kind == AUDIO_KIND_UNKNOWN) unknown = i;
         }
         if (english >= 0 && unknown >= 0 &&
-            audio_policy_choose(audio_tracks, naud, 0, NULL, NULL, 0, best_audio) == unknown)
+            audio_policy_choose(audio_tracks, naud, 0, NULL, NULL, 0, 0,
+                                best_audio) == unknown)
             inferred_dub = unknown;
     }
     if (pref_sub[0]) {
@@ -951,8 +959,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
              naud ? (stream_norm(fmt, aidx)[0] ? stream_norm(fmt, aidx) : "und") : "");
     double audio_skip_until = -1;
     Uint32 audio_skip_deadline = 0;
-    diag_player_event("streams", "selected", "video=%d audio=%d lang=%s pref=%d naud=%d nsub=%d",
-                      vidx, aidx, g_player_audio_language, req->audio_pref, naud, nsub);
+    diag_player_event("streams", "selected",
+                      "video=%d audio=%d lang=%s pref=%d hint=%s/%d priority=%d tracks=%s sub=%d",
+                      vidx, aidx, g_player_audio_language, req->audio_pref,
+                      req->audio_hint_language ? req->audio_hint_language : "-",
+                      req->audio_hint, req->audio_hint_priority,
+                      audio_map[0] ? audio_map : "-", nsub);
     AVCodecContext *sctx = NULL;
     SubtitleQueue subtitles;
     subtitle_queue_reset(&subtitles);
@@ -2253,6 +2265,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.url = active.play_url;
         if (last_audio > 0) attempt.audio_hint = last_audio;
         if (last_audio_language[0]) attempt.audio_hint_language = last_audio_language;
+        if (last_audio > 0 || last_audio_language[0]) attempt.audio_hint_priority = 1;
         g_player_audio_index = 0;
         g_player_audio_language[0] = '\0';
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",

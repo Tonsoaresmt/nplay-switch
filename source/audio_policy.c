@@ -107,34 +107,47 @@ static int safe_best(int best, int count) {
     return best >= 0 && best < count ? best : 0;
 }
 
+static int continuity_choice(const AudioTrackInfo *tracks, int count,
+                             const char *continuity_language,
+                             int continuity_index) {
+    const char *continued = audio_language_normalize(continuity_language, NULL);
+    if (continued[0]) {
+        for (int i = 0; i < count; i++)
+            if (!strcmp(audio_language_normalize(tracks[i].language, tracks[i].title),
+                        continued)) return i;
+    } else if (continuity_language && (!strcmp(continuity_language, "und") ||
+                                       !strcmp(continuity_language, "unknown"))) {
+        for (int i = 0; i < count; i++)
+            if (audio_language_kind(tracks[i].language, tracks[i].title) ==
+                AUDIO_KIND_UNKNOWN) return i;
+    }
+    if (continuity_index > 0 && continuity_index <= count) {
+        int candidate = continuity_index - 1;
+        int all_unknown = 1;
+        for (int i = 0; i < count; i++)
+            if (audio_language_kind(tracks[i].language, tracks[i].title) !=
+                AUDIO_KIND_UNKNOWN) all_unknown = 0;
+        if (all_unknown &&
+            audio_language_kind(tracks[candidate].language, tracks[candidate].title) ==
+                AUDIO_KIND_UNKNOWN) return candidate;
+    }
+    return -1;
+}
+
 int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pref,
                         const char *saved_language,
                         const char *continuity_language, int continuity_index,
-                        int best_index) {
+                        int continuity_priority, int best_index) {
     if (!tracks || count <= 0) return -1;
     if (count > AUDIO_POLICY_MAX_TRACKS) count = AUDIO_POLICY_MAX_TRACKS;
     int best = safe_best(best_index, count);
 
-    // A escolha feita no episodio anterior vence a preferencia geral da conta.
-    // Isso preserva uma troca manual feita pelo usuario durante uma maratona.
-    const char *continued = audio_language_normalize(continuity_language, NULL);
-    if (continued[0]) {
-        for (int i = 0; i < count; i++)
-            if (!strcmp(audio_language_normalize(tracks[i].language, tracks[i].title), continued)) return i;
-    } else if (continuity_language && (!strcmp(continuity_language, "und") ||
-                                       !strcmp(continuity_language, "unknown"))) {
-        for (int i = 0; i < count; i++)
-            if (audio_language_kind(tracks[i].language, tracks[i].title) == AUDIO_KIND_UNKNOWN) return i;
-    }
-    if (continuity_index > 0 && continuity_index <= count) {
-        int candidate = continuity_index - 1;
-        AudioLanguageKind kind = audio_language_kind(tracks[candidate].language, tracks[candidate].title);
-        // Indice e o ultimo recurso para pacotes inteiramente sem metadados.
-        int all_unknown = 1;
-        for (int i = 0; i < count; i++)
-            if (audio_language_kind(tracks[i].language, tracks[i].title) != AUDIO_KIND_UNKNOWN) all_unknown = 0;
-        if (all_unknown && kind == AUDIO_KIND_UNKNOWN) return candidate;
-    }
+    int continued = continuity_choice(tracks, count, continuity_language,
+                                      continuity_index);
+    // Somente uma recuperacao da MESMA reproducao pode preservar uma escolha
+    // manual acima da conta. A pista herdada de outro episodio nao pode fazer
+    // ingles vencer PT-BR quando o perfil esta em Dublado.
+    if (continuity_priority && continued >= 0) return continued;
 
     if (account_pref == 0) { // Dublado
         for (int i = 0; i < count; i++)
@@ -169,12 +182,17 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
             if (!track_is_commentary(&tracks[i]) &&
                 audio_language_kind(tracks[i].language, tracks[i].title) == AUDIO_KIND_UNKNOWN) return i;
     } else { // Tanto faz: respeita uma escolha manual salva neste perfil.
+        if (continued >= 0) return continued;
         const char *saved = audio_language_normalize(saved_language, NULL);
         if (saved[0]) {
             for (int i = 0; i < count; i++)
                 if (!strcmp(audio_language_normalize(tracks[i].language, tracks[i].title), saved)) return i;
         }
     }
+
+    // Se a preferencia explicita nao existe nesta fonte, continuidade e um
+    // fallback melhor que mudar arbitrariamente para o default do manifesto.
+    if (continued >= 0) return continued;
 
     if (!track_is_commentary(&tracks[best])) return best;
     for (int i = 0; i < count; i++) if (!track_is_commentary(&tracks[i])) return i;

@@ -345,6 +345,26 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   fluida e outra com engasgos, e verificar que faltas/filas altas correspondem ao
   comportamento ouvido.
 
+## Prioridade PT-BR corrigida em 0.12.24 em 28/09/2026
+
+- Causa confirmada do ingles persistente: `audio_policy_choose` aplicava a pista
+  do episodio anterior antes de `audio_pref`. Assim, continuidade `en` vencia uma
+  faixa `pt-BR` explicita mesmo com a conta/versao em Dublado.
+- `audio_hint_priority` separa duas origens antes indistinguiveis. Somente retry,
+  refresh ou fallback da mesma reproducao recebe prioridade e conserva uma troca
+  manual. Ao abrir outro episodio/conteudo, Dublado procura PT-BR (ou a regra
+  legada `eng + und`) e Legendado procura original antes de considerar a pista.
+- Em `Tanto faz`, continuidade e escolha local continuam sendo respeitadas. Se a
+  preferencia explicita nao existir naquela fonte, a continuidade vira fallback
+  antes do default do manifesto.
+- O evento `streams selected` inclui agora preferencia, pista, prioridade e mapa
+  compacto das faixas (`1:en*,2:pt`). Isso permite provar pela foto/trace se um
+  pacote chegou rotulado incorretamente, sem registrar URLs ou credenciais.
+- `test_audio_policy` cobre PT versus continuidade inglesa tanto na abertura de
+  outro episodio quanto na recuperacao da mesma reproducao. Pendente no hardware:
+  filme dublado, dois episodios em sequencia, troca manual seguida de queda de rede
+  e captura do diagnostico se o mapa nao mostrar uma faixa `pt`.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

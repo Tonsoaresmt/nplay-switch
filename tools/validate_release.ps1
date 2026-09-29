@@ -55,6 +55,7 @@ Assert-True ($sources -match 'audio_policy_choose') 'Selecao de audio voltou a f
 Assert-True ($sources -match 'pui_draw\(' -and $sources -match 'pui_draw_loading\(') 'Player nao usa o HUD modular nas telas de reproducao e abertura.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
 Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'
+Assert-True ($sources -match 'attempt\.audio_hint_priority = 1') 'Recuperacao da mesma reproducao perdeu prioridade sobre a preferencia geral.'
 Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
 Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
 Assert-True ($sources -match 'audio-switch-seek' -and $sources -match 'cur_pos, 1, timeline_origin') 'Troca de audio HLS nao realinha a nova rendition no ponto atual.'
@@ -101,6 +102,7 @@ Assert-True ($sources -match 'PlayerHud hud_base' -and $sources -match 'draw_hud
 
 $audioPolicySource = Get-Content source/audio_policy.c -Raw
 Assert-True ($audioPolicySource -match 'count == 2' -and $audioPolicySource -match 'AUDIO_KIND_ENGLISH' -and $audioPolicySource -match 'AUDIO_KIND_UNKNOWN') 'Pacotes R2 antigos (ingles + dublagem sem tag) voltaram a selecionar ingles.'
+Assert-True ($audioPolicySource -match 'continuity_priority' -and $audioPolicySource -match 'outro episodio') 'Pista de outro episodio pode voltar a vencer PT-BR em Dublado.'
 
 $apiSource = Get-Content source/api.c -Raw
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'

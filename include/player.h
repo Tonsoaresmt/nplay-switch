@@ -51,6 +51,7 @@ typedef struct {
     int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
     int audio_hint;
     const char *audio_hint_language; // pt/en/ja/... ou und; opcional
+    int audio_hint_priority; // somente recuperacao da mesma reproducao
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;
