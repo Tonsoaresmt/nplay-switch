@@ -22,6 +22,12 @@ AVIOContext *nplay_curl_avio_open_hls(const char *url);
 // Retorna 1 quando o root anuncia renditions EXT-X-MEDIA e preenche as contagens.
 int nplay_curl_avio_hls_media_counts(AVIOContext *ctx, int *audio, int *subtitles);
 
+// Acesso somente-leitura ao manifesto/arquivo textual congelado pelo perfil
+// sincrono. O ponteiro permanece valido ate nplay_curl_avio_close(ctx).
+int nplay_curl_avio_metadata(AVIOContext *ctx, const unsigned char **data,
+                             size_t *length, char *effective_url,
+                             size_t effective_url_size);
+
 // Limite absoluto entre abrir o manifesto HLS e apresentar o primeiro quadro.
 // Passe 0 quando o primeiro quadro aparecer ou a tentativa terminar.
 void nplay_curl_avio_set_startup_window(unsigned timeout_ms);

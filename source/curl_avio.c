@@ -163,6 +163,7 @@ typedef struct {
     int64_t produced_offset, request_start;
     size_t stream_len;
     long response_code;
+    char effective_url[2048];
     char profile[8];
 } CurlIO;
 
@@ -263,6 +264,10 @@ static int fetch_block(CurlIO *c, int64_t start) {
     CURLcode r = curl_easy_perform(c->easy);
     Uint32 fetch_ms = SDL_GetTicks() - fetch_started;
     long code = 0; curl_easy_getinfo(c->easy, CURLINFO_RESPONSE_CODE, &code);
+    char *effective = NULL;
+    if (curl_easy_getinfo(c->easy, CURLINFO_EFFECTIVE_URL, &effective) == CURLE_OK &&
+        effective && effective[0])
+        snprintf(c->effective_url, sizeof(c->effective_url), "%s", effective);
     long new_connections = 0;
     curl_easy_getinfo(c->easy, CURLINFO_NUM_CONNECTS, &new_connections);
     c->fetch_count++;
@@ -809,6 +814,23 @@ int nplay_curl_avio_hls_media_counts(AVIOContext *ctx, int *audio, int *subtitle
     if (!c->static_data || !c->ring || c->static_len == 0) return 0;
     return hls_manifest_media_counts((const char *)c->ring, c->static_len,
                                      audio, subtitles);
+}
+
+int nplay_curl_avio_metadata(AVIOContext *ctx, const unsigned char **data,
+                             size_t *length, char *effective_url,
+                             size_t effective_url_size) {
+    if (data) *data = NULL;
+    if (length) *length = 0;
+    if (effective_url && effective_url_size) effective_url[0] = 0;
+    if (!ctx || !ctx->opaque) return 0;
+    CurlIO *c = (CurlIO *)ctx->opaque;
+    if (!c->static_data || !c->ring || c->static_len == 0) return 0;
+    if (data) *data = c->ring;
+    if (length) *length = c->static_len;
+    if (effective_url && effective_url_size)
+        snprintf(effective_url, effective_url_size, "%s",
+                 c->effective_url[0] ? c->effective_url : c->url);
+    return 1;
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

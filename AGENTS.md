@@ -1427,3 +1427,23 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Documento de release e continuidade: `docs/RELEASE_0_12_30.md`.
 - Validacao final limpa passou na 0.12.30. `Nplay.nro` tem 24.160.079 bytes e
   SHA-256 `4eb1ad838a5c1d9cc49205b316d3afc788f4a08f8dbe945a5197b984ea08dfea`.
+
+## Fallback de legendas HLS e seek confirmado em 29/09/2026 (0.12.31)
+
+- Um caso real mostrou tres legendas portuguesas no player web e nenhuma no NRO.
+  O site ja possuia um fallback que le `EXT-X-MEDIA` diretamente do master quando
+  o hls.js nao publica as tracks; o cliente Switch dependia apenas dos AVStreams
+  criados pelo demuxer FFmpeg.
+- O NRO agora extrai nome, idioma e URI das renditions de legenda diretamente do
+  manifesto. Se o FFmpeg nao criar nenhum AVStream, o menu ainda lista as tracks e
+  abre somente a playlist WebVTT escolhida. Seus cues ficam em uma colecao propria,
+  sem reabrir nem alterar a pipeline principal de video/audio.
+- URLs relativas de legenda herdam o token assinado do master. A URL efetiva apos
+  redirect e preservada pelo AVIO para resolver corretamente playlists do R2.
+- L/R e ZL/ZR nao fazem mais um seek/reconnect por toque. O primeiro toque abre a
+  pre-visualizacao, novos toques acumulam 10/60 s, `A` executa uma unica busca e
+  `B` cancela. O analogico continua usando o mesmo fluxo confirmado.
+- Validacao local: build ARM64 com `-Werror`, suite `validate_release.ps1`, parser
+  de master, simulacoes de clock/sync, remux e fixture HLS/WebVTT passaram. Pendente
+  obrigatorio no hardware: abrir a mesma obra das capturas, conferir tres legendas,
+  alternar audio/legenda repetidamente e buscar inicio/meio/fim sem crash.
