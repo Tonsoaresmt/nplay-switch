@@ -384,6 +384,7 @@ static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
 static char g_next_audio_language[8] = "", g_last_audio_language[8] = "";
 static int g_next_audio_pref_override = -1;
+static int g_next_audio_pref_explicit = 0;
 static char g_series_keep_lang[32] = "";
 static int g_series_audio_explicit = 0;
 static int g_prefs_sel = 0;
@@ -918,6 +919,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
         req.delivery = DELIVERY_R2;
     req.start_sec = start;
     req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
+    req.audio_pref_explicit = g_next_audio_pref_explicit;
     req.progress_cb = on_player_progress;
     req.heartbeat_cb = NULL;
     // Sem renew_cb pois nao e uma stream resolvida via API.
@@ -1128,6 +1130,7 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
         req.episode = src.episode;
         req.start_sec = start;
         req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
+        req.audio_pref_explicit = g_next_audio_pref_explicit;
         req.audio_hint = g_next_audio_hint;
         req.audio_hint_language = g_next_audio_language[0] ? g_next_audio_language : NULL;
         if (src.sequential_stream) req.start_sec = 0;
@@ -3388,6 +3391,7 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
         }
         g_next_audio_pref_override = audio_effective_preference(
             g_pref_audio, version_pref, g_series_audio_explicit);
+        g_next_audio_pref_explicit = g_series_audio_explicit && version_pref >= 0;
         g_next_audio_hint = audio_hint;
         snprintf(g_next_audio_language, sizeof(g_next_audio_language), "%s", audio_language);
         cJSON *current_episode = NULL, *next_episode = NULL;
@@ -3424,6 +3428,7 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
                                                    overview, next_context,
                                                    next_episode != NULL);
         g_next_audio_pref_override = -1;
+        g_next_audio_pref_explicit = 0;
         g_next_audio_hint = 0;
         g_next_audio_language[0] = '\0';
         if (g_last_audio_index > 0) audio_hint = g_last_audio_index;
@@ -3843,6 +3848,9 @@ static void save_selected_preference(int direction) {
         g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
         toast("Nao foi possivel salvar a preferencia");
     } else {
+        // Ao mudar a regra global da conta, ela volta a ser a fonte de verdade.
+        // Uma escolha manual antiga do player nao pode contradizer a nova opcao.
+        if (g_prefs_sel == 3) store_save_pref_audio("");
         if (g_prefs_sel == 0 && g_tab <= TAB_SAGAS) landing_invalidate(g_tab);
         g_hero_next = SDL_GetTicks() + 8000;
         toast("Preferencia sincronizada");

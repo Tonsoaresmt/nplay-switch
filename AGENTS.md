@@ -1394,3 +1394,36 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   cancelamento durante Wi-Fi desligado, retorno depois de pausa/seek, PT-BR,
   legendas e tempo de saida. Build/simulacao local nao valida NVDEC, driver SDL
   de audio nem a pilha Wi-Fi do console.
+
+## Prioridade manual de audio e origem das legendas em 29/09/2026 (0.12.30)
+
+- Captura no Switch confirmou duas faixas de audio corretamente identificadas
+  (`Portugues/pt` e `Japones/ja`), mas o check inicial voltava ao japones. A
+  normalizacao estava correta; a politica ignorava `pref_audio_<perfil>.txt`
+  quando `audioPref` da conta era Dublado ou Legendado.
+- A ultima escolha manual salva agora vence a preferencia geral da conta entre
+  obras e episodios. Uma versao Dublado/Legendado escolhida explicitamente no
+  detalhe da serie continua vencendo a escolha salva. Alterar a preferencia em
+  Configuracoes limpa a escolha manual anterior.
+- `PlayerRequest.audio_pref_explicit` transporta essa intencao ate o player. O
+  trace `streams/selected` registra preferencia, flag explicita e idioma salvo,
+  sem URL/token. `test_audio_policy.c` cobre conta Legendado + manual PT e conta
+  Dublado + manual estrangeiro.
+- A mesma captura mostrou somente `Desligadas`: o demux recebeu zero streams de
+  legenda. O fixture local do NRO continua abrindo duas rendicoes WebVTT e cues
+  antes/depois de seek; portanto a falta nao nasce no modal nem no decoder.
+- Causa no backend: `hls-preparer.js` ainda gerava/reutilizava o hash
+  `multitrack-v3`. Pacotes antigos sem legenda eram aceitos mesmo quando o probe
+  atual encontrava legendas de texto. A correcao esta isolada em
+  `C:/NplaySwitch/.codex-tmp/backend-subtitles`, branch
+  `codex/switch-subtitles`: schema `multitrack-v4-subtitles`, validacao do master
+  e falha se nenhuma faixa de texto puder ser convertida.
+- O contrato HLS, `npm run check` e `npm run test:media-worker` passaram no
+  backend com FFmpeg. Ainda nao houve deploy nem reprocessamento de producao.
+  Pacotes ja publicados precisam de reparo controlado; nao disparar lote em
+  massa sem aprovacao, capacidade e observacao do worker/R2.
+- Legenda bitmap PGS continua fora: FFmpeg nao a transforma em WebVTT sem OCR.
+  Nao anunciar disponibilidade quando a fonte possui somente bitmap.
+- Documento de release e continuidade: `docs/RELEASE_0_12_30.md`.
+- Validacao final limpa passou na 0.12.30. `Nplay.nro` tem 24.160.079 bytes e
+  SHA-256 `4eb1ad838a5c1d9cc49205b316d3afc788f4a08f8dbe945a5197b984ea08dfea`.

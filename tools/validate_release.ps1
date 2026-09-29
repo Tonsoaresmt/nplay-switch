@@ -55,6 +55,7 @@ Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior 
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
 Assert-True ($sources -match 'lang_norm' -and $sources -match 'stream_norm') 'Selecao de idioma voltou a comparar tags inconsistentes diretamente.'
 Assert-True ($sources -match 'audio_policy_choose') 'Selecao de audio voltou a ficar acoplada ao player e sem testes.'
+Assert-True ($sources -match 'audio_pref_explicit' -and $sources -match 'saved_audio') 'Escolha manual de idioma pode voltar a ser ignorada pela preferencia geral da conta.'
 Assert-True ($sources -match 'pui_draw\(' -and $sources -match 'pui_draw_loading\(') 'Player nao usa o HUD modular nas telas de reproducao e abertura.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
 Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'

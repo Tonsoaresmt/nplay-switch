@@ -666,6 +666,11 @@ static void draw_panel(SDL_Renderer *r, const PlayerHud *h) {
                       h->audio_names, h->audio_details, h->audio_count, h->audio_sel, h->audio_current);
     draw_track_column(r, (int)x + 40 + col_w + 40, (int)y + 96, col_w, "LEGENDAS", h->panel_column == 1,
                       h->sub_names, NULL, h->sub_count, h->sub_sel, h->sub_current);
+    if (h->sub_count <= 1) {
+        text_a(r, "Esta versao da obra nao recebeu legendas.",
+               (int)x + 40 + col_w + 40, (int)y + 198,
+               K_DIM, ST_SMALL, 1.0f, col_w);
+    }
     text_a(r, "Esquerda/direita  Coluna      Cima/baixo  Escolher      A  Aplicar      B  Fechar",
            (int)x + 40, (int)(y + hh - 44), K_DIM, ST_SMALL, 1.0f, (int)w - 80);
 }

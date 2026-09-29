@@ -168,6 +168,18 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
     // ingles vencer PT-BR quando o perfil esta em Dublado.
     if (continuity_priority == 1 && continued >= 0) return continued;
 
+    // A ultima troca manual feita no player e uma intencao mais recente e mais
+    // especifica que a preferencia geral da conta. O chamador omite este valor
+    // quando o usuario escolheu explicitamente uma versao Dublado/Legendado no
+    // detalhe da serie.
+    const char *saved = audio_language_normalize(saved_language, NULL);
+    if (saved[0]) {
+        for (int i = 0; i < count; i++)
+            if (!track_is_commentary(&tracks[i]) &&
+                !strcmp(audio_language_normalize(tracks[i].language, tracks[i].title), saved))
+                return i;
+    }
+
     if (account_pref == 0) { // Dublado
         for (int i = 0; i < count; i++)
             if (!track_is_commentary(&tracks[i]) &&
@@ -200,13 +212,8 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
         for (int i = 0; i < count; i++)
             if (!track_is_commentary(&tracks[i]) &&
                 audio_language_kind(tracks[i].language, tracks[i].title) == AUDIO_KIND_UNKNOWN) return i;
-    } else { // Tanto faz: respeita uma escolha manual salva neste perfil.
+    } else { // Tanto faz: usa continuidade/default quando nao houve escolha salva.
         if (continued >= 0) return continued;
-        const char *saved = audio_language_normalize(saved_language, NULL);
-        if (saved[0]) {
-            for (int i = 0; i < count; i++)
-                if (!strcmp(audio_language_normalize(tracks[i].language, tracks[i].title), saved)) return i;
-        }
     }
 
     // Se a preferencia explicita nao existe nesta fonte, continuidade e um

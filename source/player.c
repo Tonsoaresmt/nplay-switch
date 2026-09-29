@@ -1334,7 +1334,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                  audio_tracks[i].is_default ? "*" : "");
         strncat(audio_map, part, sizeof(audio_map) - strlen(audio_map) - 1);
     }
-    acur = audio_policy_choose(audio_tracks, naud, req->audio_pref, pref_aud,
+    const char *saved_audio = req->audio_pref_explicit ? NULL : pref_aud;
+    acur = audio_policy_choose(audio_tracks, naud, req->audio_pref, saved_audio,
                                req->audio_hint_language, req->audio_hint,
                                req->audio_hint_priority, best_audio);
     if (acur < 0) acur = 0;
@@ -1378,8 +1379,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     snprintf(g_player_audio_language, sizeof(g_player_audio_language), "%s",
              naud ? (stream_norm(fmt, aidx)[0] ? stream_norm(fmt, aidx) : "und") : "");
     diag_player_event("streams", "selected",
-                      "video=%d audio=%d lang=%s pref=%d hint=%s/%d priority=%d tracks=%s sub=%d",
+                      "video=%d audio=%d lang=%s pref=%d explicit=%d saved=%s hint=%s/%d priority=%d tracks=%s sub=%d",
                       vidx, aidx, g_player_audio_language, req->audio_pref,
+                      req->audio_pref_explicit, saved_audio && saved_audio[0] ? saved_audio : "-",
                       req->audio_hint_language ? req->audio_hint_language : "-",
                       req->audio_hint, req->audio_hint_priority,
                       audio_map[0] ? audio_map : "-", nsub);

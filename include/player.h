@@ -54,6 +54,10 @@ typedef struct {
     double start_sec;
     // Preferencia da conta e continuidade entre episodios. audio_hint e 1-based.
     int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
+    // Uma versao Dublado/Legendado escolhida explicitamente no detalhe da serie
+    // deve vencer a ultima faixa manual salva. Sem esta flag, a escolha manual
+    // feita no player continua valendo entre obras e episodios.
+    int audio_pref_explicit;
     int audio_hint;
     const char *audio_hint_language; // pt/en/ja/... ou und; opcional
     int audio_hint_priority; // 1=mesma reproducao/idioma; 2=faixa manual exata

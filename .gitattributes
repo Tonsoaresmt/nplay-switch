@@ -1,2 +1,10 @@
 # Keep the embedded Mozilla CA bundle byte-for-byte identical on Windows clones.
 data/cacert.bin -text
+
+# O projeto e mantido e compilado tambem no Windows. Nao trate o CR de CRLF
+# como espaco em branco final ao revisar patches; espacos antes dele continuam
+# sendo detectados normalmente.
+*.c whitespace=cr-at-eol
+*.h whitespace=cr-at-eol
+*.ps1 whitespace=cr-at-eol
+Makefile whitespace=cr-at-eol
