@@ -1484,3 +1484,38 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - A validacao de release agora impede regressao silenciosa para o avatar pequeno.
   Pendente no hardware: conferir a topbar em todas as cinco abas, nome longo no
   menu rapido e overscan nos modos portatil e dock.
+
+## Touch direto e gestos continuos em 29/09/2026 (0.12.34)
+
+- Causa do comportamento de touchpad: o loop guardava apenas o inicio/fim do
+  dedo e, ao soltar, convertia o deslocamento em um unico `JOY_UP/DOWN/LEFT/RIGHT`.
+  `SDL_FINGERMOTION` nao movia a interface; o usuario arrastava sem feedback e a
+  tela saltava como se um Joy-Con tivesse sido pressionado.
+- `touch_input.c` agora reconhece um dedo por vez, mantem jitter abaixo de 12 px
+  como tap, trava horizontal/vertical no primeiro arraste real e calcula velocidade
+  suavizada. O modulo nao depende de SDL e tem teste host dedicado.
+- Home, busca, sagas, Historico, Biblioteca, listas, temporadas, episodios e
+  relacionados movem o conteudo pixel a pixel enquanto o dedo acompanha a tela.
+  Uma inercia curta e limitada continua ao soltar; qualquer comando do Joy-Con a
+  interrompe. Soltar depois de arrastar nunca abre um card.
+- Scroll horizontal passou a ser persistente por prateleira. O foco e atualizado
+  para o item proximo ao dedo somente ao fim do gesto, preservando uma transicao
+  previsivel para D-pad/analogico sem sacrificar a manipulacao direta.
+- Swipes na barra de abas, destaque e paginas de avatar exigem distancia explicita
+  e ficam restritos a essas superficies. Taps continuam usando hit-test absoluto.
+- `SDL_HINT_TOUCH_MOUSE_EVENTS=0` e eventos SDL de mouse ignorados evitam clique
+  duplicado sintetizado. A implementacao segue coordenadas normalizadas e eventos
+  `FINGERDOWN/MOTION/UP` do SDL2 e o touchscreen absoluto exposto pelo libnx.
+- O painel de audio/legendas do player deixou de ignorar toque: uma faixa tocada
+  usa a mesma troca transacional do botao A; tocar fora fecha. Timeline ja usava
+  posicao absoluta e foi preservada.
+- Documento de release e continuidade: `docs/RELEASE_0_12_34.md`.
+- Validacao limpa completa passou: build ARM64 com `-Werror`, contrato do site,
+  clock/sync/loading/proximo episodio, touch, politica de audio, manifesto HLS,
+  legendas, API, episodios, remux e fixture multifaixa. `Nplay.nro` tem
+  24.176.463 bytes e SHA-256
+  `1faf37b4fd7d9b1a4a1731ad100c55a8a62c125e1eb80650af5525c44b6cc16b`.
+- Pendente obrigatorio no hardware: validar tap com tremor, arraste lento, diagonal,
+  fling, bordas, segundo dedo, troca touch/controle, todas as superficies listadas,
+  timeline e painel de audio/legendas. Build/simulacao nao valida o driver touch do
+  Switch nem sensacao de inercia no painel fisico.

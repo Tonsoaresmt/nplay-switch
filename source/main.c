@@ -28,6 +28,7 @@
 #include "brand_bin.h"
 #include "curl_avio.h"
 #include "audio_policy.h"
+#include "touch_input.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -306,11 +307,13 @@ static int g_heroSeriesDefault = 1;   // hero abre como serie? (Filmes = 0)
 typedef struct { char label[48]; cJSON *arr; int count; int is_series; } Rail;
 static Rail g_rails[48]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
+static int g_rail_scroll[48];
 static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
 static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n; }
 static int g_saga_sel = 0, g_saga_variant_sel = 0, g_saga_scroll = 0;
 static cJSON *g_saga_detail = NULL;
 static int g_saga_item_sel = 0;
+static int g_saga_detail_scroll_x = 0;
 
 // --- busca ---
 static cJSON *g_search = NULL;
@@ -370,6 +373,7 @@ static int g_history_menu = 0, g_history_menu_sel = 0;
 // vista do Historico: 0=inicio, 1=episodios preparados, 2=biblioteca, 3=lista pessoal
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 static int g_list_sel = 0, g_open_list = 0, g_list_item_sel = 0;
+static int g_history_scroll = 0, g_media_list_scroll = 0, g_list_grid_scroll = 0;
 // agrupamento dos jobs por obra (series_id) ou filme (item_id negativo)
 #define MAX_DLG 300
 typedef struct { int key; int job[128]; int nJobs; int isMovie; } DlGroup;
@@ -408,6 +412,7 @@ static int g_favs_profile_id = 0;
 // --- serie (detalhe) ---
 static cJSON *g_ser = NULL;
 static int g_seasonIdx = 0, g_epSel = 0, g_epScroll = 0;
+static int g_episode_scroll_x = 0, g_season_scroll_x = 0;
 static struct {
     int active;
     int series_id;
@@ -552,6 +557,7 @@ static void hero_pool_add_ready(cJSON *pool, cJSON *items) {
 static void landing_apply(int tab, cJSON *land) {
     g_land = land;
     g_railsN = 0; g_railItem = 0; g_homeScroll = 0;
+    memset(g_rail_scroll, 0, sizeof(g_rail_scroll));
     g_heroIdx = 0; g_hero_next = SDL_GetTicks() + 6000; g_heroesArr = NULL;
     g_heroSeriesDefault = (tab == 1) ? 0 : 1;
 
@@ -1228,6 +1234,7 @@ static void select_series_resume_target(cJSON *detail) {
     g_seasonIdx = best_season;
     g_epSel = grouped ? best_flat : best_local;
     g_epScroll = 0;
+    g_episode_scroll_x = g_season_scroll_x = 0;
 }
 
 static void begin_catalog_fetch_mode(FetchKind kind, const char *path,
@@ -1374,6 +1381,7 @@ static void pump_catalog_fetch(void) {
         g_saga_detail = result;
         result = NULL;
         g_saga_item_sel = 0;
+        g_saga_detail_scroll_x = 0;
         g_screen = SC_SAGA;
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_PROFILES &&
@@ -2266,6 +2274,32 @@ static void draw_profile_menu(void) {
 #define HERO_H 190
 #define RAILS_TOP 308
 #define RAIL_STEP (30 + RCH + 70)
+
+static int clamp_scroll(int value, int maximum) {
+    if (maximum < 0) maximum = 0;
+    if (value < 0) return 0;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+static int horizontal_scroll_max(int count, int item_w, int gap, int viewport_w) {
+    if (count <= 0) return 0;
+    int content_w = count * item_w + (count - 1) * gap;
+    return content_w > viewport_w ? content_w - viewport_w : 0;
+}
+
+static void reveal_horizontal_item(int *scroll, int selected, int count,
+                                   int item_w, int gap, int viewport_w) {
+    if (!scroll || selected < 0 || selected >= count) return;
+    int step = item_w + gap;
+    int left = selected * step;
+    int right = left + item_w;
+    if (left < *scroll) *scroll = left;
+    if (right > *scroll + viewport_w) *scroll = right - viewport_w;
+    *scroll = clamp_scroll(*scroll,
+                           horizontal_scroll_max(count, item_w, gap, viewport_w));
+}
+
 static void draw_landing(void) {
     if (!g_land) {
         draw_topbar();
@@ -2320,13 +2354,9 @@ static void draw_landing(void) {
         text_draw(gRen, g_rails[r].label, 54, y, C_TEXT, 0);
         char total[40]; snprintf(total, sizeof(total), "%d titulos", items);
         text_right(total, WIN_W - 55, y + 2, C_MUT, 2);
-        int rowScroll = 0;
-        if (r == g_railSel) {
-            int selX = 54 + g_railItem * (RCW + RGAP);
-            if (selX + RCW - rowScroll > WIN_W - 54) rowScroll = selX + RCW - (WIN_W - 54);
-            if (selX - rowScroll < 54) rowScroll = selX - 54;
-            if (rowScroll < 0) rowScroll = 0;
-        }
+        int rowScroll = clamp_scroll(g_rail_scroll[r],
+            horizontal_scroll_max(items, RCW, RGAP, WIN_W - 108));
+        g_rail_scroll[r] = rowScroll;
         const int step = RCW + RGAP;
         int first = rowScroll > 54 + RCW ? (rowScroll - 54 - RCW) / step : 0;
         int last = (WIN_W + rowScroll - 54) / step + 1;
@@ -2619,11 +2649,14 @@ static void draw_saga_detail(void) {
     SDL_Texture *art = cover_get(art_url);
     if (art) { SDL_Rect r = {813, 123, 391, 225}; ui_contain(art, &r); }
     text_draw(gRen, "Assista na sequencia", 54, 373, C_TEXT, 0);
-    int start = g_saga_item_sel - 2;
-    if (start < 0) start = 0;
-    if (start > count - 5) start = count > 5 ? count - 5 : 0;
-    for (int i = start; i < count && i < start + 5; i++) {
-        int x = 54 + (i - start) * (RCW + RGAP);
+    g_saga_detail_scroll_x = clamp_scroll(g_saga_detail_scroll_x,
+        horizontal_scroll_max(count, RCW, RGAP, WIN_W - 108));
+    int first = g_saga_detail_scroll_x / (RCW + RGAP);
+    if (first > 0) first--;
+    int last = (g_saga_detail_scroll_x + WIN_W - 108) / (RCW + RGAP) + 2;
+    if (last > count) last = count;
+    for (int i = first; i < last; i++) {
+        int x = 54 + i * (RCW + RGAP) - g_saga_detail_scroll_x;
         draw_card(x, 411, RCW, 205, cJSON_GetArrayItem(items, i), i == g_saga_item_sel, 0);
     }
     if (!count) text_draw(gRen, "Esta saga ainda nao possui titulos disponiveis.", 54, 442, C_MUT, 0);
@@ -2762,9 +2795,11 @@ static void draw_series(void) {
     text_draw(gRen, "Temporadas", 54, 480, C_TEXT, 0);
     if (nsea > 1) text_right("L/R trocar temporada", WIN_W - 54, 483, C_MUT, 2);
     int selected_season_index = ser_grouped() ? ser_group_idx() : g_seasonIdx;
-    int first_season = selected_season_index > 5 ? selected_season_index - 5 : 0;
-    for (int i = first_season; i < nsea && i < first_season + 7; i++) {
-        int x = 54 + (i - first_season) * 160;
+    g_season_scroll_x = clamp_scroll(g_season_scroll_x,
+        horizontal_scroll_max(nsea, 150, 10, WIN_W - 108));
+    for (int i = 0; i < nsea; i++) {
+        int x = 54 + i * 160 - g_season_scroll_x;
+        if (x + 150 < 54 || x > WIN_W - 54) continue;
         fill_rect(x, 511, 150, 34, i == selected_season_index ? C_ACC : C_CARD);
         char chip[48];
         int season_number = ser_grouped() ? i + 1 : season_number_at(i);
@@ -2774,12 +2809,15 @@ static void draw_series(void) {
     }
     char count[50]; snprintf(count, sizeof(count), "%d episodios", nep);
     text_right(count, WIN_W - 54, 518, C_MUT, 2);
-    int start = g_epSel - 2;
-    if (start < 0) start = 0;
-    if (start > nep - 5) start = nep > 5 ? nep - 5 : 0;
-    for (int i = start; i < nep && i < start + 5; i++) {
+    g_episode_scroll_x = clamp_scroll(g_episode_scroll_x,
+        horizontal_scroll_max(nep, RCW, RGAP, WIN_W - 108));
+    int first_ep = g_episode_scroll_x / (RCW + RGAP);
+    if (first_ep > 0) first_ep--;
+    int last_ep = (g_episode_scroll_x + WIN_W - 108) / (RCW + RGAP) + 2;
+    if (last_ep > nep) last_ep = nep;
+    for (int i = first_ep; i < last_ep; i++) {
         cJSON *ep = ser_ep_at(i);
-        int x = 54 + (i - start) * (RCW + RGAP);
+        int x = 54 + i * (RCW + RGAP) - g_episode_scroll_x;
         fill_rect(x, 551, RCW, 105, i == g_epSel ? (SDL_Color){38, 34, 61, 255} : C_CARD);
         if (i == g_epSel) ui_focus(x - 4, 547, RCW + 8, 113);
         const char *card_still = jstr(ep, "ep_still");
@@ -2900,12 +2938,6 @@ int media_list_prompt_add(int id, int is_series, const char *title, const char *
 #define HIST_CH 216
 #define HIST_GAP 18
 
-static int horizontal_scroll(int selected, int item_w, int gap) {
-    int x = 54 + selected * (item_w + gap), scroll = 0;
-    if (x + item_w > WIN_W - 54) scroll = x + item_w - (WIN_W - 54);
-    return scroll > 0 ? scroll : 0;
-}
-
 static void draw_history_card(int x, int y, cJSON *item, int selected) {
     const char *title = jstr(item, "title"); if (!title) title = "Titulo";
     fill_rect(x, y, HIST_CW, HIST_CH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
@@ -2966,7 +2998,9 @@ static void draw_history_home(void) {
         text_center_at("Nenhuma obra em andamento", 70, WIN_W - 140, 214, C_TEXT, 1);
         text_center_at("Quando voce parar um video, ele ficara pronto para continuar aqui.", 70, WIN_W - 140, 276, C_MUT, 0);
     } else {
-        int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
+        int scroll = clamp_scroll(g_history_scroll,
+            horizontal_scroll_max(nh, HIST_CW, HIST_GAP, WIN_W - 108));
+        g_history_scroll = scroll;
         for (int i = 0; i < nh; i++) {
             int x = 54 + i * (HIST_CW + HIST_GAP) - scroll;
             if (x + HIST_CW < 0 || x > WIN_W) continue;
@@ -2978,7 +3012,10 @@ static void draw_history_home(void) {
     text_draw(gRen, "Suas listas", 54, 433, C_TEXT, 1);
     text_right("Biblioteca, favoritos e colecoes pessoais", WIN_W - 54, 442, C_MUT, 0);
     int total = list_count + 2; // Biblioteca + listas locais + Nova lista
-    int tile_w = 270, tile_gap = 18, scroll = horizontal_scroll(g_list_sel, tile_w, tile_gap);
+    int tile_w = 270, tile_gap = 18;
+    int scroll = clamp_scroll(g_media_list_scroll,
+        horizontal_scroll_max(total, tile_w, tile_gap, WIN_W - 108));
+    g_media_list_scroll = scroll;
     for (int i = 0; i < total; i++) {
         int x = 54 + i * (tile_w + tile_gap) - scroll, y = 481;
         if (x + tile_w < 0 || x > WIN_W) continue;
@@ -3114,9 +3151,11 @@ static void draw_custom_list(void) {
         ui_footer("Y Renomear lista    ZR Excluir lista    B Voltar");
         return;
     }
-    int top = 194, selected_row = g_list_item_sel / GCOLS;
-    int selected_bottom = top + selected_row * (GCH + GGAP) + GCH;
-    int scroll_px = selected_bottom > WIN_H - 52 ? selected_bottom - (WIN_H - 52) + 16 : 0;
+    int top = 194;
+    int rows = (n + GCOLS - 1) / GCOLS;
+    int max_scroll = top + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
+    int scroll_px = clamp_scroll(g_list_grid_scroll, max_scroll);
+    g_list_grid_scroll = scroll_px;
     for (int i = 0; i < n; i++) {
         int col = i % GCOLS, row = i / GCOLS;
         int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
@@ -3217,6 +3256,7 @@ static void enter_tab(int tab) {
     if (tab == TAB_DOWNLOADS) {
         g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; g_history_sel = 0;
         g_history_zone = arr_len(history_items()) > 0 ? 0 : 1; g_list_sel = 0;
+        g_history_scroll = g_media_list_scroll = g_list_grid_scroll = 0;
         g_history_menu = 0; g_history_menu_sel = 0;
         local_dl_refresh(); load_downloads(); load_history();
         g_dl_next = SDL_GetTicks() + 2000; return;
@@ -3255,6 +3295,9 @@ static void input_landing(int b) {
     else if (b == JOY_DRIGHT) { if (g_railItem < items - 1) g_railItem++; }
     else if (b == JOY_A) { open_item(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), g_rails[g_railSel].is_series); }
     else if (b == JOY_X) { cJSON *it = cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem); if (it) { int is = catalog_item_is_series(it, g_rails[g_railSel].is_series); int id = catalog_favorite_id(it, is); if (is) toggle_fav_series(id); else toggle_fav_item(id); } }
+    if (g_railSel >= 0 && g_railSel < g_railsN)
+        reveal_horizontal_item(&g_rail_scroll[g_railSel], g_railItem, items,
+                               RCW, RGAP, WIN_W - 108);
     int ry = (nh > 0 ? RAILS_TOP : 125) + g_railSel * RAIL_STEP;
     int item_h = g_railSel == g_railsN ? 112 : RCH + 90;
     if (ry + item_h - g_homeScroll > WIN_H - 52) g_homeScroll = ry + item_h - (WIN_H - 52) + 20;
@@ -3302,6 +3345,8 @@ static void input_saga_detail(int b) {
         }
         open_item(item, catalog_item_is_series(item, 0));
     }
+    reveal_horizontal_item(&g_saga_detail_scroll_x, g_saga_item_sel, count,
+                           RCW, RGAP, WIN_W - 108);
 }
 static void input_search(int b) {
     int n = srch_count_for(g_srchFilter);
@@ -3528,17 +3573,24 @@ static void input_series(int b) {
     else if (b == JOY_DOWN) { if (g_ep_plot_scroll + 4 < g_ep_plot_count) g_ep_plot_scroll++; }
     else if (b == JOY_L) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i > 0) { series_keep_audio_begin(); open_series_mode(jint(cJSON_GetArrayItem(ser_group(), i - 1), "id"), g_series_audio_explicit); } }
-        else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0; }
+        else if (g_seasonIdx > 0) { g_seasonIdx--; g_epSel = 0; g_epScroll = 0;
+                                          g_episode_scroll_x = 0; }
     }
     else if (b == JOY_R) {
         if (ser_grouped()) { int i = ser_group_idx(); if (i < arr_len(ser_group()) - 1) { series_keep_audio_begin(); open_series_mode(jint(cJSON_GetArrayItem(ser_group(), i + 1), "id"), g_series_audio_explicit); } }
-        else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0; }
+        else if (g_seasonIdx < season_count() - 1) { g_seasonIdx++; g_epSel = 0; g_epScroll = 0;
+                                                       g_episode_scroll_x = 0; }
     }
     else if (b == JOY_A) {
         cJSON *ep = ser_ep_at(g_epSel);
         if (ep) play_episode_sequence(jint(ep, "id"), jint(ser_obj(), "id"),
                                       ep_display_title(ep), ep);
     }
+    reveal_horizontal_item(&g_episode_scroll_x, g_epSel, nep,
+                           RCW, RGAP, WIN_W - 108);
+    reveal_horizontal_item(&g_season_scroll_x,
+                           ser_grouped() ? ser_group_idx() : g_seasonIdx,
+                           ser_nseasons(), 150, 10, WIN_W - 108);
 }
 static void play_history_item(cJSON *item) {
     int item_id = jint(item, "item_id");
@@ -3605,10 +3657,10 @@ static void input_downloads(int b) {
                     char name[48];
                     if (prompt_text("Nome da nova lista", name, sizeof(name), 0) == 0) {
                         int created = store_media_list_create(name);
-                        if (created >= 0) { g_open_list = created; g_list_item_sel = 0; g_dlView = 3; }
+                        if (created >= 0) { g_open_list = created; g_list_item_sel = 0; g_list_grid_scroll = 0; g_dlView = 3; }
                         else toast("Nao foi possivel criar a lista");
                     }
-                } else { g_open_list = g_list_sel - 1; g_list_item_sel = 0; g_dlView = 3; }
+                } else { g_open_list = g_list_sel - 1; g_list_item_sel = 0; g_list_grid_scroll = 0; g_dlView = 3; }
             }
         } else if (g_history_zone == 0 && nh > 0 && b == JOY_X) {
             g_history_menu = 1; g_history_menu_sel = 0;
@@ -3630,6 +3682,12 @@ static void input_downloads(int b) {
                 toast("Lista excluida");
             }
         }
+        if (g_history_zone == 0)
+            reveal_horizontal_item(&g_history_scroll, g_history_sel, nh,
+                                   HIST_CW, HIST_GAP, WIN_W - 108);
+        else
+            reveal_horizontal_item(&g_media_list_scroll, g_list_sel, total,
+                                   270, 18, WIN_W - 108);
         return;
     }
     if (g_dlView == 3) { // conteudo de uma lista pessoal
@@ -3676,6 +3734,15 @@ static void input_downloads(int b) {
                 store_media_list_delete(g_open_list); g_dlView = 0; g_history_zone = 1; g_list_sel = 0; toast("Lista excluida");
             }
         }
+        int selected_row = g_list_item_sel / GCOLS;
+        int row_top = 194 + selected_row * (GCH + GGAP);
+        int row_bottom = row_top + GCH;
+        if (row_top - g_list_grid_scroll < 184) g_list_grid_scroll = row_top - 184;
+        if (row_bottom - g_list_grid_scroll > WIN_H - 52)
+            g_list_grid_scroll = row_bottom - (WIN_H - 52) + 16;
+        int rows = (n + GCOLS - 1) / GCOLS;
+        g_list_grid_scroll = clamp_scroll(g_list_grid_scroll,
+            194 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52));
         return;
     }
     if (g_dlView == 1) {   // detalhe: episodios preparados de uma obra
@@ -4494,7 +4561,7 @@ static void handle_history_touch(int x, int y) {
         }
         int nh = arr_len(history_items());
         if (y >= 152 && y < 152 + HIST_CH + 52) {
-            int scroll = horizontal_scroll(g_history_sel, HIST_CW, HIST_GAP);
+            int scroll = g_history_scroll;
             int relative = x - 54 + scroll;
             if (relative >= 0) {
                 int index = relative / (HIST_CW + HIST_GAP);
@@ -4507,7 +4574,7 @@ static void handle_history_touch(int x, int y) {
             return;
         }
         if (y >= 481 && y < 639) {
-            int scroll = horizontal_scroll(g_list_sel, 270, 18);
+            int scroll = g_media_list_scroll;
             int relative = x - 54 + scroll;
             if (relative >= 0) {
                 int index = relative / 288;
@@ -4533,11 +4600,7 @@ static void handle_history_touch(int x, int y) {
     }
     if (x < GMX || y >= WIN_H - 52) return;
     int top = g_dlView == 2 ? 184 : 194;
-    int scroll = g_dlScroll;
-    if (g_dlView == 3) {
-        int selected_bottom = top + (g_list_item_sel / GCOLS) * (GCH + GGAP) + GCH;
-        scroll = selected_bottom > WIN_H - 52 ? selected_bottom - (WIN_H - 52) + 16 : 0;
-    }
+    int scroll = g_dlView == 3 ? g_list_grid_scroll : g_dlScroll;
     int relative_x = x - GMX, relative_y = y + scroll - top;
     if (relative_y < 0) return;
     int col = relative_x / (GCW + GGAP), row = relative_y / (GCH + GGAP);
@@ -4628,13 +4691,7 @@ static void handle_touch_tap(int x, int y) {
         for (int r = 0; r < g_railsN; r++) {
             int ry = first_y + r * RAIL_STEP + 30 - g_homeScroll;
             if (y < ry || y >= ry + RCH + 52) continue;
-            int row_scroll = 0;
-            if (r == g_railSel) {
-                int sel_x = 54 + g_railItem * (RCW + RGAP);
-                if (sel_x + RCW > WIN_W - 54) row_scroll = sel_x + RCW - (WIN_W - 54);
-                if (sel_x - row_scroll < 54) row_scroll = sel_x - 54;
-                if (row_scroll < 0) row_scroll = 0;
-            }
+            int row_scroll = g_rail_scroll[r];
             int relative = x - 54 + row_scroll;
             if (relative < 0) return;
             int index = relative / (RCW + RGAP);
@@ -4708,39 +4765,34 @@ static void handle_touch_tap(int x, int y) {
             return;
         }
         if (y >= 511 && y < 545) {
-            int index = (x - 54) / 160;
-            int current = ser_grouped() ? ser_group_idx() : g_seasonIdx;
-            int first = current > 5 ? current - 5 : 0;
-            int target = first + index;
-            if (x >= 54 && index >= 0 && target < ser_nseasons()) {
+            int relative = x - 54 + g_season_scroll_x;
+            int target = relative / 160;
+            if (relative >= 0 && relative % 160 < 150 && target < ser_nseasons()) {
                 if (ser_grouped()) open_series_mode(
                     jint(cJSON_GetArrayItem(ser_group(), target), "id"),
                     g_series_audio_explicit);
-                else { g_seasonIdx = target; g_epSel = 0; g_ep_plot_id = -1; }
+                else { g_seasonIdx = target; g_epSel = 0; g_ep_plot_id = -1;
+                       g_episode_scroll_x = 0; }
             }
             return;
         }
         if (y >= 551 && y < 656) {
             int count = ser_nep();
-            int start = g_epSel - 2;
-            if (start < 0) start = 0;
-            if (start > count - 5) start = count > 5 ? count - 5 : 0;
-            int col = (x - 54) / (RCW + RGAP);
-            int index = start + col;
-            if (x >= 54 && col >= 0 && col < 5 && index < count &&
-                (x - 54) % (RCW + RGAP) < RCW) g_epSel = index;
+            int relative = x - 54 + g_episode_scroll_x;
+            int index = relative / (RCW + RGAP);
+            if (relative >= 0 && relative % (RCW + RGAP) < RCW && index < count) {
+                g_epSel = index;
+                input_series(JOY_A);
+            }
             return;
         }
         return;
     }
     if (g_screen == SC_SAGA && y >= 411 && y < 668) {
         int count = arr_len(cJSON_GetObjectItem(g_saga_detail, "items"));
-        int start = g_saga_item_sel - 2;
-        if (start < 0) start = 0;
-        if (start > count - 5) start = count > 5 ? count - 5 : 0;
-        int col = (x - 54) / (RCW + RGAP), index = start + col;
-        if (x >= 54 && col >= 0 && col < 5 && index < count &&
-            (x - 54) % (RCW + RGAP) < RCW) {
+        int relative = x - 54 + g_saga_detail_scroll_x;
+        int index = relative / (RCW + RGAP);
+        if (relative >= 0 && index < count && relative % (RCW + RGAP) < RCW) {
             g_saga_item_sel = index;
             input_saga_detail(JOY_A);
         }
@@ -4752,63 +4804,261 @@ static void handle_touch_tap(int x, int y) {
     }
     if (g_screen == SC_MOVIE && y >= 461 && y < 659) movie_touch_related(x, y);
 }
-static void handle_touch_swipe(int x, int y, int dx, int dy) {
+typedef enum {
+    TOUCH_SURFACE_NONE = 0,
+    TOUCH_SURFACE_TABS,
+    TOUCH_SURFACE_HERO,
+    TOUCH_SURFACE_HOME_VERTICAL,
+    TOUCH_SURFACE_HOME_RAIL,
+    TOUCH_SURFACE_SEARCH_VERTICAL,
+    TOUCH_SURFACE_SAGAS_VERTICAL,
+    TOUCH_SURFACE_HISTORY,
+    TOUCH_SURFACE_MEDIA_LISTS,
+    TOUCH_SURFACE_LIBRARY_VERTICAL,
+    TOUCH_SURFACE_CUSTOM_LIST_VERTICAL,
+    TOUCH_SURFACE_SERIES_SEASONS,
+    TOUCH_SURFACE_SERIES_EPISODES,
+    TOUCH_SURFACE_SAGA_ITEMS,
+    TOUCH_SURFACE_MOVIE_RELATED,
+    TOUCH_SURFACE_AVATAR_PAGES
+} TouchSurface;
+
+typedef struct {
+    TouchSurface surface;
+    int index;
+    float velocity;
+    Uint32 tick;
+} TouchMomentum;
+
+static TouchMomentum g_touch_momentum = {0};
+static TouchSurface g_touch_surface = TOUCH_SURFACE_NONE;
+static int g_touch_surface_index = -1;
+
+static TouchSurface touch_surface_at(int x, int y, TouchAxis axis, int *index) {
     (void)x;
-    if (g_screen == SC_SEARCH && y >= 205) {
+    if (index) *index = -1;
+    if (g_screen == SC_MOVIE && axis == TOUCH_AXIS_HORIZONTAL && y >= 430)
+        return TOUCH_SURFACE_MOVIE_RELATED;
+    if (g_screen == SC_CONFIG && g_avatar_picker &&
+        axis == TOUCH_AXIS_HORIZONTAL && y >= 135 && y < 620)
+        return TOUCH_SURFACE_AVATAR_PAGES;
+    if (g_profile_menu || g_screen == SC_LOGIN || g_screen == SC_LOADING ||
+        g_screen == SC_CONFIG || g_screen == SC_PROFILES)
+        return TOUCH_SURFACE_NONE;
+    if (g_screen == SC_SEARCH)
+        return axis == TOUCH_AXIS_VERTICAL && y >= 205 ?
+               TOUCH_SURFACE_SEARCH_VERTICAL : TOUCH_SURFACE_NONE;
+    if (g_screen == SC_SERIES && !g_dlmenu && axis == TOUCH_AXIS_HORIZONTAL) {
+        if (y >= 500 && y < 550) return TOUCH_SURFACE_SERIES_SEASONS;
+        if (y >= 545 && y < 670) return TOUCH_SURFACE_SERIES_EPISODES;
+        return TOUCH_SURFACE_NONE;
+    }
+    if (g_screen == SC_SAGA && axis == TOUCH_AXIS_HORIZONTAL && y >= 390)
+        return TOUCH_SURFACE_SAGA_ITEMS;
+    if (g_screen != SC_MAIN) return TOUCH_SURFACE_NONE;
+    if (y < 95 && axis == TOUCH_AXIS_HORIZONTAL) return TOUCH_SURFACE_TABS;
+    if (g_tab == TAB_SAGAS)
+        return axis == TOUCH_AXIS_VERTICAL ? TOUCH_SURFACE_SAGAS_VERTICAL : TOUCH_SURFACE_NONE;
+    if (g_tab == TAB_DOWNLOADS) {
+        if (g_dlView == 0 && axis == TOUCH_AXIS_HORIZONTAL) {
+            if (y >= 140 && y < 425) return TOUCH_SURFACE_HISTORY;
+            if (y >= 430 && y < 675) return TOUCH_SURFACE_MEDIA_LISTS;
+        }
+        if (g_dlView == 2 && axis == TOUCH_AXIS_VERTICAL) return TOUCH_SURFACE_LIBRARY_VERTICAL;
+        if (g_dlView == 3 && axis == TOUCH_AXIS_VERTICAL) return TOUCH_SURFACE_CUSTOM_LIST_VERTICAL;
+        return TOUCH_SURFACE_NONE;
+    }
+    if (axis == TOUCH_AXIS_VERTICAL) return TOUCH_SURFACE_HOME_VERTICAL;
+    int hero_y = 110 - g_homeScroll;
+    if (y >= hero_y && y < hero_y + HERO_H) return TOUCH_SURFACE_HERO;
+    int first_y = hero_count() > 0 ? RAILS_TOP : 125;
+    for (int r = 0; r < g_railsN; r++) {
+        int row_y = first_y + r * RAIL_STEP + 30 - g_homeScroll;
+        if (y >= row_y && y < row_y + RCH + 52) {
+            if (index) *index = r;
+            return TOUCH_SURFACE_HOME_RAIL;
+        }
+    }
+    return TOUCH_SURFACE_NONE;
+}
+
+// delta ja esta no sentido do conteudo: positivo avanca a pagina/prateleira.
+static void touch_scroll_apply(TouchSurface surface, int index, int delta) {
+    if (!delta) return;
+    if (surface == TOUCH_SURFACE_HOME_VERTICAL) {
+        int max_scroll = (hero_count() > 0 ? RAILS_TOP : 125) +
+                         g_railsN * RAIL_STEP + 112 - (WIN_H - 52);
+        g_homeScroll = clamp_scroll(g_homeScroll + delta, max_scroll);
+    } else if (surface == TOUCH_SURFACE_HOME_RAIL && index >= 0 && index < g_railsN) {
+        int maximum = horizontal_scroll_max(g_rails[index].count, RCW, RGAP, WIN_W - 108);
+        g_rail_scroll[index] = clamp_scroll(g_rail_scroll[index] + delta, maximum);
+        g_railSel = index;
+    } else if (surface == TOUCH_SURFACE_SEARCH_VERTICAL) {
         int rows = (srch_count_for(g_srchFilter) + GCOLS - 1) / GCOLS;
-        int max_scroll = 221 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
-        if (max_scroll < 0) max_scroll = 0;
-        g_srchScroll -= dy;
-        if (g_srchScroll < 0) g_srchScroll = 0;
-        if (g_srchScroll > max_scroll) g_srchScroll = max_scroll;
-        return;
-    }
-    if (g_screen == SC_MAIN && y < 105 && dx > 90) { enter_tab((g_tab - 1 + NTABS) % NTABS); return; }
-    if (g_screen == SC_MAIN && y < 105 && dx < -90) { enter_tab((g_tab + 1) % NTABS); return; }
-    if (g_screen == SC_SERIES && !g_dlmenu) {
-        if (y >= 235 && y < 416 && (dy > 45 || dy < -45)) {
-            input_series(dy < 0 ? JOY_DOWN : JOY_UP); return;
-        }
-        if (dx > 55 || dx < -55) input_series(dx < 0 ? JOY_DRIGHT : JOY_DLEFT);
-        return;
-    }
-    if (g_screen != SC_MAIN) return;
-    if (g_tab == TAB_SAGAS) {
-        g_saga_scroll -= dy;
+        int maximum = 221 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
+        g_srchScroll = clamp_scroll(g_srchScroll + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_SAGAS_VERTICAL) {
         int rows = (arr_len(saga_groups()) + 2) / 3;
-        int max_scroll = 185 + rows * 231 - (WIN_H - 52);
-        if (max_scroll < 0) max_scroll = 0;
-        if (g_saga_scroll < 0) g_saga_scroll = 0;
-        if (g_saga_scroll > max_scroll) g_saga_scroll = max_scroll;
-        return;
+        int maximum = 185 + rows * 231 - (WIN_H - 52);
+        g_saga_scroll = clamp_scroll(g_saga_scroll + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_HISTORY) {
+        int maximum = horizontal_scroll_max(arr_len(history_items()), HIST_CW,
+                                             HIST_GAP, WIN_W - 108);
+        g_history_scroll = clamp_scroll(g_history_scroll + delta, maximum);
+        g_history_zone = 0;
+    } else if (surface == TOUCH_SURFACE_MEDIA_LISTS) {
+        int total = store_media_list_count() + 2;
+        int maximum = horizontal_scroll_max(total, 270, 18, WIN_W - 108);
+        g_media_list_scroll = clamp_scroll(g_media_list_scroll + delta, maximum);
+        g_history_zone = 1;
+    } else if (surface == TOUCH_SURFACE_LIBRARY_VERTICAL) {
+        int rows = (g_dlgN + GCOLS - 1) / GCOLS;
+        int maximum = 184 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
+        g_dlScroll = clamp_scroll(g_dlScroll + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_CUSTOM_LIST_VERTICAL) {
+        int n = store_media_list_item_count(g_open_list);
+        int rows = (n + GCOLS - 1) / GCOLS;
+        int maximum = 194 + rows * (GCH + GGAP) - GGAP - (WIN_H - 52);
+        g_list_grid_scroll = clamp_scroll(g_list_grid_scroll + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_SERIES_SEASONS) {
+        int maximum = horizontal_scroll_max(ser_nseasons(), 150, 10, WIN_W - 108);
+        g_season_scroll_x = clamp_scroll(g_season_scroll_x + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_SERIES_EPISODES) {
+        int maximum = horizontal_scroll_max(ser_nep(), RCW, RGAP, WIN_W - 108);
+        g_episode_scroll_x = clamp_scroll(g_episode_scroll_x + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_SAGA_ITEMS) {
+        cJSON *items = cJSON_GetObjectItem(g_saga_detail, "items");
+        int maximum = horizontal_scroll_max(arr_len(items), RCW, RGAP, WIN_W - 108);
+        g_saga_detail_scroll_x = clamp_scroll(g_saga_detail_scroll_x + delta, maximum);
+    } else if (surface == TOUCH_SURFACE_MOVIE_RELATED) {
+        movie_touch_scroll_related(delta);
     }
-    if (g_tab == TAB_DOWNLOADS) return;
-    if ((dx > 65 || dx < -65) && y < 110 + HERO_H) {
-        input_landing(dx < 0 ? JOY_DRIGHT : JOY_DLEFT); return;
-    }
-    if (dx > 65 || dx < -65) {
-        int first_y = hero_count() > 0 ? RAILS_TOP : 125;
-        for (int r = 0; r < g_railsN; r++) {
-            int row_y = first_y + r * RAIL_STEP + 30 - g_homeScroll;
-            if (y < row_y || y >= row_y + RCH + 52) continue;
-            if (g_railSel != r) { g_railSel = r; g_railItem = 0; }
-            input_landing(dx < 0 ? JOY_DRIGHT : JOY_DLEFT);
-            return;
+}
+
+static void touch_drag_move(const TouchInput *touch, int dx, int dy) {
+    if (!touch || !touch->dragging) return;
+    if (g_touch_surface == TOUCH_SURFACE_NONE)
+        g_touch_surface = touch_surface_at(touch->start_x, touch->start_y,
+                                           touch->axis, &g_touch_surface_index);
+    if (touch->axis == TOUCH_AXIS_HORIZONTAL)
+        touch_scroll_apply(g_touch_surface, g_touch_surface_index, -dx);
+    else touch_scroll_apply(g_touch_surface, g_touch_surface_index, -dy);
+}
+
+static void touch_drag_finish(const TouchFinish *finish) {
+    if (!finish || !finish->dragged) return;
+    // Deixe o foco do Joy-Con no item mais proximo do dedo. Isso nao confirma
+    // nem abre nada; apenas torna a transicao touch -> controle previsivel.
+    if (g_touch_surface == TOUCH_SURFACE_HOME_RAIL &&
+        g_touch_surface_index >= 0 && g_touch_surface_index < g_railsN) {
+        int count = g_rails[g_touch_surface_index].count;
+        int relative = g_rail_scroll[g_touch_surface_index] + finish->x - 54;
+        int item = relative / (RCW + RGAP);
+        if (item < 0) item = 0;
+        if (item >= count) item = count - 1;
+        if (item >= 0) { g_railSel = g_touch_surface_index; g_railItem = item; }
+    } else if (g_touch_surface == TOUCH_SURFACE_HISTORY) {
+        int count = arr_len(history_items());
+        int item = (g_history_scroll + finish->x - 54) / (HIST_CW + HIST_GAP);
+        if (item < 0) item = 0;
+        if (item >= count) item = count - 1;
+        if (item >= 0) g_history_sel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_MEDIA_LISTS) {
+        int count = store_media_list_count() + 2;
+        int item = (g_media_list_scroll + finish->x - 54) / 288;
+        if (item < 0) item = 0;
+        if (item >= count) item = count - 1;
+        if (item >= 0) g_list_sel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_SERIES_EPISODES) {
+        int count = ser_nep();
+        int item = (g_episode_scroll_x + finish->x - 54) / (RCW + RGAP);
+        if (item < 0) item = 0;
+        if (item >= count) item = count - 1;
+        if (item >= 0) g_epSel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_SAGA_ITEMS) {
+        int count = arr_len(cJSON_GetObjectItem(g_saga_detail, "items"));
+        int item = (g_saga_detail_scroll_x + finish->x - 54) / (RCW + RGAP);
+        if (item < 0) item = 0;
+        if (item >= count) item = count - 1;
+        if (item >= 0) g_saga_item_sel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_MOVIE_RELATED) {
+        movie_touch_focus_related(finish->x);
+    } else if (g_touch_surface == TOUCH_SURFACE_SEARCH_VERTICAL) {
+        int col = (finish->x - GMX) / (GCW + GGAP);
+        int row = (finish->y + g_srchScroll - 221) / (GCH + GGAP);
+        int item = row * GCOLS + col, count = srch_count_for(g_srchFilter);
+        if (col >= 0 && col < GCOLS && row >= 0 && item < count) g_srchSel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_SAGAS_VERTICAL) {
+        int col = (finish->x - 54) / 390;
+        int row = (finish->y + g_saga_scroll - 185) / 231;
+        int item = row * 3 + col, count = arr_len(saga_groups());
+        if (col >= 0 && col < 3 && row >= 0 && item < count) g_saga_sel = item;
+    } else if (g_touch_surface == TOUCH_SURFACE_LIBRARY_VERTICAL ||
+               g_touch_surface == TOUCH_SURFACE_CUSTOM_LIST_VERTICAL) {
+        int top = g_touch_surface == TOUCH_SURFACE_LIBRARY_VERTICAL ? 184 : 194;
+        int scroll = g_touch_surface == TOUCH_SURFACE_LIBRARY_VERTICAL ?
+                     g_dlScroll : g_list_grid_scroll;
+        int col = (finish->x - GMX) / (GCW + GGAP);
+        int row = (finish->y + scroll - top) / (GCH + GGAP);
+        int item = row * GCOLS + col;
+        int count = g_touch_surface == TOUCH_SURFACE_LIBRARY_VERTICAL ?
+                    g_dlgN : store_media_list_item_count(g_open_list);
+        if (col >= 0 && col < GCOLS && row >= 0 && item < count) {
+            if (g_touch_surface == TOUCH_SURFACE_LIBRARY_VERTICAL) g_dlSel = item;
+            else g_list_item_sel = item;
         }
     }
-    if (dy > 35 || dy < -35) {
-        int nh = hero_count();
-        int max_scroll = (nh > 0 ? RAILS_TOP : 125) + g_railsN * RAIL_STEP + 112 - (WIN_H - 52);
-        g_homeScroll -= dy;
-        if (g_homeScroll < 0) g_homeScroll = 0;
-        if (g_homeScroll > max_scroll && max_scroll > 0) g_homeScroll = max_scroll;
+    if (g_touch_surface == TOUCH_SURFACE_TABS && abs(finish->total_x) >= 80) {
+        enter_tab((g_tab + (finish->total_x < 0 ? 1 : NTABS - 1)) % NTABS);
+    } else if (g_touch_surface == TOUCH_SURFACE_HERO && abs(finish->total_x) >= 70) {
+        int count = hero_count();
+        if (count > 0) {
+            g_heroIdx = (g_heroIdx + (finish->total_x < 0 ? 1 : count - 1)) % count;
+            g_hero_next = SDL_GetTicks() + 6000;
+        }
+    } else if (g_touch_surface == TOUCH_SURFACE_AVATAR_PAGES &&
+               abs(finish->total_x) >= 70) {
+        // Paginar fotos com o gesto familiar de galeria, reutilizando os
+        // limites e a selecao que ja atendem L/R no seletor.
+        input_settings(finish->total_x < 0 ? JOY_R : JOY_L);
+    } else if (g_touch_surface != TOUCH_SURFACE_NONE) {
+        float velocity = finish->axis == TOUCH_AXIS_HORIZONTAL ?
+                         -finish->velocity_x : -finish->velocity_y;
+        if (velocity > 0.10f || velocity < -0.10f) {
+            g_touch_momentum.surface = g_touch_surface;
+            g_touch_momentum.index = g_touch_surface_index;
+            g_touch_momentum.velocity = velocity;
+            g_touch_momentum.tick = SDL_GetTicks();
+        }
     }
+    g_touch_surface = TOUCH_SURFACE_NONE;
+    g_touch_surface_index = -1;
+}
+
+static void touch_momentum_update(void) {
+    if (g_touch_momentum.surface == TOUCH_SURFACE_NONE) return;
+    Uint32 now = SDL_GetTicks();
+    Uint32 elapsed = now - g_touch_momentum.tick;
+    if (!elapsed) return;
+    if (elapsed > 40) elapsed = 40;
+    int delta = (int)(g_touch_momentum.velocity * (float)elapsed);
+    if (delta) touch_scroll_apply(g_touch_momentum.surface,
+                                  g_touch_momentum.index, delta);
+    float decay = 1.0f - 0.0105f * (float)elapsed;
+    if (decay < 0.55f) decay = 0.55f;
+    g_touch_momentum.velocity *= decay;
+    g_touch_momentum.tick = now;
+    if (g_touch_momentum.velocity < 0.025f && g_touch_momentum.velocity > -0.025f)
+        memset(&g_touch_momentum, 0, sizeof(g_touch_momentum));
 }
 
 // ------------------------------------------------------------- main
 int main(int argc, char **argv) {
     update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
     socketInitializeDefault();
+    // O touchscreen do Switch e uma tela absoluta, nao um mouse/touchpad.
+    // Evite a segunda corrente sintetica de eventos de mouse antes de iniciar SDL.
+    SDL_SetHintWithPriority(SDL_HINT_TOUCH_MOUSE_EVENTS, "0", SDL_HINT_OVERRIDE);
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_AUDIO);
     diag_init();
     IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG | IMG_INIT_WEBP);
@@ -4823,6 +5073,9 @@ int main(int argc, char **argv) {
     }
     SDL_InitSubSystem(SDL_INIT_JOYSTICK);
     g_joy = SDL_JoystickOpen(0);
+    SDL_EventState(SDL_MOUSEMOTION, SDL_IGNORE);
+    SDL_EventState(SDL_MOUSEBUTTONDOWN, SDL_IGNORE);
+    SDL_EventState(SDL_MOUSEBUTTONUP, SDL_IGNORE);
 
     text_init(); net_init(); store_init();
 
@@ -4842,33 +5095,45 @@ int main(int argc, char **argv) {
 
     while (appletMainLoop() && g_running) {
         SDL_Event e;
-        static SDL_FingerID touch_id = 0;
-        static int touch_active = 0, touch_x = 0, touch_y = 0;
+        static TouchInput touch = {0};
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { g_running = 0; break; }
             if (e.type == SDL_FINGERDOWN) {
-                touch_id = e.tfinger.fingerId;
-                touch_x = (int)(e.tfinger.x * WIN_W);
-                touch_y = (int)(e.tfinger.y * WIN_H);
-                touch_active = 1;
+                memset(&g_touch_momentum, 0, sizeof(g_touch_momentum));
+                g_touch_surface = TOUCH_SURFACE_NONE;
+                g_touch_surface_index = -1;
+                touch_input_begin(&touch, (int64_t)e.tfinger.fingerId,
+                                  (int)(e.tfinger.x * WIN_W),
+                                  (int)(e.tfinger.y * WIN_H), e.tfinger.timestamp);
                 continue;
             }
-            if (e.type == SDL_FINGERUP && touch_active && e.tfinger.fingerId == touch_id) {
-                int x = (int)(e.tfinger.x * WIN_W), y = (int)(e.tfinger.y * WIN_H);
-                int dx = x - touch_x, dy = y - touch_y;
-                touch_active = 0;
-                if (dx > 30 || dx < -30 || dy > 30 || dy < -30)
-                    handle_touch_swipe(touch_x, touch_y, dx, dy);
-                else handle_touch_tap(x, y);
+            if (e.type == SDL_FINGERMOTION) {
+                int dx = 0, dy = 0;
+                if (touch_input_move(&touch, (int64_t)e.tfinger.fingerId,
+                                     (int)(e.tfinger.x * WIN_W),
+                                     (int)(e.tfinger.y * WIN_H), e.tfinger.timestamp,
+                                     &dx, &dy)) touch_drag_move(&touch, dx, dy);
+                continue;
+            }
+            if (e.type == SDL_FINGERUP) {
+                TouchFinish finish = touch_input_end(
+                    &touch, (int64_t)e.tfinger.fingerId,
+                    (int)(e.tfinger.x * WIN_W),
+                    (int)(e.tfinger.y * WIN_H), e.tfinger.timestamp);
+                if (!finish.accepted) continue;
+                if (finish.tap) handle_touch_tap(finish.x, finish.y);
+                else touch_drag_finish(&finish);
                 continue;
             }
             if (e.type != SDL_JOYBUTTONDOWN) continue;
+            memset(&g_touch_momentum, 0, sizeof(g_touch_momentum));
             int b = e.jbutton.button;
             // direcoes (D-pad) sao tratadas no bloco de navegacao abaixo (junto
             // com o analogico); aqui so os demais botoes.
             if (b == JOY_UP || b == JOY_DOWN || b == JOY_DLEFT || b == JOY_DRIGHT) continue;
             handle_button(b);
         }
+        touch_momentum_update();
         // Navegacao continua: D-pad segurado OU analogico empurrado. 1a ativacao
         // na hora, depois repete (segurar rola rapido em listas longas).
         {

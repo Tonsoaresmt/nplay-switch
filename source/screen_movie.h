@@ -15,6 +15,8 @@ void draw_movie(void);
 void input_movie(int b);
 void movie_touch_action(int favorite);
 void movie_touch_related(int x, int y);
+void movie_touch_scroll_related(int delta);
+void movie_touch_focus_related(int x);
 
 // Limpa memoria do json do filme
 void close_movie_details(void);

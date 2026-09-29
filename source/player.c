@@ -1968,9 +1968,40 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         hud_base.focus = next_selected ? PUI_FOCUS_NEXT_CARD : PUI_FOCUS_PLAY;
 
         while (SDL_PollEvent(&e)) {
+            // O painel e uma superficie direta no modo portatil: tocar numa
+            // faixa deve executar a mesma operacao transacional do botao A,
+            // sem fabricar eventos de Joy-Con nem manter um cursor invisivel.
+            int touch_track_button = -1;
+            if (e.type == SDL_FINGERDOWN && track_menu) {
+                int tx = (int)(e.tfinger.x * PWIN_W);
+                int ty = (int)(e.tfinger.y * PWIN_H);
+                if (tx < 170 || tx >= 1110 || ty < 96 || ty >= 624) {
+                    touch_track_button = JOY_B;
+                } else {
+                    int touched_menu = 0;
+                    if (tx >= 210 && tx < 620) touched_menu = TRACK_MENU_AUDIO;
+                    else if (tx >= 660 && tx < 1070) touched_menu = TRACK_MENU_SUB;
+                    if (touched_menu && ty >= 234 && ty < 570) {
+                        int total = touched_menu == TRACK_MENU_AUDIO ? naud : nsub + 1;
+                        int selected = touched_menu == track_menu
+                            ? track_sel
+                            : (touched_menu == TRACK_MENU_AUDIO ? acur : scur + 1);
+                        int first = selected - 3;
+                        if (first > total - 6) first = total - 6;
+                        if (first < 0) first = 0;
+                        int row = first + (ty - 234) / 56;
+                        if (row >= 0 && row < total) {
+                            track_menu = touched_menu;
+                            track_sel = row;
+                            touch_track_button = JOY_A;
+                        }
+                    }
+                }
+            }
             if (e.type == SDL_QUIT) running = 0;
-            else if (e.type == SDL_JOYBUTTONDOWN) {
-                int b = e.jbutton.button;
+            else if (e.type == SDL_JOYBUTTONDOWN || touch_track_button >= 0) {
+                int b = touch_track_button >= 0
+                    ? touch_track_button : e.jbutton.button;
                 // Antes do primeiro quadro, so cancelar faz sentido. Pausa,
                 // menus e novo seek poderiam deixar a retomada parada.
                 if (native_hls && !have_video_frame &&

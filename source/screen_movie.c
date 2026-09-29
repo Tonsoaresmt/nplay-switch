@@ -12,11 +12,12 @@ static int g_plot_scroll = 0;
 static int g_movie_zone = 0; // 0=acoes, 1=relacionados
 static int g_related_sel = 0;
 static int g_related_panel_y = 458;
+static int g_related_scroll_x = 0;
 
 #define MOVIE_BACK_MAX 6
 typedef struct {
     cJSON *movie;
-    int movie_sel, plot_scroll, movie_zone, related_sel, panel_y;
+    int movie_sel, plot_scroll, movie_zone, related_sel, panel_y, related_scroll_x;
 } MovieBackState;
 static MovieBackState g_movie_back[MOVIE_BACK_MAX];
 static int g_movie_back_n = 0;
@@ -74,6 +75,7 @@ static void activate_movie(cJSON *movie) {
     g_movie_zone = 0;
     g_related_sel = 0;
     g_related_panel_y = 458;
+    g_related_scroll_x = 0;
     rebuild_movie_plot();
 }
 
@@ -102,6 +104,7 @@ int open_related_details_response(cJSON *response) {
     back->movie_zone = g_movie_zone;
     back->related_sel = g_related_sel;
     back->panel_y = g_related_panel_y;
+    back->related_scroll_x = g_related_scroll_x;
     g_movie = NULL;
     activate_movie(next_movie);
     return 0;
@@ -117,6 +120,7 @@ static int restore_previous_movie(void) {
     g_movie_zone = back->movie_zone;
     g_related_sel = back->related_sel;
     g_related_panel_y = back->panel_y;
+    g_related_scroll_x = back->related_scroll_x;
     memset(back, 0, sizeof(*back));
     rebuild_movie_plot();
     return 1;
@@ -131,6 +135,7 @@ void close_movie_details(void) {
     g_movie_zone = 0;
     g_related_sel = 0;
     g_related_panel_y = 458;
+    g_related_scroll_x = 0;
     g_plot_line_count = 0;
     memset(g_plot_lines, 0, sizeof(g_plot_lines));
 }
@@ -191,12 +196,17 @@ void draw_movie(void) {
         text_draw(gRen, "Titulos relacionados", 54, 433, C_TEXT, 0);
         char count[48]; snprintf(count, sizeof(count), "%d titulos", related_n);
         text_right(count, WIN_W - 54, 439, C_MUT, 2);
-        int start = g_related_sel - 1;
-        if (start < 0) start = 0;
-        if (start > related_n - 3) start = related_n > 3 ? related_n - 3 : 0;
-        for (int i = start; i < related_n && i < start + 3; i++) {
+        int max_scroll = related_n * 390 - 24 - (WIN_W - 108);
+        if (max_scroll < 0) max_scroll = 0;
+        if (g_related_scroll_x < 0) g_related_scroll_x = 0;
+        if (g_related_scroll_x > max_scroll) g_related_scroll_x = max_scroll;
+        int first = g_related_scroll_x / 390;
+        if (first > 0) first--;
+        int last = (g_related_scroll_x + WIN_W - 108) / 390 + 2;
+        if (last > related_n) last = related_n;
+        for (int i = first; i < last; i++) {
             cJSON *item = cJSON_GetArrayItem(related, i);
-            int x = 54 + (i - start) * 390;
+            int x = 54 + i * 390 - g_related_scroll_x;
             fill_rect(x, 461, 366, 198, g_movie_zone == 1 && i == g_related_sel ?
                       (SDL_Color){38, 34, 61, 255} : C_CARD);
             if (g_movie_zone == 1 && i == g_related_sel) ui_focus(x - 4, 457, 374, 206);
@@ -277,6 +287,13 @@ void input_movie(int b) {
             else toggle_fav_item(id);
         }
     }
+    if (g_movie_zone == 1 && related_n > 0) {
+        int left = g_related_sel * 390;
+        int right = left + 366;
+        if (left < g_related_scroll_x) g_related_scroll_x = left;
+        if (right > g_related_scroll_x + WIN_W - 108)
+            g_related_scroll_x = right - (WIN_W - 108);
+    }
 }
 
 void movie_touch_action(int favorite) {
@@ -290,15 +307,32 @@ void movie_touch_related(int x, int y) {
     if (!g_movie || y < 461 || y >= 659 || x < 54) return;
     cJSON *related = cJSON_GetObjectItemCaseSensitive(g_movie, "related");
     int count = arr_len(related);
-    int start = g_related_sel - 1;
-    if (start < 0) start = 0;
-    if (start > count - 3) start = count > 3 ? count - 3 : 0;
-    int col = (x - 54) / 390;
-    if (col < 0 || col >= 3 || (x - 54) % 390 >= 366) return;
-    int index = start + col;
+    int relative = x - 54 + g_related_scroll_x;
+    int index = relative / 390;
+    if (relative < 0 || relative % 390 >= 366) return;
     if (index < count) {
         g_related_sel = index;
         g_movie_zone = 1;
         input_movie(JOY_A);
     }
+}
+
+void movie_touch_scroll_related(int delta) {
+    cJSON *related = g_movie ? cJSON_GetObjectItemCaseSensitive(g_movie, "related") : NULL;
+    int count = arr_len(related);
+    int maximum = count * 390 - 24 - (WIN_W - 108);
+    if (maximum < 0) maximum = 0;
+    g_related_scroll_x += delta;
+    if (g_related_scroll_x < 0) g_related_scroll_x = 0;
+    if (g_related_scroll_x > maximum) g_related_scroll_x = maximum;
+    if (count > 0) g_movie_zone = 1;
+}
+
+void movie_touch_focus_related(int x) {
+    cJSON *related = g_movie ? cJSON_GetObjectItemCaseSensitive(g_movie, "related") : NULL;
+    int count = arr_len(related);
+    int index = (x - 54 + g_related_scroll_x) / 390;
+    if (index < 0) index = 0;
+    if (index >= count) index = count - 1;
+    if (index >= 0) { g_related_sel = index; g_movie_zone = 1; }
 }

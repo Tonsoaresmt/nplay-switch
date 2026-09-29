@@ -112,6 +112,12 @@ Assert-True ($mainSource -match 'AVATAR_PICKER_COLS 5' -and $mainSource -match '
 Assert-True ($mainSource -match 'g_screen == SC_PROFILES \? 0u : 1200u' -and $mainSource -match 'g_screen == SC_PROFILES && !g_avatar_catalog') 'Catalogo de fotos pode voltar a iniciar tarde demais no seletor de perfis.'
 Assert-True ($mainSource -match 'draw_profile_avatar_style\(active, 1184, 12, 70' -and $mainSource -match 'profile_status = \{ 1237, 65, 16, 16 \}') 'Avatar do cabecalho voltou a ficar pequeno ou sem destaque de sessao.'
 Assert-True ($mainSource -match 'draw_profile_avatar\(active, 856, 99, 86\)') 'Menu rapido voltou a esconder a foto do perfil ativo.'
+Assert-True ($mainSource -match 'SDL_HINT_TOUCH_MOUSE_EVENTS' -and $mainSource -match 'SDL_IGNORE') 'Touch pode voltar a gerar uma segunda corrente sintetica de mouse.'
+Assert-True ($mainSource -match 'SDL_FINGERMOTION' -and $mainSource -match 'touch_input_move') 'Arrastar voltou a ser interpretado somente no momento em que o dedo solta.'
+Assert-True ($mainSource -match 'touch_scroll_apply' -and $mainSource -match 'touch_momentum_update') 'Rolagem direta perdeu deslocamento continuo ou inercia.'
+Assert-True ($mainSource -notmatch 'handle_touch_swipe') 'Gestos voltaram a simular passos do direcional.'
+Assert-True ($mainSource -match 'TOUCH_SURFACE_MOVIE_RELATED' -and $mainSource -match 'TOUCH_SURFACE_AVATAR_PAGES') 'Relacionados ou seletor de fotos perderam navegacao tactil direta.'
+Assert-True ($sources -match 'touch_track_button' -and $sources -match 'touched_menu') 'Painel de audio e legendas voltou a ignorar toque direto.'
 
 $uiSource = Get-Content source/ui.c -Raw
 Assert-True ($uiSource -match 'void ui_avatar' -and $uiSource -match 'SDL_RenderGeometry') 'Avatares circulares deixaram de usar recorte acelerado pela GPU.'
@@ -184,6 +190,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao da propriedade da tela de carregamento falhou ao compilar.' }
 & .\build\test_player_loading.exe
 if ($LASTEXITCODE -ne 0) { throw 'Loader de abertura voltou a disputar a tela com o buffering.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/touch_input.c tools/test_touch_input.c -o build/test_touch_input.exe
+if ($LASTEXITCODE -ne 0) { throw 'Reconhecedor de toque falhou ao compilar.' }
+& .\build\test_touch_input.exe
+if ($LASTEXITCODE -ne 0) { throw 'Reconhecedor de toque falhou em tap, eixo, arraste ou ownership.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe
