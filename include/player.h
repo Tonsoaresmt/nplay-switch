@@ -17,7 +17,8 @@ typedef enum {
 typedef enum {
     EXIT_REASON_NATURAL,
     EXIT_REASON_USER,
-    EXIT_REASON_ERROR
+    EXIT_REASON_ERROR,
+    EXIT_REASON_NEXT_EPISODE
 } PlayerExitReason;
 
 typedef void (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec, void *userdata);

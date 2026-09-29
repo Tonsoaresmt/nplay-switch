@@ -72,6 +72,8 @@ Assert-True ($sources -match 'cid == AV_CODEC_ID_NONE' -and $sources -match 'AV_
 $subtitleHeader = Get-Content include/subtitle_queue.h -Raw
 Assert-True ($subtitleHeader -match 'SUBTITLE_QUEUE_CAP 32') 'Fila de legendas voltou a descartar cues cedo demais.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
+Assert-True ($sources -match 'EXIT_REASON_NEXT_EPISODE' -and $sources -match 'PLAYER_REQUEST_NEXT') 'HUD anuncia proximo episodio sem entregar a acao ao fluxo da serie.'
+Assert-True ($sources -match 'next_selected' -and $sources -match 'next-episode-touch') 'Proximo episodio perdeu confirmacao pelo controle ou toque.'
 
 $diagSource = Get-Content source/diag.c -Raw
 Assert-True ($diagSource -match 'sdmc:/switch/\.nplay-player-trace\.log') 'Trace detalhado do player nao persiste na raiz de switch.'
@@ -153,6 +155,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou ao compilar.' }
 & .\build\test_player_clock.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do relogio do player falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/player_next.c tools/test_player_next.c -lm -o build/test_player_next.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou ao compilar.' }
+& .\build\test_player_next.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao do cartao de proximo episodio falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe

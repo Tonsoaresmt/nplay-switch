@@ -432,7 +432,8 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
 static void mark_episode_completed_in_detail(int item_id);
 static int choose_next_episode(int series_id, int finished_item_id, int first_in_group,
-                               int allow_refresh, char *title, size_t title_cap);
+                               int allow_refresh, int explicit_next,
+                               char *title, size_t title_cap);
 static void play_episode_sequence(int item_id, int series_id, const char *title,
                                   cJSON *episode_hint);
 
@@ -1148,7 +1149,8 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
             toast(m); 
             rc = 0;
         } else {
-            rc = (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
+            rc = res.reason == EXIT_REASON_NEXT_EPISODE ? 2 :
+                 res.reason == EXIT_REASON_NATURAL ? 1 : 0;
         }
     } else {
         toast("Este titulo esta indisponivel no momento");
@@ -1380,7 +1382,7 @@ static void pump_catalog_fetch(void) {
         if (applied && jint(cJSON_GetObjectItem(g_ser, "series"), "id") == series_id) {
             char next_title[256];
             int next_id = choose_next_episode(series_id, finished_item_id,
-                                              first_in_group, 0,
+                                              first_in_group, 0, 0,
                                               next_title, sizeof(next_title));
             if (next_id > 0) play_episode_sequence(next_id, series_id, next_title, NULL);
         }
@@ -3304,7 +3306,8 @@ static void fetch_episode_context(int series_id, int finished_item_id,
 // episode, or its series detail is being loaded asynchronously. The series
 // screen remains visible after completion even when autoplay is disabled.
 static int choose_next_episode(int series_id, int finished_item_id, int first_in_group,
-                               int allow_refresh, char *title, size_t title_cap) {
+                               int allow_refresh, int explicit_next,
+                               char *title, size_t title_cap) {
     if (series_id <= 0) return 0;
     if (!g_ser || jint(ser_obj(), "id") != series_id) {
         if (allow_refresh) fetch_episode_context(series_id, finished_item_id, first_in_group);
@@ -3323,10 +3326,10 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
         g_epSel = ser_grouped() ? next.flat_index : next.episode_index;
         g_epScroll = 0;
         g_ep_plot_id = -1;
-        if (!g_pref_autoplay) return 0;
+        if (!explicit_next && !g_pref_autoplay) return 0;
         cJSON *episode = ser_ep_at(g_epSel);
         if (!episode || jint(episode, "id") != next.item_id) return 0;
-        if (!prompt_next_episode(episode, ser_obj())) return 0;
+        if (!explicit_next && !prompt_next_episode(episode, ser_obj())) return 0;
         snprintf(title, title_cap, "%s", ep_display_title(episode));
         return next.item_id;
     }
@@ -3402,9 +3405,10 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
         if (g_last_audio_index > 0) audio_hint = g_last_audio_index;
         if (g_last_audio_language[0])
             snprintf(audio_language, sizeof(audio_language), "%s", g_last_audio_language);
-        if (play_result != 1) return;
+        if (play_result != 1 && play_result != 2) return;
         char next_title[256] = {0};
         int next_id = choose_next_episode(series_id, item_id, 0, 1,
+                                          play_result == 2,
                                           next_title, sizeof(next_title));
         if (next_id <= 0) return;
         item_id = next_id;

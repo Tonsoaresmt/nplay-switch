@@ -31,6 +31,7 @@
 #include "audio_policy.h"
 #include "player_ui.h"
 #include "subtitle_queue.h"
+#include "player_next.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -56,6 +57,7 @@
 #define SEEK_HOLD_MS       550
 #define PLAYER_RESTART_SEEK  2
 #define PLAYER_RESTART_TRACK 3
+#define PLAYER_REQUEST_NEXT  4
 #define DEMUX_QUEUE_PACKETS 32
 #define DEMUX_QUEUE_BYTES (4 * 1024 * 1024)
 
@@ -443,7 +445,7 @@ static void draw_hud(SDL_Renderer *ren, const PlayerHud *base,
     hud.paused = paused;
     hud.hud_alpha = 1.0f;
     hud.pause_info_alpha = paused && scrub_target < 0 ? 1.0f : 0.0f;
-    hud.focus = PUI_FOCUS_PLAY;
+    hud.focus = base->focus;
     hud.volume = vol;
     hud.audio_current = acur;
     hud.audio_sel = acur;
@@ -461,7 +463,7 @@ static void draw_hud(SDL_Renderer *ren, const PlayerHud *base,
 
 static void draw_subtitle_overlay(SDL_Renderer *ren, const PlayerHud *base,
                                   const char *subtitle_text) {
-    if (!subtitle_text || !subtitle_text[0]) return;
+    if ((!subtitle_text || !subtitle_text[0]) && base->next_card_alpha <= 0.01f) return;
     PlayerHud hud = *base;
     hud.hud_alpha = 0;
     hud.pause_info_alpha = 0;
@@ -1324,7 +1326,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     hud_base.title = title;
     hud_base.subtitle = req->subtitle;
     hud_base.overview = req->overview;
-    hud_base.has_next = 0; // so anunciar a acao quando o controle estiver integrado
+    hud_base.has_next = req->has_next && req->next_title && req->next_title[0];
+    hud_base.next_title = req->next_title;
+    hud_base.focus = PUI_FOCUS_PLAY;
     for (unsigned i = 0; i < fmt->nb_chapters && hud_base.chapter_count < 64; i++) {
         double start = fmt->chapters[i]->start * av_q2d(fmt->chapters[i]->time_base)
                      - timeline_origin;
@@ -1462,6 +1466,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int logged_first_read = 0, logged_first_video_packet = 0;
     int logged_first_video_frame = 0, logged_first_present = 0;
     int track_menu = 0, track_sel = 0;
+    int next_selected = 0, next_requested = 0;
     int subtitle_packets = 0, subtitle_cues = 0;
     int audio_switch_pending = 0, subtitle_switch_pending = 0;
     Uint32 audio_switch_started = 0, subtitle_switch_started = 0;
@@ -1639,6 +1644,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
         }
 
+        PlayerNextUi next_ui = {0};
+        player_next_ui(hud_base.has_next, cur_pos, dur, next_selected, &next_ui);
+        hud_base.next_card_alpha = next_ui.alpha;
+        hud_base.next_card_progress = next_ui.progress;
+        hud_base.focus = next_selected ? PUI_FOCUS_NEXT_CARD : PUI_FOCUS_PLAY;
+
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN) {
@@ -1648,6 +1659,21 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (native_hls && !have_video_frame &&
                     b != JOY_B && b != JOY_MINUS) continue;
                 hud_until = SDL_GetTicks() + 4000;
+                if (next_selected) {
+                    if (b == JOY_A) {
+                        next_requested = 1;
+                        if (hb) SDL_AtomicSet(&hb->force_progress, 1);
+                        diag_player_event("controls", "next-episode",
+                                          "pos=%.2f dur=%.2f", cur_pos, dur);
+                        running = 0;
+                    } else if (b == JOY_B || b == JOY_MINUS || b == JOY_DLEFT) {
+                        next_selected = 0;
+                        hud_base.focus = PUI_FOCUS_PLAY;
+                        snprintf(notice, sizeof(notice), "Continuando este episodio");
+                        notice_until = SDL_GetTicks() + 1500;
+                    }
+                    continue;
+                }
                 if (timeline_seek) {
                     if (b == JOY_A) {
                         double target = timeline_seek_target;
@@ -1925,6 +1951,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     continue;
                 }
                 if (b == JOY_B || b == JOY_MINUS) running = 0;
+                else if (b == JOY_DRIGHT && hud_base.has_next) {
+                    next_selected = 1;
+                    hud_base.focus = PUI_FOCUS_NEXT_CARD;
+                    hud_base.next_card_alpha = 1.0f;
+                    hud_until = SDL_GetTicks() + 8000;
+                }
                 else if (b == JOY_PLUS) hud_pinned = !hud_pinned;
                 else if (b == JOY_A) {
                     paused = !paused;
@@ -2021,7 +2053,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (!have_video_frame || track_menu || timeline_seek) continue;
                 int touch_seek = 0;
                 double target = cur_pos;
-                if (!sequential_stream && dur > 1 && ty >= 580 && ty < 635 &&
+                if (hud_base.has_next && hud_base.next_card_alpha > 0.01f &&
+                    tx >= 872 && tx < 1232 && ty >= 432 && ty < 550) {
+                    next_requested = 1;
+                    if (hb) SDL_AtomicSet(&hb->force_progress, 1);
+                    diag_player_event("controls", "next-episode-touch",
+                                      "pos=%.2f dur=%.2f", cur_pos, dur);
+                    running = 0;
+                } else if (hud_base.has_next && ty >= 620 && tx >= 1195) {
+                    next_selected = 1;
+                    hud_base.focus = PUI_FOCUS_NEXT_CARD;
+                    hud_base.next_card_alpha = 1.0f;
+                    hud_until = SDL_GetTicks() + 8000;
+                } else if (!sequential_stream && dur > 1 && ty >= 580 && ty < 635 &&
                     tx >= 48 && tx <= 1128) {
                     target = dur * (tx - 48) / 1080.0;
                     touch_seek = 1;
@@ -2039,7 +2083,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     }
                     if (adev) SDL_PauseAudioDevice(adev, paused);
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
-                } else if (ty >= 620 && tx >= 1150 && (naud > 1 || nsub > 0)) {
+                } else if (ty >= 620 && tx >= 1090 && tx < 1195 &&
+                           (naud > 1 || nsub > 0)) {
                     // O HUD moderno possui uma unica acao de faixas no canto
                     // direito. O mapeamento antigo tinha dois botoes invisiveis
                     // nessa regiao e fazia o toque alternar o painel fixo.
@@ -2648,7 +2693,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                       quality.first_reads, quality.ready_first_reads,
                       quality.young_first_reads, quality.old_empty_first_reads);
     diag_player_event("player", "cleanup-end", NULL);
-    return controlled_restart ? controlled_restart :
+    return next_requested ? PLAYER_REQUEST_NEXT :
+           controlled_restart ? controlled_restart :
            playback_error ? playback_error : reached_end;
 }
 
@@ -2815,7 +2861,12 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             continue;
         }
 
-        if (rc == 1) { // Terminou naturalmente somente se houve video
+        if (rc == PLAYER_REQUEST_NEXT) {
+            result->reason = EXIT_REASON_NEXT_EPISODE;
+            result->final_state = PLAYER_FINISHED;
+            final_rc = rc;
+            break;
+        } else if (rc == 1) { // Terminou naturalmente somente se houve video
             if (!ever_presented_frame) {
                 player_error_message("Fonte terminou antes do primeiro quadro");
                 result->reason = EXIT_REASON_ERROR;

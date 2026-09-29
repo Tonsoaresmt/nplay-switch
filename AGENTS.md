@@ -1310,3 +1310,28 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente obrigatorio: teste no Switch real de filme, serie, anime e dorama,
   pausa/retomada, seeks, audio PT-BR, legendas e perda curta de Wi-Fi. Nao afirmar
   comprovacao em hardware com base apenas no build local.
+
+## Proximo episodio integrado em 29/09/2026 (0.12.27)
+
+- Worktree de continuidade: `C:/NplaySwitch/.codex-tmp/switch-0.12.18`, branch
+  `codex/switch-0.12.18`, sobre a 0.12.26 publicada.
+- O HUD possuia botao/cartao de proximo episodio, mas `source/player.c` forcava
+  `has_next=0`. Agora o player recebe o contexto real da serie, mostra o botao e
+  abre o cartao com direcional direito. `A` confirma; `B`, `-` ou esquerda
+  cancelam sem sair do video. Toque no botao/cartao tambem funciona.
+- O cartao aparece automaticamente nos 45 segundos finais mesmo com o HUD oculto.
+  A escolha retorna `EXIT_REASON_NEXT_EPISODE`, limpa a pipeline normalmente e
+  so depois entra no episodio seguinte. Autoplay desligado nao bloqueia uma
+  escolha manual e a segunda confirmacao fora do player e ignorada nesse caso.
+- Pular cedo apenas salva progresso; nao marca conclusao artificialmente. Audio
+  e idioma continuam pela politica de continuidade ja validada na 0.12.26.
+- `player_next.c` e `test_player_next.c` tornam a janela visual reproduzivel no
+  host. A suite completa e o build ARM64 com `-Werror` passaram depois do bump:
+  `Nplay.nro` tem 24.160.079 bytes e SHA-256
+  `7532c5fe37c2d3e48037ea55ea7a7b1be831bfaa50aaf1208e5534f156aa2f25`.
+- Nao foram adicionados seletor de qualidade, velocidade ou pular abertura nesta
+  rodada. Qualidade atualmente so possui contrato multiplo consistente no fluxo
+  de anime; velocidade exige tratamento de audio e pular abertura depende do
+  AniSkip externo no site. Implementar isso sem contrato nativo seria regressao.
+- Pendente obrigatorio no Switch real: serie com 2+ episodios, abrir/cancelar/
+  confirmar o cartao, autoexibicao nos 45 s finais e continuidade PT-BR/legenda.
