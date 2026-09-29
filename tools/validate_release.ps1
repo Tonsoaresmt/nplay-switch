@@ -58,6 +58,10 @@ Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language
 Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
 Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
 Assert-True ($sources -match 'audio-switch-seek' -and $sources -match 'cur_pos, 1, timeline_origin') 'Troca de audio HLS nao realinha a nova rendition no ponto atual.'
+Assert-True ($sources -match 'avformat_seek_file' -and $sources -match 'window-fallback') 'Seek perdeu a janela multi-stream ou o fallback compativel.'
+Assert-True ($sources -match 'track_operation_begin' -and $sources -match 'track_operation_end') 'Troca de faixa voltou a poder bloquear sem operacao cancelavel.'
+Assert-True ($sources -match 'operation_deadline_us' -and $sources -match '10000u') 'Troca de faixa nao possui limite de tempo no hardware.'
+Assert-True ($sources -match 'audio-switch-rollback' -and $sources -match 'subtitle-switch-rollback') 'Falha de faixa nao restaura audio/legenda anterior.'
 Assert-True ($sources -match 'cid == AV_CODEC_ID_NONE' -and $sources -match 'AV_CODEC_ID_WEBVTT' -and $sources -match 'repaired_subtitles') 'Legendas WebVTT sem probe completo podem voltar a desaparecer do painel.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
 

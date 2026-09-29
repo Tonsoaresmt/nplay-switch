@@ -323,6 +323,28 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   durante legenda, ativar/desativar faixa e forcar falha de uma rendition HLS para
   confirmar que audio/legenda anteriores continuam funcionando.
 
+## Seek, cancelamento e metricas de audio 0.12.23 em 28/09/2026
+
+- Seek usa primeiro `avformat_seek_file` com uma janela de 15 segundos, que leva
+  todos os streams ativos em conta, e preserva `av_seek_frame` como fallback para
+  fontes/demuxers que nao implementam a API mais completa.
+- Trocas HLS de audio e legenda possuem operacao propria com limite de dez segundos.
+  `B` durante essa espera cancela somente a troca, consome o evento e bloqueia nova
+  saida enquanto o botao continuar segurado; o player anterior permanece ativo.
+- Timeout, cancelamento, abertura ou seek malsucedido restauram disposicoes e
+  decoders anteriores. O diagnostico diferencia cancelamento (`op=1`) e timeout
+  (`op=2`) nos eventos `audio/subtitle-switch-*`.
+- `player_stats.txt` registra faltas reais da fila SDL depois de ela ter sido
+  abastecida, travessias acima de 1,5 segundo, falhas de troca e maior tempo de
+  troca. Configuracoes mostra esses quatro numeros no diagnostico do player.
+- Nao foi imposto um teto cego a `SDL_QueueAudio`: descartar PCM ou dormir dentro
+  do loop atual pode criar buracos e atrasar video. Medir no Switch vem antes da
+  futura fila PCM limitada/thread de audio.
+- Pendente no hardware: cancelar troca segurando B, deixar uma rendition exceder
+  dez segundos, seek em MP4/HLS, foto do diagnostico depois de uma reproducao
+  fluida e outra com engasgos, e verificar que faltas/filas altas correspondem ao
+  comportamento ouvido.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

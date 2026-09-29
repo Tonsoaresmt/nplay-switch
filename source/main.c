@@ -3750,10 +3750,14 @@ static void draw_player_diagnostics(void) {
         snprintf(summary, sizeof(summary), "Inicio: %u ms (abrir %u, faixas %u)",
                  stats.first_present_ms, stats.open_ms, stats.probe_ms);
         text_clip(summary, 252, 209, C_ACC2, 0, 776);
+        snprintf(summary, sizeof(summary), "Audio: %d faltas, %d filas altas  |  trocas: %d falhas, pior %u ms",
+                 stats.audio_underruns, stats.audio_queue_high_events,
+                 stats.track_switch_failures, stats.max_track_switch_ms);
+        text_clip(summary, 252, 232, C_ACC2, 0, 776);
     } else text_draw(gRen, "O trace abaixo sobrevive mesmo quando o aplicativo fecha.", 252, 132, C_TEXT, 0);
     if (has_boot_stage) {
         snprintf(summary, sizeof(summary), "Ultima etapa simples: %s", boot_stage);
-        text_clip(summary, 252, 236, C_ACC, 0, 776);
+        text_clip(summary, 252, 256, C_ACC, 0, 776);
     }
 
     int last_event = g_diag_player_total - g_diag_page * 6;
@@ -3761,10 +3765,10 @@ static void draw_player_diagnostics(void) {
     snprintf(summary, sizeof(summary), "ULTIMA TENTATIVA  |  eventos %d-%d de %d",
              g_diag_player_count ? first_event : 0,
              g_diag_player_count ? last_event : 0, g_diag_player_total);
-    text_draw(gRen, summary, 252, 262, C_MUT, 0);
-    if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 288, C_TEXT, 0);
+    text_draw(gRen, summary, 252, 280, C_MUT, 0);
+    if (g_diag_player_count == 0) text_draw(gRen, "Nenhuma tentativa registrada nesta instalacao.", 252, 304, C_TEXT, 0);
     for (int i = 0; i < g_diag_player_count; i++)
-        text_clip(g_diag_player_lines[i], 252, 288 + i * 24,
+        text_clip(g_diag_player_lines[i], 252, 304 + i * 24,
                   i == g_diag_player_count - 1 ? C_ACC : C_TEXT, 0, 776);
 
     text_draw(gRen, "ULTIMAS REQUISICOES (codigo / tempo / tamanho)", 252, 446, C_MUT, 0);

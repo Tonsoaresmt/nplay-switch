@@ -497,19 +497,26 @@ void store_save_player_stats(int width, int height, int decoded_frames,
                              unsigned worst_present_ms, int read_gaps,
                              int sync_gaps, int other_gaps,
                              unsigned open_ms, unsigned probe_ms,
-                             unsigned first_present_ms) {
+                             unsigned first_present_ms,
+                             int audio_underruns, int audio_queue_high_events,
+                             int track_switch_failures,
+                             unsigned max_track_switch_ms) {
     FILE *f = fopen(PLAYER_STATS_F, "wb");
     if (!f) return;
     fprintf(f, "resolution=%dx%d\nhardware_decode=%d\ndecoded_frames=%d\ndropped_frames=%d\n"
                "buffering_events=%d\nmax_audio_queue_bytes=%u\nerror=%d\n"
                "slow_reads=%d\nworst_read_ms=%u\npresent_gaps=%d\nworst_present_ms=%u\n"
                "read_gaps=%d\nsync_gaps=%d\nother_gaps=%d\n"
-               "open_ms=%u\nprobe_ms=%u\nfirst_present_ms=%u\n",
+               "open_ms=%u\nprobe_ms=%u\nfirst_present_ms=%u\n"
+               "audio_underruns=%d\naudio_queue_high_events=%d\n"
+               "track_switch_failures=%d\nmax_track_switch_ms=%u\n",
             width, height, hardware_decode, decoded_frames, dropped_frames,
             buffering_events, max_audio_bytes, playback_error,
             slow_reads, worst_read_ms, present_gaps, worst_present_ms,
             read_gaps, sync_gaps, other_gaps,
-            open_ms, probe_ms, first_present_ms);
+            open_ms, probe_ms, first_present_ms,
+            audio_underruns, audio_queue_high_events,
+            track_switch_failures, max_track_switch_ms);
     fclose(f);
 }
 
@@ -537,6 +544,10 @@ int store_load_player_stats(struct player_stats *out) {
         else if (sscanf(line, "open_ms=%u", &out->open_ms) == 1) { }
         else if (sscanf(line, "probe_ms=%u", &out->probe_ms) == 1) { }
         else if (sscanf(line, "first_present_ms=%u", &out->first_present_ms) == 1) { }
+        else if (sscanf(line, "audio_underruns=%d", &out->audio_underruns) == 1) { }
+        else if (sscanf(line, "audio_queue_high_events=%d", &out->audio_queue_high_events) == 1) { }
+        else if (sscanf(line, "track_switch_failures=%d", &out->track_switch_failures) == 1) { }
+        else if (sscanf(line, "max_track_switch_ms=%u", &out->max_track_switch_ms) == 1) { }
         else if (sscanf(line, "error=%d", &out->playback_error) == 1) found_result = 1;
     }
     fclose(f);

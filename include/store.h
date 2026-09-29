@@ -29,7 +29,10 @@ void store_save_player_stats(int width, int height, int decoded_frames,
                              unsigned worst_present_ms, int read_gaps,
                              int sync_gaps, int other_gaps,
                              unsigned open_ms, unsigned probe_ms,
-                             unsigned first_present_ms);
+                             unsigned first_present_ms,
+                             int audio_underruns, int audio_queue_high_events,
+                             int track_switch_failures,
+                             unsigned max_track_switch_ms);
 struct player_stats {
     int width, height, decoded_frames, dropped_frames, buffering_events;
     unsigned max_audio_bytes;
@@ -38,6 +41,8 @@ struct player_stats {
     unsigned worst_read_ms, worst_present_ms;
     int read_gaps, sync_gaps, other_gaps;
     unsigned open_ms, probe_ms, first_present_ms;
+    int audio_underruns, audio_queue_high_events, track_switch_failures;
+    unsigned max_track_switch_ms;
 };
 int store_load_player_stats(struct player_stats *out);
 
