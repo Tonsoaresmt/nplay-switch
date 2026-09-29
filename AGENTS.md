@@ -282,6 +282,27 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   Ainda e obrigatorio testar em hardware filme R2 legado, Legendado, dois
   episodios, troca manual, pausa, painel, timeline e queda de rede.
 
+## Pipoca, troca de faixas e contexto 0.12.21 em 28/09/2026
+
+- O loader modular voltou a desenhar o atlas animado da pipoca. O anel ficou
+  pequeno e secundario; nao substituir novamente a identidade por uma letra.
+- A troca de audio HLS agora ativa a rendition e faz um unico seek para tras no
+  ponto atual. O callback de interrupcao anima `Trocando audio` durante I/O e B
+  continua cancelando. Eventos `audio-switch-*` medem o tempo real no hardware.
+- A ativacao de legenda HLS usa o mesmo realinhamento. Streams de legenda R2 que
+  ficaram com codec `NONE` por causa do probe curto sao tratados como WebVTT,
+  conforme o contrato do empacotador, e deixam de desaparecer do painel.
+- Opcoes repetidas de legenda recebem indice visivel. O Switch continua limitado
+  a 16 faixas de audio e 16 de legenda para manter uso previsivel de memoria.
+- Episodios abertos pela Home/Historico levam seu JSON como pista. Se o detalhe
+  da serie nao estiver carregado, o HUD ainda usa serie, T/E, titulo e sinopse;
+  `/stream` fornece T/E como ultimo fallback. `g_ser` so e reutilizado quando o
+  `series_id` corresponde, evitando idioma/metadado herdado de outra serie.
+- Validacao local: suite limpa 0.12.21 sem erros/avisos, contratos de site/API,
+  relogio, audio, episodios, remux e simbolos aprovados. No Switch, testar troca
+  de audio no meio de R2 e um master com
+  varias legendas; a maquina local nao substitui essa confirmacao de hardware.
+
 ## Proximos candidatos
 
 - Medir no hardware o limite ideal de texturas de capas (atual: 160).

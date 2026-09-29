@@ -99,6 +99,8 @@ typedef struct {
     Uint32 last_render_tick;
     const char *detail;
     const char *title;
+    int force_loading;
+    const char *headline;
 } PlayerOpenDeadline;
 
 static int player_open_interrupted(void *userdata) {
@@ -140,11 +142,13 @@ static int player_open_interrupted(void *userdata) {
     // avformat_open_input, find_stream_info e o seek de retomada bloqueiam
     // o loop normal. O interrupt callback roda nessas esperas; redesenhe
     // a pipoca aqui para que ela continue animada ate o primeiro quadro.
-    if (on_render_thread && watch->renderer && !g_player_presented_frame &&
+    if (on_render_thread && watch->renderer &&
+        (!g_player_presented_frame || watch->force_loading) &&
         now - watch->last_render_tick >= 80u) {
         SDL_SetRenderDrawColor(watch->renderer, PC_DARK.r, PC_DARK.g, PC_DARK.b, 255);
         SDL_RenderClear(watch->renderer);
-        pui_draw_loading(watch->renderer, watch->title, "Preparando video",
+        pui_draw_loading(watch->renderer, watch->title,
+                         watch->headline ? watch->headline : "Preparando video",
                          watch->detail ? watch->detail : "Conectando...", now, 0);
         SDL_RenderPresent(watch->renderer);
         watch->last_render_tick = now;
@@ -321,9 +325,13 @@ static void modern_track_labels(AVFormatContext *fmt, const int *aidxs, int naud
         AVStream *stream = fmt->streams[sidxs[i]];
         AVDictionaryEntry *track_title = av_dict_get(stream->metadata, "title", NULL, 0);
         const char *norm = stream_norm(fmt, sidxs[i]);
-        snprintf(sub_names[i + 1], 96, "%s",
-                 track_title && track_title->value && track_title->value[0]
-                    ? track_title->value : lang_name(norm));
+        const char *label = track_title && track_title->value && track_title->value[0]
+            ? track_title->value : lang_name(norm);
+        // O master pode oferecer varias renditions com o mesmo idioma (normal,
+        // SDH, forced, provedores distintos). Numere-as para que nenhuma pareca
+        // uma duplicata sem funcao no painel do controle.
+        if (nsub > 1) snprintf(sub_names[i + 1], 96, "%.64s  |  %d/%d", label, i + 1, nsub);
+        else snprintf(sub_names[i + 1], 96, "%s", label);
         hud->sub_names[i + 1] = sub_names[i + 1];
     }
 }
@@ -420,11 +428,12 @@ static int apply_player_seek(AVFormatContext *fmt, int video_index, int is_hls,
                              AVCodecContext *vctx,
                              AVCodecContext *actx, AVCodecContext *sctx,
                              SDL_AudioDeviceID adev, double target,
+                             int force_backward,
                              double timeline_origin, double *wall_start,
                              double *audio_clock, double *cur_pos,
                              double *last_ac, double *last_ac_wall,
                              char *sub_text, double *sub_end) {
-    int flags = target < *cur_pos ? AVSEEK_FLAG_BACKWARD : 0;
+    int flags = force_backward || target < *cur_pos ? AVSEEK_FLAG_BACKWARD : 0;
     if (seek_video_time(fmt, video_index, is_hls, target,
                         timeline_origin, flags) < 0)
         return -1;
@@ -582,9 +591,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // HLS precisa abrir a playlist e depois seus sub-manifestos/segmentos.
     int native_hls = remote && is_hls;
     PlayerOpenDeadline open_watch = {
-        av_gettime_relative() + 30000000LL, joy, 0, 0,
-        SDL_GetTicks(), SDL_GetTicks(), "abrindo", native_hls,
-        ren, SDL_ThreadID(), SDL_GetTicks(), "Conectando...", title
+        .deadline_us = av_gettime_relative() + 30000000LL,
+        .joy = joy,
+        .started_tick = SDL_GetTicks(),
+        .last_progress_tick = SDL_GetTicks(),
+        .phase = "abrindo",
+        .native_hls = native_hls,
+        .renderer = ren,
+        .render_thread = SDL_ThreadID(),
+        .last_render_tick = SDL_GetTicks(),
+        .detail = "Conectando...",
+        .title = title
     };
     nplay_curl_avio_set_abort_check(native_hls ? player_open_interrupted : NULL,
                                     native_hls ? &open_watch : NULL);
@@ -794,16 +811,30 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         player_error_text("localizar faixa de video", vidx); avformat_close_input(&fmt); nplay_curl_avio_close(avio); return -3;
     }
 
-    // enumera faixas de AUDIO e de LEGENDA (so legendas de texto: SRT/ASS/mov_text)
+    // Enumera audio e legendas de texto. Na abertura rapida do HLS R2, o master
+    // ja criou as AVStreams de legenda, mas o codec pode continuar NONE porque
+    // nao abrimos cada rendition durante o probe. O contrato do empacotador e
+    // WebVTT; complete apenas esse caso conhecido em vez de esconder as faixas.
     int aidxs[16], naud = 0, sidxs[16], nsub = 0;
+    int repaired_subtitles = 0, unsupported_subtitles = 0;
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
         int t = fmt->streams[i]->codecpar->codec_type, cid = fmt->streams[i]->codecpar->codec_id;
+        if (t == AVMEDIA_TYPE_SUBTITLE && cid == AV_CODEC_ID_NONE &&
+            native_hls && req->delivery == DELIVERY_R2) {
+            fmt->streams[i]->codecpar->codec_id = AV_CODEC_ID_WEBVTT;
+            cid = AV_CODEC_ID_WEBVTT;
+            repaired_subtitles++;
+        }
         if (t == AVMEDIA_TYPE_AUDIO && naud < 16) aidxs[naud++] = (int)i;
         else if (t == AVMEDIA_TYPE_SUBTITLE && nsub < 16 &&
                  (cid == AV_CODEC_ID_SUBRIP || cid == AV_CODEC_ID_ASS || cid == AV_CODEC_ID_SSA ||
                   cid == AV_CODEC_ID_MOV_TEXT || cid == AV_CODEC_ID_TEXT || cid == AV_CODEC_ID_WEBVTT))
             sidxs[nsub++] = (int)i;
+        else if (t == AVMEDIA_TYPE_SUBTITLE) unsupported_subtitles++;
     }
+    diag_player_event("streams", "enumerated",
+                      "total=%u audio=%d subtitle=%d repaired=%d unsupported=%d",
+                      fmt->nb_streams, naud, nsub, repaired_subtitles, unsupported_subtitles);
     int acur = 0, best_stream = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     int best_audio = 0;
     for (int i = 0; i < naud; i++) if (aidxs[i] == best_stream) best_audio = i;
@@ -1022,6 +1053,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int logged_first_read = 0, logged_first_video_packet = 0;
     int logged_first_video_frame = 0, logged_first_present = 0;
     int track_menu = 0, track_sel = 0;
+    int audio_switch_pending = 0, subtitle_switch_pending = 0;
+    Uint32 audio_switch_started = 0, subtitle_switch_started = 0;
     int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
     int seek_arm_dir = 0;
     double timeline_seek_from = 0, timeline_seek_target = 0;
@@ -1155,7 +1188,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (timeline_seek) {
                     if (b == JOY_A) {
                         if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx, adev,
-                                              timeline_seek_target, timeline_origin,
+                                              timeline_seek_target, 0, timeline_origin,
                                               &wall_start, &audio_clock, &cur_pos,
                                               &last_ac, &last_ac_wall, sub_text, &sub_end) == 0) {
                             last_present_tick = 0;
@@ -1218,6 +1251,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 if (!adev) {
                                     snprintf(notice, sizeof(notice), "Saida de audio indisponivel");
                                 } else if (open_audio_dec(fmt, next_idx, &actx, &swr, OCH, ORATE) == 0) {
+                                    Uint32 switch_started = SDL_GetTicks();
+                                    diag_player_event("tracks", "audio-switch-begin",
+                                                      "from=%d to=%d pos=%.2f", aidx, next_idx, cur_pos);
                                     if (aidx >= 0) fmt->streams[aidx]->discard = AVDISCARD_ALL;
                                     acur = track_sel; aidx = next_idx;
                                     fmt->streams[aidx]->discard = AVDISCARD_DEFAULT;
@@ -1227,6 +1263,35 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                              selected_norm[0] ? selected_norm : "und");
                                     atb = fmt->streams[aidx]->time_base;
                                     if (adev) SDL_ClearQueuedAudio(adev);
+                                    if (native_hls) {
+                                        // A nova rendition nao compartilha o cursor da faixa
+                                        // anterior. Sem este seek ela pode baixar segmentos
+                                        // antigos ate alcancar o video, aparentando travamento.
+                                        open_watch.force_loading = 1;
+                                        open_watch.headline = "Trocando audio";
+                                        open_watch.detail = "Sincronizando no ponto atual...  |  B para cancelar";
+                                        open_watch.last_render_tick = 0;
+                                        pui_draw_loading(ren, title, open_watch.headline,
+                                                         open_watch.detail, SDL_GetTicks(), 0);
+                                        SDL_RenderPresent(ren);
+                                        int sync_rc = apply_player_seek(fmt, vidx, native_hls,
+                                                                        vctx, actx, sctx, adev,
+                                                                        cur_pos, 1, timeline_origin,
+                                                                        &wall_start, &audio_clock,
+                                                                        &cur_pos, &last_ac, &last_ac_wall,
+                                                                        sub_text, &sub_end);
+                                        diag_player_event("tracks", "audio-switch-seek",
+                                                          "rc=%d ms=%u pos=%.2f", sync_rc,
+                                                          SDL_GetTicks() - switch_started, cur_pos);
+                                        if (sync_rc == 0) {
+                                            audio_switch_pending = 1;
+                                            audio_switch_started = SDL_GetTicks();
+                                            last_present_tick = 0;
+                                        } else {
+                                            open_watch.force_loading = 0;
+                                            open_watch.headline = NULL;
+                                        }
+                                    }
                                     audio_clock = cur_pos; audio_skip_until = cur_pos - 0.25;
                                     audio_skip_deadline = SDL_GetTicks() + 5000; last_ac = -1;
                                     last_ac_wall = av_gettime_relative() / 1000000.0;
@@ -1243,6 +1308,37 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 if (scur >= 0) fmt->streams[sidxs[scur]]->discard = AVDISCARD_ALL;
                                 if (next >= 0) fmt->streams[sidxs[next]]->discard = AVDISCARD_DEFAULT;
                                 scur = next; sub_text[0] = 0; sub_end = 0;
+                                if (native_hls && scur >= 0) {
+                                    subtitle_switch_started = SDL_GetTicks();
+                                    open_watch.force_loading = 1;
+                                    open_watch.headline = "Ativando legendas";
+                                    open_watch.detail = "Sincronizando no ponto atual...  |  B para cancelar";
+                                    open_watch.last_render_tick = 0;
+                                    pui_draw_loading(ren, title, open_watch.headline,
+                                                     open_watch.detail, SDL_GetTicks(), 0);
+                                    SDL_RenderPresent(ren);
+                                    int sync_rc = apply_player_seek(fmt, vidx, native_hls,
+                                                                    vctx, actx, sctx, adev,
+                                                                    cur_pos, 1, timeline_origin,
+                                                                    &wall_start, &audio_clock,
+                                                                    &cur_pos, &last_ac, &last_ac_wall,
+                                                                    sub_text, &sub_end);
+                                    diag_player_event("tracks", "subtitle-switch-seek",
+                                                      "rc=%d stream=%d ms=%u", sync_rc,
+                                                      sidxs[scur], SDL_GetTicks() - subtitle_switch_started);
+                                    subtitle_switch_pending = sync_rc == 0;
+                                    if (!subtitle_switch_pending) {
+                                        open_watch.force_loading = 0;
+                                        open_watch.headline = NULL;
+                                    }
+                                    last_present_tick = 0;
+                                } else if (scur < 0) {
+                                    subtitle_switch_pending = 0;
+                                    if (!audio_switch_pending) {
+                                        open_watch.force_loading = 0;
+                                        open_watch.headline = NULL;
+                                    }
+                                }
                                 if (scur >= 0) {
                                     char lang[48]; format_language(stream_norm(fmt, sidxs[scur]), lang, sizeof(lang));
                                     snprintf(notice, sizeof(notice), "Legenda %d/%d  %s", scur + 1, nsub, lang);
@@ -1296,7 +1392,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (t < 0) t = 0;
                     if (dur > 0 && t > dur - 1) t = dur - 1;
                     if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx, adev, t,
-                                          timeline_origin, &wall_start, &audio_clock,
+                                          0, timeline_origin, &wall_start, &audio_clock,
                                           &cur_pos, &last_ac, &last_ac_wall,
                                           sub_text, &sub_end) == 0) {
                         last_present_tick = 0;
@@ -1359,7 +1455,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (target < 0) target = 0;
                     if (target > dur - 1) target = dur - 1;
                     if (apply_player_seek(fmt, vidx, native_hls, vctx, actx, sctx,
-                                          adev, target, timeline_origin, &wall_start,
+                                          adev, target, 0, timeline_origin, &wall_start,
                                           &audio_clock, &cur_pos, &last_ac,
                                           &last_ac_wall, sub_text, &sub_end) == 0) {
                         last_present_tick = 0;
@@ -1499,7 +1595,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 char dots[48];
                 int ndots = (int)((now_ticks / 350) % 3) + 1;
                 Uint32 stalled = now_ticks - buffering_since;
-                if (stalled < 8000) snprintf(dots, sizeof(dots), "Aguardando dados%.*s", ndots, "...");
+                if (audio_switch_pending)
+                    snprintf(dots, sizeof(dots), "Sincronizando audio%.*s", ndots, "...");
+                else if (subtitle_switch_pending)
+                    snprintf(dots, sizeof(dots), "Ativando legendas%.*s", ndots, "...");
+                else if (stalled < 8000) snprintf(dots, sizeof(dots), "Aguardando dados%.*s", ndots, "...");
                 else if (stalled < 30000) snprintf(dots, sizeof(dots), "Tentando reconectar%.*s", ndots, "...");
                 else snprintf(dots, sizeof(dots), "Conexao lenta  |  B para voltar");
                 draw_hud(ren, &hud_base, cur_pos, dur, 0, vol,
@@ -1580,6 +1680,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                              SDL_GetQueuedAudioSize(adev) < (unsigned)(bps * 0.35));
                         if (n > 0 && adev && queue_during_resume) {
                             SDL_QueueAudio(adev, audio_buf, n * OCH * 2);
+                            if (audio_switch_pending) {
+                                audio_switch_pending = 0;
+                                if (!subtitle_switch_pending) {
+                                    open_watch.force_loading = 0;
+                                    open_watch.headline = NULL;
+                                }
+                                diag_player_event("tracks", "audio-switch-ready",
+                                                  "ms=%u pts=%.2f queue=%u",
+                                                  SDL_GetTicks() - audio_switch_started,
+                                                  audio_pts, SDL_GetQueuedAudioSize(adev));
+                            }
                             if (audio_pts >= 0) audio_clock = audio_pts + n / (double)ORATE;
                             else audio_clock += n / (double)ORATE;
                             unsigned queued = SDL_GetQueuedAudioSize(adev);
@@ -1724,6 +1835,16 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                u->data[1], u->linesize[1], u->data[2], u->linesize[2]);
                     if (upload_rc < 0) { playback_error = -4; running = 0; break; }
                     have_video_frame = 1;
+                    if (subtitle_switch_pending) {
+                        subtitle_switch_pending = 0;
+                        if (!audio_switch_pending) {
+                            open_watch.force_loading = 0;
+                            open_watch.headline = NULL;
+                        }
+                        diag_player_event("tracks", "subtitle-switch-ready",
+                                          "ms=%u pos=%.2f",
+                                          SDL_GetTicks() - subtitle_switch_started, cur_pos);
+                    }
                     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
                     SDL_RenderCopy(ren, tex, NULL, &dst);
                     if (scur >= 0 && sub_text[0] && cur_pos < sub_end) draw_sub(ren, sub_text);

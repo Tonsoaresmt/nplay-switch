@@ -4,6 +4,7 @@
 // imagens extras no NRO.
 #include "player_ui.h"
 #include "text.h"
+#include "ui.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -674,19 +675,20 @@ void pui_draw_loading(SDL_Renderer *r, const char *title, const char *headline,
     SDL_SetRenderDrawColor(r, 8, 10, 15, 255);
     SDL_RenderClear(r);
     vgrad(r, 0, 0, PUI_W, PUI_H, (SDL_Color){ 30, 24, 60, 255 }, 0.55f, 0.0f);
-    float cx = PUI_W / 2.0f, cy = 286;
+    float cx = PUI_W / 2.0f, cy = 350;
     float spin = (now % 1400) / 1400.0f * 2 * PI_F;
     SDL_Color accent = warning ? K_ROSE : K_ACC;
-    arc(r, cx, cy, 52, 7, 0, 2 * PI_F, K_WHITE, 0.10f);
-    arc(r, cx, cy, 52, 7, spin, 2.0f, accent, 1.0f);
-    arc(r, cx, cy, 38, 3, -spin * 1.3f, 1.2f, K_ACC2, 0.85f);
-    text_center_a(r, "N", (int)cx, (int)cy - 24, accent, ST_DISPLAY, 1.0f);
-    text_center_a(r, headline && headline[0] ? headline : "Preparando", (int)cx, 370, K_WHITE, ST_TITLE, 1.0f);
+    // A pipoca e a identidade da espera do Nplay. O atlas e animado e fica
+    // embutido no NRO, portanto nao depende de rede nem disputa memoria com capas.
+    ui_popcorn_draw(r, (int)cx, 132, 188);
+    arc(r, cx, cy, 24, 4, 0, 2 * PI_F, K_WHITE, 0.10f);
+    arc(r, cx, cy, 24, 4, spin, 2.0f, accent, 1.0f);
+    text_center_a(r, headline && headline[0] ? headline : "Preparando", (int)cx, 396, K_WHITE, ST_TITLE, 1.0f);
     if (title && title[0]) {
         int w = text_w(r, title, ST_NORMAL);
         if (w > 900) w = 900;
-        text_a(r, title, (int)cx - w / 2, 416, K_MUTED, ST_NORMAL, 1.0f, 900);
+        text_a(r, title, (int)cx - w / 2, 442, K_MUTED, ST_NORMAL, 1.0f, 900);
     }
-    if (detail && detail[0]) text_center_a(r, detail, (int)cx, 456, K_DIM, ST_SMALL, 1.0f);
+    if (detail && detail[0]) text_center_a(r, detail, (int)cx, 482, K_DIM, ST_SMALL, 1.0f);
     text_center_a(r, "B  Cancelar", (int)cx, 652, K_DIM, ST_SMALL, 1.0f);
 }

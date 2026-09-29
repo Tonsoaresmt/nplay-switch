@@ -433,7 +433,8 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
 static void mark_episode_completed_in_detail(int item_id);
 static int choose_next_episode(int series_id, int finished_item_id, int first_in_group,
                                int allow_refresh, char *title, size_t title_cap);
-static void play_episode_sequence(int item_id, int series_id, const char *title);
+static void play_episode_sequence(int item_id, int series_id, const char *title,
+                                  cJSON *episode_hint);
 
 // Detalhes sao modais sobre a tela que os abriu. Pesquisa, landing e listas
 // permanecem em memoria; voltar apenas restaura a tela anterior e sua selecao.
@@ -1032,6 +1033,12 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
     int resolved = resolve_open_with_animation(itemId, stable_title, &src);
     if (resolved == -2) return 0;
     if (resolved < 0) return 0;
+    // Itens de episodio abertos pela Home/Historico nem sempre carregam antes o
+    // detalhe completo da serie. A resposta de /stream ainda conhece temporada
+    // e episodio; use-a como ultimo fallback para o HUD nao ficar vazio.
+    if (!stable_subtitle[0] && (src.season > 0 || src.episode > 0))
+        snprintf(stable_subtitle, sizeof(stable_subtitle), "T%d E%d",
+                 src.season > 0 ? src.season : 1, src.episode);
     
     int rc = 0;
     if (src.container[0] && !strcmp(src.container, "torrent")) {
@@ -1365,7 +1372,7 @@ static void pump_catalog_fetch(void) {
             int next_id = choose_next_episode(series_id, finished_item_id,
                                               first_in_group, 0,
                                               next_title, sizeof(next_title));
-            if (next_id > 0) play_episode_sequence(next_id, series_id, next_title);
+            if (next_id > 0) play_episode_sequence(next_id, series_id, next_title, NULL);
         }
     }
 }
@@ -1389,7 +1396,7 @@ static void open_item(cJSON *item, int is_series) {
     const char *kind = jstr(item, "kind");
     if (kind && (!strcmp(kind, "live") || !strcmp(kind, "episode"))) {
         if (!strcmp(kind, "episode"))
-            play_episode_sequence(id, jint(item, "series_id"), jstr(item, "title"));
+            play_episode_sequence(id, jint(item, "series_id"), jstr(item, "title"), item);
         else resolve_and_play(id, jstr(item, "title"));
         return;
     }
@@ -3313,44 +3320,63 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
     return 0;
 }
 
-static void play_episode_sequence(int item_id, int series_id, const char *title) {
+static void play_episode_sequence(int item_id, int series_id, const char *title,
+                                  cJSON *episode_hint) {
     if (item_id <= 0) return;
-    char current_title[256];
-    snprintf(current_title, sizeof(current_title), "%s", title && title[0] ? title : "Episodio");
+    char series_title[256];
+    int matching_series = g_ser && ser_obj() && jint(ser_obj(), "id") == series_id;
+    const char *known_series_title = matching_series ? jstr(ser_obj(), "title") : NULL;
+    if ((!known_series_title || !known_series_title[0]) && episode_hint)
+        known_series_title = jstr(episode_hint, "series_title");
+    snprintf(series_title, sizeof(series_title), "%s",
+             known_series_title && known_series_title[0] ? known_series_title :
+             (title && title[0] ? title : "Serie"));
     int audio_hint = 0;
     char audio_language[8] = "";
     while (g_running && item_id > 0) {
         int version_pref = -1;
         cJSON *audio_version;
-        cJSON_ArrayForEach(audio_version, ser_audio()) {
-            if (!cJSON_IsTrue(cJSON_GetObjectItem(audio_version, "current"))) continue;
-            version_pref = audio_version_preference(jstr(audio_version, "language"),
-                                                    jstr(audio_version, "label"));
-            break;
+        if (matching_series) {
+            cJSON_ArrayForEach(audio_version, ser_audio()) {
+                if (!cJSON_IsTrue(cJSON_GetObjectItem(audio_version, "current"))) continue;
+                version_pref = audio_version_preference(jstr(audio_version, "language"),
+                                                        jstr(audio_version, "label"));
+                break;
+            }
         }
         g_next_audio_pref_override = version_pref;
         g_next_audio_hint = audio_hint;
         snprintf(g_next_audio_language, sizeof(g_next_audio_language), "%s", audio_language);
         cJSON *current_episode = NULL, *next_episode = NULL;
-        for (int i = 0; i < ser_nep(); i++) {
-            cJSON *candidate = ser_ep_at(i);
-            if (candidate && jint(candidate, "id") == item_id) {
-                current_episode = candidate;
-                next_episode = i + 1 < ser_nep() ? ser_ep_at(i + 1) : NULL;
-                break;
+        if (matching_series) {
+            for (int i = 0; i < ser_nep(); i++) {
+                cJSON *candidate = ser_ep_at(i);
+                if (candidate && jint(candidate, "id") == item_id) {
+                    current_episode = candidate;
+                    next_episode = i + 1 < ser_nep() ? ser_ep_at(i + 1) : NULL;
+                    break;
+                }
             }
         }
+        if (!current_episode && episode_hint &&
+            (jint(episode_hint, "id") == item_id || jint(episode_hint, "item_id") == item_id))
+            current_episode = episode_hint;
         char episode_context[256] = "", next_context[256] = "";
         const char *overview = NULL;
         if (current_episode) {
             int season = jint(current_episode, "season"), episode = jint(current_episode, "episode");
-            snprintf(episode_context, sizeof(episode_context), "T%d E%d  |  %s",
-                     season, episode, ep_display_title(current_episode));
+            const char *episode_title = ep_display_title(current_episode);
+            if (season > 0 || episode > 0)
+                snprintf(episode_context, sizeof(episode_context), "T%d E%d  |  %s",
+                         season > 0 ? season : 1, episode, episode_title);
+            else if (episode_title && episode_title[0] && strcmp(episode_title, series_title))
+                snprintf(episode_context, sizeof(episode_context), "%s", episode_title);
             overview = jstr(current_episode, "ep_overview");
-            if (!overview || !overview[0]) overview = jstr(ser_obj(), "plot");
+            if (!overview || !overview[0]) overview = jstr(current_episode, "overview");
+            if ((!overview || !overview[0]) && matching_series) overview = jstr(ser_obj(), "plot");
         }
         if (next_episode) snprintf(next_context, sizeof(next_context), "%s", ep_display_title(next_episode));
-        int play_result = resolve_and_play_details(item_id, current_title,
+        int play_result = resolve_and_play_details(item_id, series_title,
                                                    episode_context[0] ? episode_context : NULL,
                                                    overview, next_context,
                                                    next_episode != NULL);
@@ -3366,7 +3392,8 @@ static void play_episode_sequence(int item_id, int series_id, const char *title)
                                           next_title, sizeof(next_title));
         if (next_id <= 0) return;
         item_id = next_id;
-        snprintf(current_title, sizeof(current_title), "%s", next_title);
+        episode_hint = NULL;
+        matching_series = g_ser && ser_obj() && jint(ser_obj(), "id") == series_id;
     }
 }
 static void input_series(int b) {
@@ -3400,7 +3427,7 @@ static void input_series(int b) {
     else if (b == JOY_A) {
         cJSON *ep = ser_ep_at(g_epSel);
         if (ep) play_episode_sequence(jint(ep, "id"), jint(ser_obj(), "id"),
-                                      ep_display_title(ep));
+                                      ep_display_title(ep), ep);
     }
 }
 static void play_history_item(cJSON *item) {
@@ -3409,7 +3436,7 @@ static void play_history_item(cJSON *item) {
     const char *kind = jstr(item, "kind");
     if (kind && !strcmp(kind, "episode")) {
         detail_capture_origin();
-        play_episode_sequence(item_id, jint(item, "series_id"), jstr(item, "title"));
+        play_episode_sequence(item_id, jint(item, "series_id"), jstr(item, "title"), item);
     } else resolve_and_play(item_id, jstr(item, "title"));
 }
 static void input_downloads(int b) {

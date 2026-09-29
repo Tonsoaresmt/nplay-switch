@@ -57,6 +57,8 @@ Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de
 Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'
 Assert-True ($sources -match 'audio_skip_until = cur_pos - 0\.25') 'Troca de audio pode voltar a tocar amostras anteriores ao ponto atual.'
 Assert-True ($sources -match 'fmt->streams\[aidx\]->discard = AVDISCARD_DEFAULT') 'Faixa HLS escolhida nao e reativada na troca de audio.'
+Assert-True ($sources -match 'audio-switch-seek' -and $sources -match 'cur_pos, 1, timeline_origin') 'Troca de audio HLS nao realinha a nova rendition no ponto atual.'
+Assert-True ($sources -match 'cid == AV_CODEC_ID_NONE' -and $sources -match 'AV_CODEC_ID_WEBVTT' -and $sources -match 'repaired_subtitles') 'Legendas WebVTT sem probe completo podem voltar a desaparecer do painel.'
 Assert-True ($sources -match 'left > 8 \? 8 : left') 'Espera de video voltou a bloquear comandos por centenas de milissegundos.'
 
 $diagSource = Get-Content source/diag.c -Raw
@@ -81,6 +83,7 @@ Assert-True ($mainSource -match 'req\.audio_pref = g_next_audio_pref_override >=
 Assert-True ($mainSource -match 'g_next_audio_hint = audio_hint') 'Episodio seguinte nao preserva a faixa de audio anterior.'
 Assert-True ($mainSource -match 'g_next_audio_language') 'Episodio seguinte preserva apenas indice e pode mudar para ingles.'
 Assert-True ($mainSource -match 'series_keep_audio_after_switch') 'Temporada agrupada nao tenta preservar sua versao de audio.'
+Assert-True ($mainSource -match 'play_episode_sequence\([^\)]*cJSON \*episode_hint' -and $mainSource -match 'src\.season > 0 \|\| src\.episode > 0') 'HUD de episodio pode voltar a perder temporada e episodio em acessos diretos.'
 
 $storeSource = Get-Content source/store.c -Raw
 Assert-True ($storeSource -match 'pref_audio_%d\.txt' -and $storeSource -match 'pref_sub_%d\.txt') 'Preferencias manuais de audio/legenda vazam entre perfis.'
@@ -89,6 +92,7 @@ $playerUiSource = Get-Content source/player_ui.c -Raw
 Assert-True ($playerUiSource -match 'draw_pause_info' -and $playerUiSource -match 'draw_panel') 'HUD modular perdeu pausa detalhada ou painel de faixas.'
 Assert-True ($playerUiSource -match 'draw_track_column.+AUDIO' -or ($playerUiSource -match '"AUDIO"' -and $playerUiSource -match '"LEGENDAS"')) 'Painel nao mostra audio e legendas em duas colunas.'
 Assert-True ($playerUiSource -match 'draw_next_card' -and $playerUiSource -match 'PUI_FOCUS_TIMELINE') 'HUD modular perdeu proximo episodio ou timeline.'
+Assert-True ($playerUiSource -match 'ui_popcorn_draw') 'Tela de preparacao perdeu a animacao de pipoca do Nplay.'
 Assert-True ($sources -match 'PlayerHud hud_base' -and $sources -match 'draw_hud\(ren, &hud_base') 'HUD voltou a enumerar faixas ou montar rotulos a cada quadro.'
 
 $audioPolicySource = Get-Content source/audio_policy.c -Raw
