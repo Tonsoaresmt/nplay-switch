@@ -1519,3 +1519,31 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   fling, bordas, segundo dedo, troca touch/controle, todas as superficies listadas,
   timeline e painel de audio/legendas. Build/simulacao nao valida o driver touch do
   Switch nem sensacao de inercia no painel fisico.
+
+## Onboarding e pareamento por celular em 30/09/2026 (0.12.35)
+
+- A entrada principal agora e um fluxo de dispositivo inspirado no OAuth Device
+  Authorization Grant: `A` gera QR/codigo, o celular faz login, cadastro ou entrada
+  como visitante e confirma o Switch. Usuario/senha continua disponivel por `Y`.
+- `device_pairing.c/.h` valida codigo publico, segredo, URL HTTPS, matriz QR com
+  teto de 69 modulos, token e respostas do polling. QR invalido cai para o codigo
+  digitavel; uma resposta estruturalmente invalida nunca autentica o console.
+- Rede e espera executam em `login_pairing_thread`. A UI continua responsiva; `B`
+  cancela inclusive libcurl, `X` renova o codigo, `slow_down` soma 5 s e falha de
+  rede usa backoff ate 30 s sem abandonar um codigo ainda valido.
+- O backend complementar esta em `C:/NplaySwitch/.codex-tmp/backend-device-onboarding`,
+  branch `codex/switch-device-onboarding`: `/api/device/code` devolve a matriz,
+  usa `no-store` e rate limit; o site preserva `#/pair` entre login, cadastro e
+  visitante. Publicar/deployar esse backend antes do NRO 0.12.35.
+- A cota do visitante permaneceu inalterada de proposito. Antes de ampliar para
+  “3 conteudos”, definir se sao titulos completos ou previas e qual janela/escopo;
+  o comportamento atual e uma previa unica protegida por tempo, dispositivo e IP.
+- Testes adicionados: `tools/test_device_pairing.c`, dois contratos web/API em
+  `npm run test:tv-pairing` e rotas de dispositivo em `audit_switch_routes.mjs`.
+- Validacao limpa passou na 0.12.35: 24.184.655 bytes, SHA-256
+  `4bf8a54555c38189898dc5b0297d6a3541ce25aee48e9c9db97db0f2a342eebc`.
+  Backend chegou ao `main` em `c650809`, mas o workflow de deploy estava desativado
+  manualmente e a API publica ainda respondia sem `qr`. Implantar antes da release.
+- Pendente obrigatorio no hardware: QR em cameras Android/iPhone, login/cadastro/
+  visitante, escolha de perfil, cancelar/renovar/expirar, Wi-Fi oscilando, toque e
+  legibilidade portatil/dock. Simulacao local nao testa camera nem rede do Switch.

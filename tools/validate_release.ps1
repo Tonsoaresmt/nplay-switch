@@ -118,6 +118,11 @@ Assert-True ($mainSource -match 'touch_scroll_apply' -and $mainSource -match 'to
 Assert-True ($mainSource -notmatch 'handle_touch_swipe') 'Gestos voltaram a simular passos do direcional.'
 Assert-True ($mainSource -match 'TOUCH_SURFACE_MOVIE_RELATED' -and $mainSource -match 'TOUCH_SURFACE_AVATAR_PAGES') 'Relacionados ou seletor de fotos perderam navegacao tactil direta.'
 Assert-True ($sources -match 'touch_track_button' -and $sources -match 'touched_menu') 'Painel de audio e legendas voltou a ignorar toque direto.'
+Assert-True ($mainSource -match '/api/device/code' -and $mainSource -match '/api/device/token') 'Entrada por QR perdeu criacao ou polling do codigo.'
+Assert-True ($mainSource -match 'SDL_CreateThread\(login_pairing_thread') 'Pareamento voltou a bloquear a thread grafica.'
+$pairingSource = Get-Content source/device_pairing.c -Raw
+Assert-True ($pairingSource -match 'DEVICE_PAIRING_POLL_SLOW_DOWN' -and $pairingSource -match '\*interval_seconds \+= 5') 'Polling nao respeita slow_down do fluxo de dispositivo.'
+Assert-True ($pairingSource -match 'bit-rows-v1' -and $pairingSource -match 'DEVICE_PAIRING_QR_MAX') 'QR nativo perdeu validacao de formato ou limite de memoria.'
 
 $uiSource = Get-Content source/ui.c -Raw
 Assert-True ($uiSource -match 'void ui_avatar' -and $uiSource -match 'SDL_RenderGeometry') 'Avatares circulares deixaram de usar recorte acelerado pela GPU.'
@@ -214,6 +219,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
 & .\build\test_episode_flow.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/device_pairing.c source/cJSON.c tools/test_device_pairing.c -lm -o build/test_device_pairing.exe
+if ($LASTEXITCODE -ne 0) { throw 'Simulacao do pareamento QR falhou ao compilar.' }
+& .\build\test_device_pairing.exe
+if ($LASTEXITCODE -ne 0) { throw 'Pareamento QR falhou em codigo, matriz, token ou backoff.' }
 if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
     (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
     & node tools/test_chunked_remux.mjs

@@ -17,7 +17,9 @@ foreach ($endpoint in @(
     '/api/catalog/anime-home',
     '/api/catalog/sagas',
     '/api/catalog/sagas/%.200s',
-    '/api/catalog/search-v2\?q='
+    '/api/catalog/search-v2\?q=',
+    '/api/device/code',
+    '/api/device/token'
 )) {
     Assert-Contains $switchMain $endpoint "Endpoint ausente no Switch: $endpoint"
 }
@@ -38,6 +40,7 @@ $catalog = Get-Content (Join-Path $BackendRoot 'src/routes/catalog.js') -Raw
 $search = Get-Content (Join-Path $BackendRoot 'src/routes/catalog-search.js') -Raw
 $stream = Get-Content (Join-Path $BackendRoot 'src/routes/stream.js') -Raw
 $hot = Get-Content (Join-Path $BackendRoot 'src/routes/hot-stream.js') -Raw
+$devices = Get-Content (Join-Path $BackendRoot 'src/routes/devices.js') -Raw
 Assert-Contains $catalog "app\.get\('/tab-home'" 'Backend nao possui tab-home.'
 Assert-Contains $catalog "app\.get\('/anime-home'" 'Backend nao possui anime-home.'
 Assert-Contains $catalog "app\.get\('/series/:id'" 'Backend nao possui detalhe de series.'
@@ -49,6 +52,8 @@ Assert-Contains $stream "'/stream/session/:sessionId/refresh'" 'Backend nao poss
 Assert-Contains $stream "'/stream/session/:sessionId/fail'" 'Backend nao possui failover de fonte.'
 Assert-Contains $stream "'/stream/session/:sessionId/heartbeat'" 'Backend nao possui heartbeat.'
 Assert-Contains $hot "app\.post\('/stream/hot/:itemId'" 'Backend nao possui hot-stream.'
+Assert-Contains $devices "app\.post\('/code'" 'Backend nao possui criacao do pareamento por QR.'
+Assert-Contains $devices "app\.post\('/token'" 'Backend nao possui polling do pareamento por QR.'
 foreach ($field in @('delivery:', 'container:', 'play_url:')) {
     Assert-Contains $stream ([regex]::Escape($field)) "Descritor de stream sem campo $field"
 }

@@ -26,6 +26,7 @@ function backend(file) {
 const server = backend('src/server.js');
 const modules = {
   auth: ['authRoutes', '/api/auth', 'src/routes/auth.js'],
+  devices: ['deviceRoutes', '/api/device', 'src/routes/devices.js'],
   account: ['accountRoutes', '/api/account', 'src/routes/account.js'],
   catalog: ['catalogRoutes', '/api/catalog', 'src/routes/catalog.js'],
   search: ['catalogSearchRoutes', '/api/catalog', 'src/routes/catalog-search.js'],
@@ -44,6 +45,8 @@ for (const [name, [plugin, prefix, file]] of Object.entries(modules)) {
 // [area da tela, fragmento usado no cliente, modulo, verbo, caminho relativo]
 const routes = [
   ['Entrada', '/api/auth/login', 'auth', 'post', '/login'],
+  ['Entrada por QR', '/api/device/code', 'devices', 'post', '/code'],
+  ['Entrada por QR', '/api/device/token', 'devices', 'post', '/token'],
   ['Entrada', '/api/account/profiles', 'account', 'get', '/profiles'],
   ['Configuracoes', '/api/account/me', 'account', 'get', '/me'],
   ['Configuracoes', '/api/auth/me', 'auth', 'get', '/me'],
@@ -115,7 +118,7 @@ assert.ok(sources.catalog.includes('progress_updated_at') && main.includes('prog
 assert.ok(main.includes('handle_history_touch(x, y)'),
   'Historico voltou a abrir a selecao antiga em qualquer toque');
 assert.ok(player.includes('SDL_ThreadID() == watch->render_thread') &&
-  player.includes('draw_center_state(watch->renderer'),
+  player.includes('pui_draw_loading(watch->renderer'),
   'A animacao de preparacao nao e redesenhada na thread do player');
 assert.ok(player.indexOf('ui_popcorn_release();') > player.indexOf('if (!logged_first_present) {'),
   'Atlas de pipoca liberado antes do primeiro quadro');

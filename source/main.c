@@ -29,6 +29,7 @@
 #include "curl_avio.h"
 #include "audio_policy.h"
 #include "touch_input.h"
+#include "device_pairing.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -49,6 +50,31 @@ static SDL_Texture *g_brand = NULL;
 static int g_do_update = 0;
 static Uint32 g_restart_at = 0;
 static int g_running; // definido/inicializado na secao de roteamento de input
+
+typedef enum {
+    LOGIN_PAIR_IDLE = 0,
+    LOGIN_PAIR_REQUESTING,
+    LOGIN_PAIR_WAITING,
+    LOGIN_PAIR_CANCELING,
+    LOGIN_PAIR_ERROR
+} LoginPairStage;
+
+typedef struct {
+    SDL_Thread *thread;
+    SDL_mutex *mutex;
+    SDL_atomic_t cancel;
+    SDL_atomic_t done;
+    LoginPairStage stage;
+    DevicePairingCode code;
+    DevicePairingToken token;
+    char status[192];
+    int result;
+    int restart_requested;
+    Uint32 expires_at;
+} LoginPairing;
+
+static LoginPairing g_pair = {0};
+static int g_login_sel = 0;
 
 
 #include "ui.h"
@@ -3185,6 +3211,194 @@ static void draw_downloads(void) {
 }
 
 // ------------------------------------------------------------- login
+static void pair_set_stage(LoginPairStage stage, const char *status) {
+    if (!g_pair.mutex) return;
+    SDL_LockMutex(g_pair.mutex);
+    g_pair.stage = stage;
+    if (status) snprintf(g_pair.status, sizeof(g_pair.status), "%s", status);
+    SDL_UnlockMutex(g_pair.mutex);
+}
+
+static int pair_wait_cancelable(Uint32 duration_ms) {
+    Uint32 end = SDL_GetTicks() + duration_ms;
+    while (!SDL_AtomicGet(&g_pair.cancel) && !SDL_TICKS_PASSED(SDL_GetTicks(), end))
+        SDL_Delay(50);
+    return SDL_AtomicGet(&g_pair.cancel) != 0;
+}
+
+static int login_pairing_thread(void *unused) {
+    (void)unused;
+    char url[512];
+    snprintf(url, sizeof(url), "%s/api/device/code", BASE);
+    const char *body = "{\"device_name\":\"Nintendo Switch\",\"device_type\":\"console\"}";
+    struct membuf response = {0};
+    const char *net_error = NULL;
+    long http = net_request_timeout_cancel(url, "POST", body, NULL, &response, &net_error,
+                                           8L, 20L, &g_pair.cancel);
+    if (SDL_AtomicGet(&g_pair.cancel)) goto canceled;
+    DevicePairingCode code;
+    char error[192] = "";
+    if (http != 200 || device_pairing_parse_code(response.data, &code, error, sizeof(error)) != 0) {
+        char message[192];
+        if (http < 0) snprintf(message, sizeof(message), "Sem conexao com o Nplay. Tente novamente.");
+        else snprintf(message, sizeof(message), "Nao foi possivel gerar o codigo (HTTP %ld).", http);
+        membuf_free(&response);
+        SDL_LockMutex(g_pair.mutex);
+        g_pair.stage = LOGIN_PAIR_ERROR;
+        g_pair.result = -1;
+        snprintf(g_pair.status, sizeof(g_pair.status), "%s", error[0] ? error : message);
+        SDL_UnlockMutex(g_pair.mutex);
+        SDL_AtomicSet(&g_pair.done, 1);
+        return 0;
+    }
+    membuf_free(&response);
+    int interval = code.interval_seconds;
+    int next_delay = interval;
+    SDL_LockMutex(g_pair.mutex);
+    g_pair.code = code;
+    g_pair.expires_at = SDL_GetTicks() + (Uint32)code.expires_seconds * 1000u;
+    g_pair.stage = LOGIN_PAIR_WAITING;
+    snprintf(g_pair.status, sizeof(g_pair.status), "Aguardando confirmacao no celular");
+    SDL_UnlockMutex(g_pair.mutex);
+
+    for (;;) {
+        if (pair_wait_cancelable((Uint32)next_delay * 1000u)) goto canceled;
+        Uint32 expires_at;
+        SDL_LockMutex(g_pair.mutex);
+        expires_at = g_pair.expires_at;
+        SDL_UnlockMutex(g_pair.mutex);
+        if (SDL_TICKS_PASSED(SDL_GetTicks(), expires_at)) {
+            pair_set_stage(LOGIN_PAIR_ERROR, "O codigo expirou. Gere um novo para continuar.");
+            SDL_LockMutex(g_pair.mutex); g_pair.result = -1; SDL_UnlockMutex(g_pair.mutex);
+            SDL_AtomicSet(&g_pair.done, 1);
+            return 0;
+        }
+
+        cJSON *request = cJSON_CreateObject();
+        if (!request) {
+            pair_set_stage(LOGIN_PAIR_ERROR, "Memoria insuficiente para concluir a conexao.");
+            SDL_LockMutex(g_pair.mutex); g_pair.result = -1; SDL_UnlockMutex(g_pair.mutex);
+            SDL_AtomicSet(&g_pair.done, 1);
+            return 0;
+        }
+        cJSON_AddStringToObject(request, "device_code", code.device_code);
+        char *poll_body = cJSON_PrintUnformatted(request);
+        cJSON_Delete(request);
+        if (!poll_body) {
+            pair_set_stage(LOGIN_PAIR_ERROR, "Memoria insuficiente para concluir a conexao.");
+            SDL_LockMutex(g_pair.mutex); g_pair.result = -1; SDL_UnlockMutex(g_pair.mutex);
+            SDL_AtomicSet(&g_pair.done, 1);
+            return 0;
+        }
+        snprintf(url, sizeof(url), "%s/api/device/token", BASE);
+        memset(&response, 0, sizeof(response));
+        net_error = NULL;
+        http = net_request_timeout_cancel(url, "POST", poll_body, NULL, &response, &net_error,
+                                          6L, 15L, &g_pair.cancel);
+        free(poll_body);
+        if (SDL_AtomicGet(&g_pair.cancel)) { membuf_free(&response); goto canceled; }
+        DevicePairingToken token;
+        DevicePairingPoll decision = device_pairing_classify_poll(
+            http, response.data, &interval, &token, error, sizeof(error));
+        membuf_free(&response);
+        if (decision == DEVICE_PAIRING_POLL_SUCCESS) {
+            SDL_LockMutex(g_pair.mutex);
+            g_pair.token = token;
+            g_pair.result = 1;
+            snprintf(g_pair.status, sizeof(g_pair.status), "Celular confirmado. Entrando...");
+            SDL_UnlockMutex(g_pair.mutex);
+            SDL_AtomicSet(&g_pair.done, 1);
+            return 0;
+        }
+        if (decision == DEVICE_PAIRING_POLL_EXPIRED ||
+            decision == DEVICE_PAIRING_POLL_DENIED ||
+            decision == DEVICE_PAIRING_POLL_ERROR) {
+            pair_set_stage(LOGIN_PAIR_ERROR, error);
+            SDL_LockMutex(g_pair.mutex); g_pair.result = -1; SDL_UnlockMutex(g_pair.mutex);
+            SDL_AtomicSet(&g_pair.done, 1);
+            return 0;
+        }
+        if (decision == DEVICE_PAIRING_POLL_SLOW_DOWN) {
+            next_delay = interval;
+            pair_set_stage(LOGIN_PAIR_WAITING, "Ainda aguardando o celular. Mantendo a conexao...");
+        } else if (decision == DEVICE_PAIRING_POLL_RETRY) {
+            next_delay *= 2;
+            if (next_delay < interval) next_delay = interval;
+            if (next_delay > 30) next_delay = 30;
+            pair_set_stage(LOGIN_PAIR_WAITING, "Internet oscilou. Tentando novamente sem perder o codigo...");
+        } else {
+            next_delay = interval;
+            pair_set_stage(LOGIN_PAIR_WAITING, "Aguardando confirmacao no celular");
+        }
+    }
+
+canceled:
+    membuf_free(&response);
+    SDL_LockMutex(g_pair.mutex);
+    g_pair.result = 0;
+    g_pair.stage = LOGIN_PAIR_IDLE;
+    g_pair.status[0] = '\0';
+    SDL_UnlockMutex(g_pair.mutex);
+    SDL_AtomicSet(&g_pair.done, 1);
+    return 0;
+}
+
+static void start_login_pairing(void) {
+    if (g_pair.thread) return;
+    if (!g_pair.mutex) g_pair.mutex = SDL_CreateMutex();
+    if (!g_pair.mutex) { snprintf(g_status, sizeof(g_status), "Memoria insuficiente para conectar"); return; }
+    SDL_AtomicSet(&g_pair.cancel, 0);
+    SDL_AtomicSet(&g_pair.done, 0);
+    SDL_LockMutex(g_pair.mutex);
+    memset(&g_pair.code, 0, sizeof(g_pair.code));
+    memset(&g_pair.token, 0, sizeof(g_pair.token));
+    g_pair.result = 0;
+    g_pair.stage = LOGIN_PAIR_REQUESTING;
+    snprintf(g_pair.status, sizeof(g_pair.status), "Criando uma conexao segura...");
+    SDL_UnlockMutex(g_pair.mutex);
+    g_pair.thread = SDL_CreateThread(login_pairing_thread, "device-pair", NULL);
+    if (!g_pair.thread) {
+        pair_set_stage(LOGIN_PAIR_ERROR, "Nao foi possivel iniciar a conexao");
+        SDL_LockMutex(g_pair.mutex); g_pair.result = -1; SDL_UnlockMutex(g_pair.mutex);
+    }
+}
+
+static void cancel_login_pairing(int restart) {
+    if (!g_pair.thread) {
+        if (restart) start_login_pairing();
+        else pair_set_stage(LOGIN_PAIR_IDLE, "");
+        return;
+    }
+    g_pair.restart_requested = restart;
+    pair_set_stage(LOGIN_PAIR_CANCELING, restart ? "Gerando um novo codigo..." : "Cancelando conexao...");
+    SDL_AtomicSet(&g_pair.cancel, 1);
+}
+
+static void pump_login_pairing(void) {
+    if (!g_pair.thread || !SDL_AtomicGet(&g_pair.done)) return;
+    SDL_WaitThread(g_pair.thread, NULL);
+    g_pair.thread = NULL;
+    int result, restart;
+    DevicePairingToken token;
+    SDL_LockMutex(g_pair.mutex);
+    result = g_pair.result;
+    restart = g_pair.restart_requested;
+    g_pair.restart_requested = 0;
+    token = g_pair.token;
+    SDL_UnlockMutex(g_pair.mutex);
+    if (restart) { start_login_pairing(); return; }
+    if (result != 1) return;
+    snprintf(g_token, sizeof(g_token), "%s", token.token);
+    snprintf(g_user, sizeof(g_user), "%s", token.username);
+    store_save_token(g_token);
+    store_save_user(g_user);
+    store_clear_profile_id();
+    g_profile_id = 0;
+    net_set_profile_id(0);
+    g_profile_required = 1;
+    begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
+}
+
 static int do_login(void) {
     char user[128] = { 0 }, pass[128] = { 0 };
     if (prompt_text("Usuario Nplay", user, sizeof(user), 0) != 0) return -1;
@@ -3234,19 +3448,111 @@ static int do_login(void) {
     membuf_free(&out);
     return ok;
 }
-static void draw_login(void) {
-    const int x = 330, y = 138, w = 620, h = 430;
-    ui_panel(x, y, w, h, C_ACC);
-    text_center_at("NPLAY", x, w, y + 52, C_ACC, 1);
-    text_center_at("Entre para continuar no Nintendo Switch", x, w, y + 105, C_MUT, 0);
-    fill_rect(x + 90, y + 174, w - 180, 58, C_ACC);
-    text_center_at("A   Entrar com minha conta", x + 90, w - 180, y + 187, C_TEXT, 0);
-    text_center_at("Sua senha e digitada pelo teclado seguro do console", x, w, y + 258, C_MUT, 0);
-    if (g_status[0]) {
-        fill_rect(x + 36, y + 308, w - 72, 48, C_BAR);
-        text_center_at(g_status, x + 52, w - 104, y + 318, C_ROSE, 0);
+
+static void draw_pairing_qr(const DevicePairingCode *code, int x, int y, int box) {
+    if (!code || code->qr_size <= 0) {
+        fill_rect(x, y, box, box, (SDL_Color){245, 245, 250, 255});
+        text_center_at("QR indisponivel", x, box, y + box / 2 - 25, C_BG, 0);
+        text_center_at("Use o codigo ao lado", x, box, y + box / 2 + 10, C_BG, 2);
+        return;
     }
-    text_center("+  Sair do aplicativo", WIN_H - 70, C_MUT, 0);
+    int modules = code->qr_size + code->qr_quiet_zone * 2;
+    int cell = box / modules;
+    if (cell < 1) cell = 1;
+    int actual = modules * cell;
+    int ox = x + (box - actual) / 2;
+    int oy = y + (box - actual) / 2;
+    fill_rect(ox, oy, actual, actual, (SDL_Color){255, 255, 255, 255});
+    for (int row = 0; row < code->qr_size; row++) {
+        for (int col = 0; col < code->qr_size; col++) {
+            if (code->qr_rows[row][col] == '1')
+                fill_rect(ox + (col + code->qr_quiet_zone) * cell,
+                          oy + (row + code->qr_quiet_zone) * cell,
+                          cell, cell, (SDL_Color){5, 7, 13, 255});
+        }
+    }
+}
+
+static void draw_login(void) {
+    LoginPairStage stage = LOGIN_PAIR_IDLE;
+    DevicePairingCode code = {0};
+    char pair_status[192] = "";
+    Uint32 expires_at = 0;
+    if (g_pair.mutex) {
+        SDL_LockMutex(g_pair.mutex);
+        stage = g_pair.stage;
+        code = g_pair.code;
+        expires_at = g_pair.expires_at;
+        snprintf(pair_status, sizeof(pair_status), "%s", g_pair.status);
+        SDL_UnlockMutex(g_pair.mutex);
+    }
+    text_draw(gRen, "NPLAY", 52, 36, C_ACC, 1);
+    text_draw(gRen, "Nintendo Switch", 52, 76, C_MUT, 2);
+
+    if (stage == LOGIN_PAIR_WAITING) {
+        ui_panel(48, 108, 1184, 548, C_ACC2);
+        draw_pairing_qr(&code, 92, 162, 350);
+        text_draw(gRen, "Conecte este Switch", 492, 148, C_TEXT, 1);
+        text_draw(gRen, "1  Abra a camera do celular e leia o QR Code", 492, 207, C_TEXT, 0);
+        text_draw(gRen, "2  Entre, crie sua conta ou continue como visitante", 492, 251, C_TEXT, 0);
+        text_draw(gRen, "3  Confirme o Nintendo Switch no Nplay", 492, 295, C_TEXT, 0);
+        text_draw(gRen, "Se preferir, digite este codigo no celular", 492, 357, C_MUT, 2);
+        char formatted[20]; device_pairing_format_code(code.user_code, formatted, sizeof(formatted));
+        fill_rect(492, 386, 340, 66, C_BAR);
+        text_center_at(formatted, 492, 340, 399, C_ACC, 1);
+        int seconds = 0;
+        Uint32 now = SDL_GetTicks();
+        if (!SDL_TICKS_PASSED(now, expires_at)) seconds = (int)((expires_at - now + 999) / 1000);
+        char expiry[80]; snprintf(expiry, sizeof(expiry), "Codigo valido por %d:%02d", seconds / 60, seconds % 60);
+        text_draw(gRen, expiry, 852, 406, C_MUT, 2);
+        fill_rect(492, 488, 680, 54, C_CARD);
+        text_clip(pair_status, 512, 502, C_GREEN, 0, 640);
+        text_draw(gRen, "O celular faz o cadastro; nenhuma senha e digitada no console.", 492, 570, C_MUT, 2);
+        ui_footer("B Cancelar    X Gerar outro codigo");
+        return;
+    }
+    if (stage == LOGIN_PAIR_REQUESTING || stage == LOGIN_PAIR_CANCELING) {
+        ui_panel(278, 158, 724, 392, C_ACC2);
+        text_center_at("Preparando seu acesso", 310, 660, 235, C_TEXT, 1);
+        Uint32 pulse = (SDL_GetTicks() / 280) % 3;
+        for (int i = 0; i < 3; i++)
+            fill_rect(566 + i * 52, 325, 24, 24, i == (int)pulse ? C_ACC : C_BAR);
+        text_center_at(pair_status, 326, 628, 400, C_MUT, 0);
+        text_center_at("A interface continua responsiva enquanto conectamos.", 326, 628, 448, C_MUT, 2);
+        ui_footer("B Cancelar");
+        return;
+    }
+
+    text_draw(gRen, "Bem-vindo ao Nplay", 74, 145, C_TEXT, 1);
+    text_draw(gRen, "Configure em menos de um minuto", 74, 191, C_MUT, 0);
+    text_draw(gRen, "Use seu celular para entrar, criar uma conta", 74, 267, C_TEXT, 0);
+    text_draw(gRen, "ou conhecer o Nplay como visitante.", 74, 305, C_TEXT, 0);
+    text_draw(gRen, "Depois de confirmar, este Switch fica conectado", 74, 365, C_MUT, 2);
+    text_draw(gRen, "sem precisar digitar sua senha no console.", 74, 394, C_MUT, 2);
+
+    ui_panel(640, 130, 566, 204, g_login_sel == 0 ? C_ACC : C_ACC2);
+    if (g_login_sel == 0) ui_focus(636, 126, 574, 212);
+    text_draw(gRen, "Conectar com o celular", 684, 170, C_TEXT, 1);
+    text_draw(gRen, "QR Code  |  cadastro  |  visitante", 684, 216, C_MUT, 2);
+    fill_rect(684, 265, 214, 42, g_login_sel == 0 ? C_ACC : C_BAR);
+    text_center_at("A  Continuar", 684, 214, 273, g_login_sel == 0 ? C_BG : C_TEXT, 0);
+
+    ui_panel(640, 365, 566, 154, g_login_sel == 1 ? C_ACC : C_ACC2);
+    if (g_login_sel == 1) ui_focus(636, 361, 574, 162);
+    text_draw(gRen, "Entrar com usuario e senha", 684, 399, C_TEXT, 0);
+    text_draw(gRen, "Use o teclado seguro do Nintendo Switch", 684, 441, C_MUT, 2);
+    text_draw(gRen, "Y  ou  A para entrar", 684, 480, g_login_sel == 1 ? C_ACC : C_MUT, 2);
+
+    if (stage == LOGIN_PAIR_ERROR || g_status[0]) {
+        fill_rect(74, 480, 510, 74, C_BAR);
+        fill_rect(74, 480, 5, 74, C_ROSE);
+        text_clip(stage == LOGIN_PAIR_ERROR ? pair_status : g_status,
+                  94, 501, C_ROSE, 0, 470);
+        text_draw(gRen, "A tenta novamente", 94, 533, C_MUT, 2);
+    } else {
+        text_draw(gRen, "Novo por aqui? O celular mostra cada passo.", 74, 492, C_GREEN, 0);
+    }
+    ui_footer("Cima/baixo Escolher    A Confirmar    Y Usuario e senha    + Sair");
 }
 
 // ------------------------------------------------------------- input
@@ -4496,11 +4802,24 @@ static void handle_button(int b) {
         return;
     }
     if (g_screen == SC_LOGIN) {
-        if (b == JOY_A) { if (do_login() == 0) {
-            store_clear_profile_id(); g_profile_id = 0; net_set_profile_id(0);
-            g_profile_required = 1;
-            begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
-        } }
+        LoginPairStage stage = LOGIN_PAIR_IDLE;
+        if (g_pair.mutex) {
+            SDL_LockMutex(g_pair.mutex); stage = g_pair.stage; SDL_UnlockMutex(g_pair.mutex);
+        }
+        if (stage == LOGIN_PAIR_REQUESTING || stage == LOGIN_PAIR_WAITING ||
+            stage == LOGIN_PAIR_CANCELING) {
+            if (b == JOY_B || b == JOY_MINUS) cancel_login_pairing(0);
+            else if (b == JOY_X && stage == LOGIN_PAIR_WAITING) cancel_login_pairing(1);
+            return;
+        }
+        if (b == JOY_UP || b == JOY_DOWN) g_login_sel = 1 - g_login_sel;
+        else if (b == JOY_Y || (b == JOY_A && g_login_sel == 1)) {
+            if (do_login() == 0) {
+                store_clear_profile_id(); g_profile_id = 0; net_set_profile_id(0);
+                g_profile_required = 1;
+                begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
+            }
+        } else if (b == JOY_A) start_login_pairing();
         else if (b == JOY_PLUS) g_running = 0;
     } else if (g_screen == SC_MAIN) {
         if (g_tab == TAB_SAGAS && (b == JOY_ZL || b == JOY_ZR)) input_sagas(b);
@@ -4615,7 +4934,26 @@ static void handle_history_touch(int x, int y) {
 }
 
 static void handle_touch_tap(int x, int y) {
-    if (g_screen == SC_LOGIN) { if (y >= 300 && y < 395) handle_button(JOY_A); return; }
+    if (g_screen == SC_LOGIN) {
+        LoginPairStage stage = LOGIN_PAIR_IDLE;
+        if (g_pair.mutex) {
+            SDL_LockMutex(g_pair.mutex); stage = g_pair.stage; SDL_UnlockMutex(g_pair.mutex);
+        }
+        if (stage == LOGIN_PAIR_WAITING) {
+            if (y >= 610) handle_button(JOY_B);
+            return;
+        }
+        if (stage == LOGIN_PAIR_REQUESTING || stage == LOGIN_PAIR_CANCELING) {
+            if (y >= 610) handle_button(JOY_B);
+            return;
+        }
+        if (x >= 636 && x < 1210 && y >= 126 && y < 338) {
+            g_login_sel = 0; handle_button(JOY_A);
+        } else if (x >= 636 && x < 1210 && y >= 361 && y < 525) {
+            g_login_sel = 1; handle_button(JOY_A);
+        }
+        return;
+    }
     if (g_screen == SC_LOADING) { if (y < 92) handle_button(JOY_B); return; }
     if ((g_screen == SC_MAIN || g_screen == SC_SEARCH) && g_profile_menu) {
         if (x >= 868 && x < 1210 && y >= 190 && y < 368) {
@@ -5166,6 +5504,7 @@ int main(int argc, char **argv) {
         pump_avatar_fetch();
         pump_landing();
         pump_catalog_fetch();
+        pump_login_pairing();
         if (!g_avatar_attempted && g_avatar_due && SDL_GetTicks() >= g_avatar_due &&
             (g_screen == SC_PROFILES || (g_screen == SC_MAIN && g_land))) {
             g_avatar_attempted = 1;
@@ -5207,6 +5546,11 @@ int main(int argc, char **argv) {
     }
 
     g_run = 0;
+    if (g_pair.thread) {
+        SDL_AtomicSet(&g_pair.cancel, 1);
+        SDL_WaitThread(g_pair.thread, NULL);
+        g_pair.thread = NULL;
+    }
     for (int i = 0; i < 3; i++) SDL_SemPost(g_q_sem);
     for (int i = 0; i < 3; i++) SDL_WaitThread(wk[i], NULL);
     if (g_dl_thread) { SDL_WaitThread(g_dl_thread, NULL); g_dl_thread = NULL; }
@@ -5249,6 +5593,7 @@ int main(int argc, char **argv) {
     SDL_DestroyMutex(g_ready_mtx);
     SDL_DestroyMutex(g_q_mtx);
     SDL_DestroyMutex(g_cov_mtx);
+    if (g_pair.mutex) { SDL_DestroyMutex(g_pair.mutex); g_pair.mutex = NULL; }
     text_exit(); nplay_curl_avio_pool_clear(); net_exit();
     if (g_joy) SDL_JoystickClose(g_joy);
     if (g_brand) SDL_DestroyTexture(g_brand);
