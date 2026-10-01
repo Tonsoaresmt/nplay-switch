@@ -85,3 +85,26 @@ bytes e digest igual ao build acima. O arquivo nao foi apagado do disco: somente
 deixou de ser rastreado em Git. Binarios historicos continuam recuperaveis.
 Backend funcional 5b6b534 (documentacao de rollout cd8848e) enviado a main do Nplay;
 verificar docs/SWITCH_SUBTITLE_V4_2026_10_01.md naquele repo para o deploy.
+
+## Continuidade adicional: remux (investigacao apos publicacao)
+
+- Backend implantado e verificado: workflow 36880741141 success, API publica
+  cd8848e, banco ok e worker recente/idle. Actions voltou a disabled.
+- `api_hot_stream_attempt` recebe `session_id` textual do hot/debrid, mas nao o
+  preserva em PlaybackSource. O `session_id` inteiro existente e outra entidade:
+  sessao de telas/heartbeat. Nao converter nem sobrescrever esse inteiro.
+- PC usa o identificador textual em `/api/stream/hot/:sid/probe` e
+  `/api/stream/hot/:sid/subtitles/:streamIdx.vtt`. O remux fMP4 nao inclui essas
+  faixas no video; logo enumerar apenas AVStreams nunca as recuperara.
+- `load_external_hls_subtitle` forca o demuxer hls. VTT direto precisa de abertura
+  webvtt distinta. Esse loader tambem e sincrono; mover para thread exige cancel
+  proprio. NAO reutilizar demux_abort para cancelar so legenda: derrubaria video.
+- Transporte deve limitar bytes independentemente de Content-Length, validar
+  indices/identificador da sessao, nunca registrar sid/URL, manter TLS verificado
+  e possuir prazo/cancelamento. Aplicar resultado somente apos join, se a tentativa
+  e faixa ainda forem as mesmas; falha conserva a faixa anterior.
+- Preferir download limitado e decoder WebVTT em AVIO de memoria, isolado dos
+  callbacks globais do video. Testar 503/404, cancel, resposta atrasada, VTT vazio,
+  truncado, sobreposto, seek, 16+ faixas e troca de episodio antes de publicar.
+- Nenhuma implementacao parcial desse caminho foi incluida na 0.12.37. A tarefa
+  de paridade de legendas continua aberta; nao confundir guard v4 com essa correcao.
