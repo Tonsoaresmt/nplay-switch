@@ -1588,3 +1588,6 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   estao resolvidas: fontes reais divergem (0 e 8 renditions), uma respondeu 404,
   hot probe/VTT do PC ainda nao e implementado no NRO. Nenhum reprocessamento em lote.
 - Build ARM64 limpo e suite completa passaram. Hardware e Linux nao testados.
+- Publicado 91da091 em main e codex/switch-rebuild por fast-forward atomico.
+  Release latest v0.12.37 confirmada com digest e tamanho exatos pelo GitHub.
+  Nplay.nro deixou de ser rastreado, preservado no disco e como asset da Release.

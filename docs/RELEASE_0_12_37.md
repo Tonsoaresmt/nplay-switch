@@ -76,3 +76,12 @@ pacotes individualmente somente apos confirmar legenda na origem e fonte disponi
 Referencias tecnicas: https://curl.se/libcurl/c/CURLSHOPT_SHARE.html,
 https://curl.se/libcurl/c/threadsafe.html,
 https://wiki.libsdl.org/SDL2/SDL_QueueAudio.
+
+## Publicacao confirmada
+
+Commit 91da091 enviado por fast-forward atomico a main e codex/switch-rebuild.
+Release publica/latest v0.12.37: API GitHub confirmou Nplay.nro com 24.188.751
+bytes e digest igual ao build acima. O arquivo nao foi apagado do disco: somente
+deixou de ser rastreado em Git. Binarios historicos continuam recuperaveis.
+Backend funcional 5b6b534 (documentacao de rollout cd8848e) enviado a main do Nplay;
+verificar docs/SWITCH_SUBTITLE_V4_2026_10_01.md naquele repo para o deploy.
