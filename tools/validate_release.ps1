@@ -55,7 +55,9 @@ Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior 
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
 Assert-True ($sources -match 'lang_norm' -and $sources -match 'stream_norm') 'Selecao de idioma voltou a comparar tags inconsistentes diretamente.'
 Assert-True ($sources -match 'audio_policy_choose') 'Selecao de audio voltou a ficar acoplada ao player e sem testes.'
-Assert-True ($sources -match 'audio_pref_explicit' -and $sources -match 'saved_audio') 'Escolha manual de idioma pode voltar a ser ignorada pela preferencia geral da conta.'
+Assert-True ($sources -match 'audio_pref_explicit' -and $sources -match 'saved_audio') 'Contexto explicito de audio nao chega ao player.'
+$audioPolicySource = Get-Content source/audio_policy.c -Raw
+Assert-True ($audioPolicySource -match 'account_pref == 2 && saved\[0\]') 'Idioma antigo salvo pode voltar a sobrepor Dublado/Legendado da conta.'
 Assert-True ($sources -match 'pui_draw\(' -and $sources -match 'pui_draw_loading\(') 'Player nao usa o HUD modular nas telas de reproducao e abertura.'
 Assert-True ($sources -match 'attempt\.audio_hint = last_audio') 'Recuperacao de sessao nao preserva a faixa de audio.'
 Assert-True ($sources -match 'attempt\.audio_hint_language = last_audio_language') 'Recuperacao preserva indice, mas pode trocar de idioma.'
@@ -89,6 +91,7 @@ Assert-True ($diagSource -notmatch 'play_url|Authorization|Bearer') 'Trace diagn
 
 $mainSource = Get-Content source/main.c -Raw
 Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
+Assert-True ($mainSource -match 'ui_header_action_hit\(x, y\)' -and $mainSource -notmatch 'y < 95 && x < 260') 'Voltar por touch nao coincide com a acao desenhada no cabecalho.'
 Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
 Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
 Assert-True ($mainSource -notmatch 'prefetch_order\[\] = \{ 1, 2, 3, 4 \}') 'Catalogos voltaram a ocupar heap automaticamente antes do player.'

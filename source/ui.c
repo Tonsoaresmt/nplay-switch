@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "text.h"
+#include "header_touch.h"
 #include "pipoca_atlas_bin.h"
 #include <SDL_image.h>
 #include <string.h>
@@ -230,8 +231,15 @@ int text_right(const char *s, int right, int y, SDL_Color c, int big) {
     return w;
 }
 
+static int g_header_action_width;
+
+int ui_header_action_hit(int x, int y) {
+    return header_action_touch_contains(x, y, WIN_W, g_header_action_width);
+}
+
 void ui_header(const char *section, const char *title, const char *action) {
-    fill_rect(0, 0, WIN_W, 95, C_BAR);
+    g_header_action_width = 0;
+    fill_rect(0, 0, WIN_W, UI_HEADER_HEIGHT, C_BAR);
     fill_rect(0, 0, WIN_W, 3, C_ACC);
     if (section && section[0]) text_draw(gRen, section, 50, 31, C_ACC, 0);
     if (title && title[0]) {
@@ -246,7 +254,9 @@ void ui_header(const char *section, const char *title, const char *action) {
             SDL_RenderSetClipRect(gRen, NULL);
         }
     }
-    if (action && action[0]) text_right(action, WIN_W - 50, 31, C_MUT, 0);
+    if (action && action[0])
+        g_header_action_width = text_right(action,
+            WIN_W - UI_HEADER_ACTION_RIGHT_MARGIN, 31, C_MUT, 0);
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 

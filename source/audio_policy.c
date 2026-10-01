@@ -168,12 +168,11 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
     // ingles vencer PT-BR quando o perfil esta em Dublado.
     if (continuity_priority == 1 && continued >= 0) return continued;
 
-    // A ultima troca manual feita no player e uma intencao mais recente e mais
-    // especifica que a preferencia geral da conta. O chamador omite este valor
-    // quando o usuario escolheu explicitamente uma versao Dublado/Legendado no
-    // detalhe da serie.
+    // Persistencia local vale apenas para Tanto faz. Uma troca em outra obra
+    // nao altera Dublado/Legendado da conta. Escolhas desta mesma reproducao
+    // continuam preservadas pelas prioridades 1/2 acima (seek/reconnect/troca).
     const char *saved = audio_language_normalize(saved_language, NULL);
-    if (saved[0]) {
+    if (account_pref == 2 && saved[0]) {
         for (int i = 0; i < count; i++)
             if (!track_is_commentary(&tracks[i]) &&
                 !strcmp(audio_language_normalize(tracks[i].language, tracks[i].title), saved))

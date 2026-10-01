@@ -1549,3 +1549,25 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Pendente obrigatorio no hardware: QR em cameras Android/iPhone, login/cadastro/
   visitante, escolha de perfil, cancelar/renovar/expirar, Wi-Fi oscilando, toque e
   legibilidade portatil/dock. Simulacao local nao testa camera nem rede do Switch.
+
+## Preferencia da conta e retorno por touch em 01/10/2026 (0.12.36)
+
+- A regra de 0.12.30 que deixava idioma manual antigo vencer a conta em outras
+  obras foi revista apos relato real. Dublado/Legendado volta a controlar entrada;
+  idioma persistido so vale em Tanto faz. Prioridade manual 1/2 da MESMA
+  reproducao permanece intacta. O teste novo falhou antes da correcao e passou depois.
+- ui_header mede o texto da acao a direita e ui_header_action_hit compartilha essa
+  geometria com o tap. O hit-test anterior so reconhecia o lado esquerdo e ignorava
+  o Voltar visivel. Serie/Anime/Dorama, Filme, Saga, Perfis, Config e Loading usam
+  o helper; o modal de retomada tambem reconhece Cancelar pelo cabecalho.
+- Auditoria e continuidade: docs/AUDIT_AUDIO_SUBTITLES_TOUCH_2026_10_01.md.
+  601785c do backend permanece fora do main; v3 nao significa que todos os pacotes
+  carecem de legendas. Nao declarar legendas de producao corrigidas. Portar/testar
+  o empacotador e fazer reparo controlado da obra afetada, sem lote em massa.
+- Fila demux 32 pacotes/4 MiB, 15 mutacoes sincronas e SDL sem teto sao pendencias
+  confirmadas; causa de engasgo exige correlacao com trace/PTS/bytes no console.
+- Build ARM64 -Werror e suite completa passaram: 24.184.655 bytes, SHA-256
+  8f78205f56a2380644b0876a7bab92363af0037c222ca1f10b8f9ed445361b73.
+- Publicar binario apenas como asset de Release nesta rodada; nao inclui-lo no
+  commit. Pendente fisico: Voltar vindo de busca/Home, tap/arraste, cancelar
+  retomada, Dublado com ingles/japones salvo e escolha manual/reconnect.

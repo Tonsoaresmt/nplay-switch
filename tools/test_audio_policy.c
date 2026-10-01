@@ -15,13 +15,13 @@ int main(void) {
     assert(audio_effective_preference(2, -1, 0) == 2);
 
     AudioTrackInfo dual[] = { t("eng", "English", 1), t("und", "Audio 2", 0) };
-    // A escolha manual salva vence a preferencia geral da conta.
-    assert(audio_policy_choose(dual, 2, 0, "en", NULL, 0, 0, 0) == 0);
+    // Escolha de uma obra anterior nao pode contradizer Dublado.
+    assert(audio_policy_choose(dual, 2, 0, "en", NULL, 0, 0, 0) == 1);
 
     AudioTrackInfo tagged[] = { t("eng", "English", 1), t("pt-BR", "Portugues", 0) };
-    assert(audio_policy_choose(tagged, 2, 0, "en", NULL, 0, 0, 0) == 0);
+    assert(audio_policy_choose(tagged, 2, 0, "en", NULL, 0, 0, 0) == 1);
     assert(audio_policy_choose(tagged, 2, 1, NULL, NULL, 0, 0, 0) == 0);
-    assert(audio_policy_choose(tagged, 2, 1, "pt", NULL, 0, 0, 0) == 1);
+    assert(audio_policy_choose(tagged, 2, 1, "pt", NULL, 0, 0, 0) == 0);
 
     AudioTrackInfo title_only[] = { t("und", "English", 1), t("und", "Dublado Nacional", 0) };
     assert(audio_policy_choose(title_only, 2, 0, NULL, NULL, 0, 0, 0) == 1);
@@ -32,7 +32,7 @@ int main(void) {
 
     AudioTrackInfo anime[] = { t("por", "Dublado", 1), t("jpn", "Original", 0) };
     assert(audio_policy_choose(anime, 2, 1, NULL, NULL, 0, 0, 0) == 1);
-    assert(audio_policy_choose(anime, 2, 1, "pt", NULL, 0, 0, 0) == 0);
+    assert(audio_policy_choose(anime, 2, 1, "pt", NULL, 0, 0, 0) == 1);
 
     AudioTrackInfo anime_multi[] = {
         t("eng", "English", 1), t("spa", "Spanish", 0),
@@ -54,6 +54,9 @@ int main(void) {
     assert(audio_policy_choose(swapped, 2, 0, NULL, "en", 1, 0, 0) == 0);
     // Na recuperacao da MESMA reproducao, a escolha manual continua valida.
     assert(audio_policy_choose(swapped, 2, 0, NULL, "en", 1, 1, 0) == 1);
+    assert(audio_policy_choose(swapped, 2, 0, "en", "en", 1, 1, 0) == 1);
+    assert(audio_policy_choose(tagged, 2, 0, "en", "en", 1, 2, 0) == 0);
+    assert(audio_policy_choose(anime, 2, 0, "ja", NULL, 0, 0, 1) == 0);
     // Reabertura apos escolha manual preserva o indice, inclusive quando duas
     // faixas compartilham o mesmo idioma.
     AudioTrackInfo same_language[] = {

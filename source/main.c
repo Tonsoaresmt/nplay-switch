@@ -881,6 +881,7 @@ static int prompt_resume_playback(const char *title, int position_seconds) {
             if (event.type == SDL_FINGERDOWN) {
                 int x = (int)(event.tfinger.x * WIN_W);
                 int y = (int)(event.tfinger.y * WIN_H);
+                if (ui_header_action_hit(x, y)) return -1;
                 if (y >= 370 && y < 428) {
                     if (x >= 282 && x < 582) return 1;
                     if (x >= 606 && x < 906) return 0;
@@ -4954,7 +4955,10 @@ static void handle_touch_tap(int x, int y) {
         }
         return;
     }
-    if (g_screen == SC_LOADING) { if (y < 92) handle_button(JOY_B); return; }
+    if (g_screen == SC_LOADING) {
+        if (ui_header_action_hit(x, y)) handle_button(JOY_B);
+        return;
+    }
     if ((g_screen == SC_MAIN || g_screen == SC_SEARCH) && g_profile_menu) {
         if (x >= 868 && x < 1210 && y >= 190 && y < 368) {
             int index = (y - 190) / 63;
@@ -5043,7 +5047,9 @@ static void handle_touch_tap(int x, int y) {
         if (y >= search_y && y < search_y + 112) do_search();
         return;
     }
-    if (y < 95 && x < 260) { handle_button(JOY_B); return; }
+    // O cabecalho desenha Voltar/Cancelar a direita. Reutilize a geometria
+    // medida no desenho para Serie/Anime/Dorama, Filme, Saga, Perfis e Config.
+    if (ui_header_action_hit(x, y)) { handle_button(JOY_B); return; }
     if (g_screen == SC_PROFILES) {
         cJSON *profiles = g_profiles ? cJSON_GetObjectItemCaseSensitive(g_profiles, "profiles") : NULL;
         int count = arr_len(profiles);

@@ -1,4 +1,5 @@
 #include "touch_input.h"
+#include "header_touch.h"
 #include <assert.h>
 #include <stdio.h>
 
@@ -31,6 +32,21 @@ int main(void) {
     assert(!wrong.accepted && touch.active);
     TouchFinish vertical = touch_input_end(&touch, 15, 405, 100, 332);
     assert(vertical.dragged && vertical.axis == TOUCH_AXIS_VERTICAL);
+
+    // Toque no texto visivel a direita: B Voltar, B Cancelar e Sair da conta.
+    assert(header_action_touch_contains(1178, 45, 1280, 112));
+    assert(header_action_touch_contains(1130, 45, 1280, 136));
+    assert(header_action_touch_contains(1070, 45, 1280, 188));
+    assert(!header_action_touch_contains(100, 45, 1280, 112));
+    assert(!header_action_touch_contains(1178, 120, 1280, 112));
+    assert(!header_action_touch_contains(1178, 45, 1280, 0));
+    assert(touch_input_begin(&touch, 21, 1180, 40, 400));
+    tap = touch_input_end(&touch, 21, 1183, 43, 420);
+    assert(tap.tap && header_action_touch_contains(tap.x, tap.y, 1280, 112));
+    assert(touch_input_begin(&touch, 22, 1180, 40, 500));
+    assert(touch_input_move(&touch, 22, 1140, 40, 520, &dx, &dy));
+    tap = touch_input_end(&touch, 22, 1140, 40, 540);
+    assert(!tap.tap); // Arraste por cima de Voltar nao deve disparar retorno.
 
     puts("touch input: tap, axis lock, drag and finger ownership ok");
     return 0;

@@ -55,6 +55,7 @@ int  text_center(const char *s, int y, SDL_Color c, int big);
 int  text_center_at(const char *s, int x, int w, int y, SDL_Color c, int big);
 int  text_right(const char *s, int right, int y, SDL_Color c, int big);
 void ui_header(const char *section, const char *title, const char *action);
+int ui_header_action_hit(int x, int y);
 void ui_footer(const char *hint);
 void ui_panel(int x, int y, int w, int h, SDL_Color accent);
 void ui_focus(int x, int y, int w, int h);
