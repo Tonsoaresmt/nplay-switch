@@ -74,12 +74,9 @@ static int file_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow
     return (ctx && ctx->progress) ? ctx->progress((long long)dlnow, (long long)dltotal, ctx->userdata) : 0;
 }
 
-// ---- conexao compartilhada (CURLSH) -----------------------------------------
-// Cada request usa seu proprio handle (thread-safe: capas/paginas baixam em
-// threads), mas TODOS compartilham o cache de conexao/DNS/sessao-TLS via CURLSH.
-// Assim a conexao TCP+TLS aberta e reaproveitada entre fetches (keepalive),
-// evitando o handshake TLS (caro) a cada chamada. Os locks por mutex tornam o
-// compartilhamento seguro entre as threads.
+// ---- cache DNS e sessao TLS (CURLSH) ----------------------------------------
+// Cada request possui seu handle. Somente DNS e sessoes TLS sao compartilhados
+// com locks; pools de conexao concorrentes nao sao suportados pelo libcurl.
 static CURLSH *g_share = NULL;
 static SDL_mutex *g_share_mtx[CURL_LOCK_DATA_LAST];
 static int g_ca_ready = 0;
@@ -129,12 +126,17 @@ static void share_unlock(CURL *h, curl_lock_data data, void *u) {
 int net_init(void) {
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) return -1;
     g_ca_ready = provision_ca_bundle() == 0;
-    for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) g_share_mtx[i] = SDL_CreateMutex();
-    g_share = curl_share_init();
+    int locks_ready = 1;
+    for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) {
+        g_share_mtx[i] = SDL_CreateMutex();
+        if (!g_share_mtx[i]) locks_ready = 0;
+    }
+    g_share = locks_ready ? curl_share_init() : NULL;
     if (g_share) {
         curl_share_setopt(g_share, CURLSHOPT_LOCKFUNC, share_lock);
         curl_share_setopt(g_share, CURLSHOPT_UNLOCKFUNC, share_unlock);
-        curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        // libcurl explicitly forbids sharing connection pools between concurrent
+        // threads, even with lock callbacks. DNS/TLS session sharing is supported.
         curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
         curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
     }
@@ -152,6 +154,7 @@ void net_exit(void) {
 
 void net_configure_curl_isolated(CURL *curl) {
     if (!curl) return;
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);   // mantem a conexao viva
     if (g_ca_ready) curl_easy_setopt(curl, CURLOPT_CAINFO, g_ca_path);
 }

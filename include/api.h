@@ -10,6 +10,10 @@ extern char g_token[640];
 cJSON *api_get(const char *path);
 cJSON *api_get_timeout(const char *path, long connect_timeout, long total_timeout);
 long api_send(const char *path, const char *method, const char *body);
+long api_send_cancel(const char *path, const char *method, const char *body,
+                     SDL_atomic_t *cancel);
+cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
+                              long total_timeout, SDL_atomic_t *cancel);
 
 const char *jstr(cJSON *o, const char *k);
 int jint(cJSON *o, const char *k);

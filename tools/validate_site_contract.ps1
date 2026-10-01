@@ -1,7 +1,10 @@
-param([string]$BackendRoot = 'C:\iptv')
+param([string]$BackendRoot = $env:NPLAY_BACKEND_ROOT)
 
 $ErrorActionPreference = 'Stop'
 $appRoot = Split-Path -Parent $PSScriptRoot
+if (-not $BackendRoot) {
+    $BackendRoot = if (Test-Path 'C:/iptv') { 'C:/iptv' } else { Join-Path (Split-Path $appRoot -Parent) 'Nplay' }
+}
 $switchMain = Get-Content (Join-Path $appRoot 'source/main.c') -Raw
 $switchApi = Get-Content (Join-Path $appRoot 'source/api.c') -Raw
 $switchPlayer = Get-Content (Join-Path $appRoot 'source/player.c') -Raw

@@ -1,4 +1,4 @@
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [switch]$SkipMediaFixtures)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -17,6 +17,7 @@ Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYPEER\s*,\s*0L') 'SSL_VERIFYPE
 Assert-True ($sources -notmatch 'CURLOPT_SSL_VERIFYHOST\s*,\s*0L') 'SSL_VERIFYHOST inseguro encontrado.'
 Assert-True ($sources -notmatch 'tls_verify"\s*,\s*"0') 'tls_verify inseguro encontrado.'
 Assert-True ($sources -match 'CURLOPT_CAINFO') 'libcurl nao recebe um bundle CA explicito no Switch.'
+Assert-True ($sources -notmatch 'CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT') 'Pool de conexoes libcurl compartilhado entre threads concorrentes.'
 Assert-True ($sources -match 'net_configure_curl_isolated\(c->easy\)') 'AVIO libcurl compartilha conexoes longas ou nao usa a cadeia CA embutida.'
 Assert-True ($sources -notmatch 'request->userdata\s*=') 'O player voltou a sobrescrever userdata do chamador.'
 Assert-True ($sources -match 'AVIOContext \*avio = NULL') 'MP4 remoto voltou ao AVIO por blocos que falha no Switch.'
@@ -147,6 +148,9 @@ Assert-True ($audioPolicySource -match 'count == 2' -and $audioPolicySource -mat
 Assert-True ($audioPolicySource -match 'continuity_priority' -and $audioPolicySource -match 'outro episodio') 'Pista de outro episodio pode voltar a vencer PT-BR em Dublado.'
 
 $apiSource = Get-Content source/api.c -Raw
+Assert-True ($mainSource -notmatch '\bapi_send\(' -and $mainSource -notmatch 'api_get_timeout\(p, 2L, 5L\)') 'Operacoes de conta/progresso voltaram a bloquear a UI.'
+$uiRequestSource = Get-Content source/ui_request.c -Raw
+Assert-True ($uiRequestSource -match 'SDL_CreateThread' -and $uiRequestSource -match 'SDL_WaitThread' -and $uiRequestSource -match 'SDL_FINGERDOWN') 'Modal de rede perdeu worker, ownership ou cancelamento touch.'
 Assert-True ($apiSource -match 'api_refresh_playback_cancel' -and $apiSource -match 'api_fail_playback_cancel') 'Recuperacao de sessao nao pode ser cancelada por B.'
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
 Assert-True ($apiSource -match '/api/stream/session/%d/fail') 'Failover para outra fonte nao esta implementado.'
@@ -176,8 +180,24 @@ if (-not $SkipBuild) {
 
 Assert-True (Test-Path Nplay.nro) 'Nplay.nro nao foi gerado.'
 Assert-True (Test-Path Nplay.elf) 'Nplay.elf nao foi gerado.'
-$hostGcc = 'C:\devkitPro\msys2\usr\bin\gcc.exe'
+$hostGcc = $env:HOST_CC
+if (-not $hostGcc) {
+    $gccCommand = Get-Command gcc -ErrorAction SilentlyContinue
+    if ($gccCommand) { $hostGcc = $gccCommand.Source }
+    elseif ($env:DEVKITPRO) { $hostGcc = Join-Path $env:DEVKITPRO 'msys2/usr/bin/gcc.exe' }
+}
 Assert-True (Test-Path $hostGcc) 'GCC host nao encontrado para as simulacoes.'
+$env:HOST_CC = $hostGcc
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude tools/test_player_buffer.c -o build/test_player_buffer.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou ao compilar.' }
+& .\build\test_player_buffer.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou.' }
+& node tools/test_demux_worker.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Concorrencia do worker demux falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Itools/host-stubs -Iinclude source/ui_request.c source/cJSON.c tools/test_ui_request.c -lm -o build/test_ui_request.exe
+if ($LASTEXITCODE -ne 0) { throw 'Modal de rede falhou ao compilar.' }
+& .\build\test_ui_request.exe
+if ($LASTEXITCODE -ne 0) { throw 'Modal de rede falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Iinclude source/genre_label.c tools/test_genre_label.c -o build/test_genre_label.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de rotulos falhou ao compilar.' }
 & .\build\test_genre_label.exe
@@ -226,14 +246,23 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do pareamento QR falhou ao compilar.' }
 & .\build\test_device_pairing.exe
 if ($LASTEXITCODE -ne 0) { throw 'Pareamento QR falhou em codigo, matriz, token ou backoff.' }
-if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
+if (-not $SkipMediaFixtures) {
+    Assert-True ([bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)) 'FFmpeg necessario para validacao completa; use -SkipMediaFixtures apenas para verificacao parcial.'
+    Assert-True ([bool](Get-Command ffprobe -ErrorAction SilentlyContinue)) 'FFprobe necessario para validacao completa.'
+}
+if (-not $SkipMediaFixtures -and (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
     (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
     & node tools/test_chunked_remux.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Simulacao local do remux chunked falhou.' }
     & node tools/test_hls_player_fixture.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Fixture HLS multifaixa/seek/legendas falhou.' }
 }
-$nm = 'C:\devkitPro\devkitA64\bin\aarch64-none-elf-nm.exe'
+$nm = $env:TARGET_NM
+if (-not $nm) {
+    $nmCommand = Get-Command aarch64-none-elf-nm -ErrorAction SilentlyContinue
+    if ($nmCommand) { $nm = $nmCommand.Source }
+    elseif ($env:DEVKITA64) { $nm = Join-Path $env:DEVKITA64 'bin/aarch64-none-elf-nm' }
+}
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"
 foreach ($symbol in @('ff_https_protocol','ff_hls_demuxer','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
@@ -243,3 +272,4 @@ foreach ($symbol in @('ff_https_protocol','ff_hls_demuxer','ff_h264_nvtegra_hwac
 $hash = (Get-FileHash Nplay.nro -Algorithm SHA256).Hash.ToLowerInvariant()
 $size = (Get-Item Nplay.nro).Length
 Write-Host "OK Nplay $makeVersion | $size bytes | sha256:$hash"
+if ($SkipMediaFixtures) { Write-Warning 'Validacao PARCIAL: fixtures reais de midia nao foram executadas.' }

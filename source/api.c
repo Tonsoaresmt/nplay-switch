@@ -65,7 +65,7 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     out->is_cam = jint(j, "is_cam");
 }
 
-static cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
+cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
                                      long total_timeout, SDL_atomic_t *cancel) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
@@ -167,13 +167,19 @@ cJSON *api_get(const char *path) {
 }
 
 long api_send(const char *path, const char *method, const char *body) {
+    return api_send_cancel(path, method, body, NULL);
+}
+
+long api_send_cancel(const char *path, const char *method, const char *body,
+                     SDL_atomic_t *cancel) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = { 0 };
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout(url, method, body ? body : "{}",
-                                    g_token[0] ? g_token : NULL, &out, &err, 5L, 20L);
+    long code = net_request_timeout_cancel(url, method, body ? body : "{}",
+                                    g_token[0] ? g_token : NULL, &out, &err, 5L, 20L,
+                                    cancel);
     diag_network_event(method, path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
     return code;

@@ -62,8 +62,7 @@
 #define PLAYER_RESTART_SEEK  2
 #define PLAYER_RESTART_TRACK 3
 #define PLAYER_REQUEST_NEXT  4
-#define DEMUX_QUEUE_PACKETS 32
-#define DEMUX_QUEUE_BYTES (4 * 1024 * 1024)
+#include "player_buffer.h"
 
 static char g_player_last_error[160] = "";
 static int g_player_audio_index = 0;
@@ -912,6 +911,9 @@ typedef struct {
     size_t queued_bytes;
     int high_packets;
     size_t high_bytes;
+    unsigned generation, empty_reads;
+    Uint32 space_wait_ms;
+    double high_video_seconds;
 } DemuxWorker;
 
 static int demux_worker_thread(void *userdata) {
@@ -934,6 +936,7 @@ static int demux_worker_thread(void *userdata) {
             SDL_CondWait(worker->space_ready, worker->mutex);
         }
         int stop = worker->stop;
+        unsigned generation = worker->generation;
         SDL_UnlockMutex(worker->mutex);
         if (stop) break;
 
@@ -967,6 +970,35 @@ static int demux_worker_thread(void *userdata) {
             av_packet_free(&packet);
             break;
         }
+        size_t incoming = packet->size > 0 ? (size_t)packet->size : 0;
+        if (incoming > DEMUX_QUEUE_BYTES) {
+            worker->terminal = AVERROR(ENOBUFS);
+            SDL_CondBroadcast(worker->data_ready);
+            SDL_UnlockMutex(worker->mutex);
+            av_packet_free(&packet);
+            break;
+        }
+        Uint32 wait_started = SDL_GetTicks();
+        // A pending packet never defeats the byte ceiling. A full queue still
+        // acknowledges the barrier; clear() changes generation before resume.
+        while (!worker->stop && generation == worker->generation) {
+            if (worker->pause_request) {
+                worker->paused = 1;
+                SDL_CondBroadcast(worker->data_ready);
+                while (!worker->stop && worker->pause_request)
+                    SDL_CondWait(worker->space_ready, worker->mutex);
+                worker->paused = 0;
+                SDL_CondBroadcast(worker->data_ready);
+            } else if (demux_buffer_can_enqueue(worker->count, worker->queued_bytes, incoming)) {
+                break;
+            } else SDL_CondWait(worker->space_ready, worker->mutex);
+        }
+        worker->space_wait_ms += SDL_GetTicks() - wait_started;
+        if (worker->stop || generation != worker->generation) {
+            SDL_UnlockMutex(worker->mutex);
+            av_packet_free(&packet);
+            continue;
+        }
         int tail = (worker->head + worker->count) % DEMUX_QUEUE_PACKETS;
         worker->queue[tail].packet = packet;
         worker->queue[tail].read_ms = elapsed;
@@ -974,6 +1006,17 @@ static int demux_worker_thread(void *userdata) {
         if (packet->size > 0) worker->queued_bytes += (size_t)packet->size;
         if (worker->count > worker->high_packets) worker->high_packets = worker->count;
         if (worker->queued_bytes > worker->high_bytes) worker->high_bytes = worker->queued_bytes;
+        double first = HUGE_VAL, last = -HUGE_VAL;
+        for (int i = 0; i < worker->count; i++) {
+            AVPacket *queued = worker->queue[(worker->head + i) % DEMUX_QUEUE_PACKETS].packet;
+            AVStream *stream = worker->fmt->streams[queued->stream_index];
+            if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO || queued->pts == AV_NOPTS_VALUE) continue;
+            double pts = queued->pts * av_q2d(stream->time_base);
+            if (pts < first) first = pts;
+            if (pts > last) last = pts;
+        }
+        if (last >= first && last - first > worker->high_video_seconds)
+            worker->high_video_seconds = last - first;
         SDL_CondSignal(worker->data_ready);
         SDL_UnlockMutex(worker->mutex);
     }
@@ -1028,6 +1071,7 @@ static int demux_worker_take(DemuxWorker *worker, AVPacket *out, Uint32 *read_ms
         SDL_CondSignal(worker->space_ready);
         result = 1;
     } else if (worker->terminal) result = worker->terminal;
+    else worker->empty_reads++;
     SDL_UnlockMutex(worker->mutex);
     return result;
 }
@@ -1070,6 +1114,7 @@ static void demux_worker_clear(DemuxWorker *worker) {
     worker->head = 0;
     worker->count = 0;
     worker->queued_bytes = 0;
+    worker->generation++;
     SDL_UnlockMutex(worker->mutex);
 }
 
@@ -1160,9 +1205,10 @@ static void demux_worker_stop(DemuxWorker *worker) {
     }
     if (worker->thread) SDL_WaitThread(worker->thread, NULL);
     diag_player_event("demux", "worker-summary",
-                      "maxPackets=%d maxKB=%u terminal=%d remaining=%d",
+                      "maxPackets=%d maxKB=%u terminal=%d remaining=%d videoSec=%.2f empty=%u waitMs=%u",
                       worker->high_packets, (unsigned)(worker->high_bytes / 1024),
-                      worker->terminal, worker->count);
+                      worker->terminal, worker->count, worker->high_video_seconds,
+                      worker->empty_reads, worker->space_wait_ms);
     for (int i = 0; i < DEMUX_QUEUE_PACKETS; i++)
         if (worker->queue[i].packet) av_packet_free(&worker->queue[i].packet);
     if (worker->data_ready) SDL_DestroyCond(worker->data_ready);
@@ -1490,11 +1536,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                       "total=%u audio=%d subtitle=%d repaired=%d unsupported=%d",
                       fmt->nb_streams, naud, nsub, repaired_subtitles, unsupported_subtitles);
     int native_nsub = nsub;
-    int manifest_subtitle_fallback = native_nsub == 0 && manifest_subtitle_count > 0;
+    int manifest_subtitle_fallback = manifest_subtitle_count > native_nsub;
     if (manifest_subtitle_fallback) {
         nsub = manifest_subtitle_count;
         diag_player_event("subtitle", "manifest-fallback",
-                          "master=%d native=0", manifest_subtitle_count);
+                          "master=%d native=%d", manifest_subtitle_count, native_nsub);
     }
     int acur = 0, best_stream = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     int best_audio = 0;

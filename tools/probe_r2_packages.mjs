@@ -33,6 +33,31 @@ function authorize(raw) {
 
 // Antes de escolher amostras, confirme todos os ponteiros publicados. Um item
 // marcado como pronto com manifesto 404 e falha de catalogo, nao de decoder.
+if (process.argv.includes('--subtitles-only')) {
+  const sample = ['movie', 'episode'].flatMap(kind => rows.filter(row => row.kind === kind).slice(0, 3));
+  for (const row of sample) {
+    try {
+      const url = authorize(decrypt(row.stream_url_enc));
+      const response = await fetch(url, { headers: { 'accept-encoding': 'identity', range: 'bytes=0-262143' }, signal: AbortSignal.timeout(10000) });
+      const body = await response.text();
+      const subtitleLines = body.split(/\r?\n/).filter(line => /^#EXT-X-MEDIA:/.test(line) && /TYPE=SUBTITLES(?:,|$)/.test(line));
+      const checks = [];
+      for (const line of subtitleLines.slice(0, 3)) {
+        const uri = /URI="([^"]+)"/.exec(line)?.[1];
+        if (!uri) continue;
+        const child = new URL(uri, url);
+        if (child.origin !== url.origin) { checks.push('cross-origin-skipped'); continue; }
+        if (!child.search) child.search = url.search;
+        const result = await fetch(child, { signal: AbortSignal.timeout(10000) });
+        const text = await result.text();
+        checks.push(`${result.status}:${text.startsWith('#EXTM3U') ? 'hls' : text.startsWith('WEBVTT') ? 'vtt' : 'invalid'}`);
+      }
+      console.log(JSON.stringify({ item: row.item_id, kind: row.kind, http: response.status, master: body.startsWith('#EXTM3U'), subtitleTracks: subtitleLines.length, subtitleChecks: checks }));
+    } catch { console.log(JSON.stringify({ item: row.item_id, kind: row.kind, error: 'network-or-local-config' })); }
+  }
+  db.close();
+  process.exit(0);
+}
 const fullAudit = process.argv.includes('--full');
 const auditRows = fullAudit ? rows : [
   ...rows.filter((row) => row.kind === 'movie').slice(0, 50),

@@ -79,6 +79,11 @@ static int g_login_sel = 0;
 
 #include "ui.h"
 #include "screen_movie.h"
+#include "ui_request.h"
+
+static long ui_send(const char *path, const char *method, const char *body) {
+    return ui_request_send(gRen, path, method, body, &g_running);
+}
 
 
 // ============================================================= capas (threads)
@@ -414,6 +419,8 @@ static cJSON *g_account_status = NULL;
 static cJSON *g_settings_accel_pending = NULL, *g_account_pending = NULL;
 static SDL_Thread *g_settings_thread = NULL;
 static SDL_atomic_t g_account_ready, g_settings_done;
+static unsigned g_prefs_revision = 0, g_settings_prefs_revision = 0;
+static int g_settings_refresh_pending = 0;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
@@ -507,7 +514,7 @@ static int catalog_favorite_id(cJSON *item, int is_series) {
 static int is_fav_series(int id) { return idx_of(g_favSeries, g_favSeriesN, id) >= 0; }
 static void load_favs(void) {
     if (g_favs_fetch.thread) return;
-    g_favItemN = g_favSeriesN = 0;
+    if (g_favs_profile_id != net_get_profile_id()) g_favItemN = g_favSeriesN = 0;
     g_favs_profile_id = net_get_profile_id();
     if (catalog_fetch_start(&g_favs_fetch, "/api/sync/favorites", g_token) != 0)
         toast("Nao foi possivel sincronizar Minha lista");
@@ -517,6 +524,7 @@ static void pump_favs(void) {
     if (!catalog_fetch_take(&g_favs_fetch, &j, NULL, 0)) return;
     if (!j) return;
     if (g_favs_profile_id != net_get_profile_id()) { cJSON_Delete(j); return; }
+    g_favItemN = g_favSeriesN = 0;
     cJSON *items = cJSON_GetObjectItem(j, "items"), *e;
     cJSON_ArrayForEach(e, items) {
         cJSON *it = cJSON_GetObjectItem(e, "item_id");
@@ -531,15 +539,15 @@ void toggle_fav_item(int id) {
     if (g_favs_fetch.thread) { toast("Sincronizando Minha lista..."); return; }
     char body[48]; snprintf(body, sizeof(body), "{\"item_id\":%d}", id);
     int i = idx_of(g_favItem, g_favItemN, id);
-    if (i >= 0) { api_send("/api/sync/favorites", "DELETE", body); g_favItem[i] = g_favItem[--g_favItemN]; toast("Removido da Minha lista"); }
-    else { long c = api_send("/api/sync/favorites", "POST", body); if (c == 200) { if (g_favItemN < 512) g_favItem[g_favItemN++] = id; toast("Adicionado a Minha lista"); } else toast("Nao foi possivel favoritar"); }
+    if (i >= 0) { if (ui_send("/api/sync/favorites", "DELETE", body) == 200) { g_favItem[i] = g_favItem[--g_favItemN]; toast("Removido da Minha lista"); } else { toast("Nao foi possivel confirmar a remocao"); load_favs(); } }
+    else { long c = ui_send("/api/sync/favorites", "POST", body); if (c == 200) { if (g_favItemN < 512) g_favItem[g_favItemN++] = id; toast("Adicionado a Minha lista"); } else { toast("Nao foi possivel confirmar a inclusao"); load_favs(); } }
 }
 static void toggle_fav_series(int id) {
     if (g_favs_fetch.thread) { toast("Sincronizando Minha lista..."); return; }
     char body[48]; snprintf(body, sizeof(body), "{\"series_id\":%d}", id);
     int i = idx_of(g_favSeries, g_favSeriesN, id);
-    if (i >= 0) { api_send("/api/sync/favorites", "DELETE", body); g_favSeries[i] = g_favSeries[--g_favSeriesN]; toast("Removido da Minha lista"); }
-    else { long c = api_send("/api/sync/favorites", "POST", body); if (c == 200) { if (g_favSeriesN < 512) g_favSeries[g_favSeriesN++] = id; toast("Adicionado a Minha lista"); } else toast("Nao foi possivel favoritar"); }
+    if (i >= 0) { if (ui_send("/api/sync/favorites", "DELETE", body) == 200) { g_favSeries[i] = g_favSeries[--g_favSeriesN]; toast("Removido da Minha lista"); } else { toast("Nao foi possivel confirmar a remocao"); load_favs(); } }
+    else { long c = ui_send("/api/sync/favorites", "POST", body); if (c == 200) { if (g_favSeriesN < 512) g_favSeries[g_favSeriesN++] = id; toast("Adicionado a Minha lista"); } else { toast("Nao foi possivel confirmar a inclusao"); load_favs(); } }
 }
 
 // ------------------------------------------------------------- landing (rails)
@@ -926,7 +934,9 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     double start = 0;
     int completed = 0;
     char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
-    cJSON *pr = api_get_timeout(p, 2L, 5L);
+    int cancelled = 0;
+    cJSON *pr = ui_request_get(gRen, p, &g_running, &cancelled);
+    if (cancelled) return 0;
     if (pr) {
         cJSON *prog = cJSON_GetObjectItem(pr, "progress");
         cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
@@ -1133,7 +1143,9 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
         double start = 0;
         int completed = 0;
         char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
-        cJSON *pr = api_get_timeout(p, 2L, 5L);
+        int cancelled = 0;
+        cJSON *pr = ui_request_get(gRen, p, &g_running, &cancelled);
+        if (cancelled) return 0;
         if (pr) {
             cJSON *prog = cJSON_GetObjectItem(pr, "progress");
             cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
@@ -1627,7 +1639,7 @@ done:
 
 static int accel_start(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/download/%d", itemId);
-    return api_send(path, "POST", "{}") == 200 ? 0 : -1;
+    return ui_send(path, "POST", "{}") == 200 ? 0 : -1;
 }
 
 static int accel_state_error(const char *state) {
@@ -1791,9 +1803,10 @@ static int accel_wait_and_play(int itemId, const char *title) {
     if (user_back) toast("Continuaremos preparando em segundo plano");
     return rc;
 }
-static void accel_remove(int itemId) {
+static int accel_remove(int itemId) {
     char path[64]; snprintf(path, sizeof(path), "/api/accel/jobs/%d", itemId);
-    api_send(path, "DELETE", "{}");
+    long code = ui_send(path, "DELETE", "{}");
+    return code >= 200 && code < 300;
 }
 // Agrupa os jobs por OBRA: serie (series_id) num card so; filme = card avulso.
 static void build_dl_groups(void) {
@@ -2919,7 +2932,7 @@ static void input_dlmenu(int b) {
         }
         k += snprintf(body + k, sizeof(body) - k, "]}");
         if (cnt == 0) { toast("Selecione ao menos um episodio (A)"); return; }
-        long code = api_send("/api/accel/download-batch", "POST", body);
+        long code = ui_send("/api/accel/download-batch", "POST", body);
         if (code != 200) {
             toast(code == 503 ? "Preparacao indisponivel no servidor agora" :
                  "Nao foi possivel preparar os episodios selecionados");
@@ -2938,7 +2951,7 @@ static int is_account_watchlater(const char *name) {
 static long sync_watchlater_item(const char *method, int id, int is_series) {
     char body[96];
     snprintf(body, sizeof(body), is_series ? "{\"series_id\":%d}" : "{\"item_id\":%d}", id);
-    return api_send("/api/sync/watchlater", method, body);
+    return ui_send("/api/sync/watchlater", method, body);
 }
 
 int media_list_add_named(const char *name, int id, int is_series, const char *title, const char *logo) {
@@ -3011,7 +3024,7 @@ static int history_set_position(cJSON *item, int position) {
     char body[192];
     snprintf(body, sizeof(body), "{\"item_id\":%d,\"position_seconds\":%d,\"duration_seconds\":%d}",
              id, position, duration);
-    return api_send("/api/sync/progress", "POST", body) == 200 ? 0 : -1;
+    return ui_send("/api/sync/progress", "POST", body) == 200 ? 0 : -1;
 }
 
 static void draw_history_home(void) {
@@ -4075,7 +4088,7 @@ static void input_downloads(int b) {
                 idx = next;
             }
         }
-        else if (b == JOY_X) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) { accel_remove(jint(j, "item_id")); load_downloads(); toast("Removido"); } }
+        else if (b == JOY_X) { cJSON *j = dlg_job(g, g_dlDetSel); if (j) { int ok = accel_remove(jint(j, "item_id")); load_downloads(); toast(ok ? "Removido" : "Nao foi possivel confirmar a remocao"); } }
         return;
     }
     // Biblioteca (g_dlView == 2)
@@ -4092,7 +4105,14 @@ static void input_downloads(int b) {
         }
     }
     else if (b == JOY_X) {   // remove a obra inteira
-        if (g_dlSel < n) { int g = g_dlSel; for (int k = g_dlg[g].nJobs - 1; k >= 0; k--) { cJSON *j = dlg_job(g, k); if (j) accel_remove(jint(j, "item_id")); } load_downloads(); toast("Removido"); }
+        if (g_dlSel < n) {
+            int g = g_dlSel, ok = 1;
+            for (int k = g_dlg[g].nJobs - 1; k >= 0 && g_running; k--) {
+                cJSON *j = dlg_job(g, k);
+                if (j && !accel_remove(jint(j, "item_id"))) { ok = 0; break; }
+            }
+            load_downloads(); toast(ok ? "Removido" : "Remocao interrompida; atualizando a lista");
+        }
     }
     int row = g_dlSel / GCOLS, rowTop = 184 + row * (GCH + GGAP), rowBot = rowTop + GCH;
     if (rowBot - g_dlScroll > WIN_H - 52) g_dlScroll = rowBot - (WIN_H - 52) + 16;
@@ -4156,7 +4176,9 @@ static int settings_fetch_thread(void *unused) {
     return 0;
 }
 static void load_settings_status(void) {
-    if (g_settings_thread) return;
+    if (g_settings_thread) { g_settings_refresh_pending = 1; return; }
+    g_settings_refresh_pending = 0;
+    g_settings_prefs_revision = g_prefs_revision;
     if (g_account_pending) { cJSON_Delete(g_account_pending); g_account_pending = NULL; }
     if (g_settings_accel_pending) { cJSON_Delete(g_settings_accel_pending); g_settings_accel_pending = NULL; }
     SDL_AtomicSet(&g_account_ready, 0);
@@ -4168,7 +4190,8 @@ static void pump_settings_status(void) {
         if (g_account_status) cJSON_Delete(g_account_status);
         g_account_status = g_account_pending; g_account_pending = NULL;
         cJSON *prefs = cJSON_GetObjectItem(g_account_status, "prefs");
-        if (prefs) {
+        if (prefs && g_settings_prefs_revision == g_prefs_revision) {
+            g_account_prefs_loaded = 1;
             cJSON *v = cJSON_GetObjectItem(prefs, "hideAdult");
             if (cJSON_IsBool(v)) g_pref_hide_adult = cJSON_IsTrue(v);
             v = cJSON_GetObjectItem(prefs, "autoplayNext");
@@ -4185,6 +4208,8 @@ static void pump_settings_status(void) {
         if (g_accel_status) cJSON_Delete(g_accel_status);
         g_accel_status = g_settings_accel_pending; g_settings_accel_pending = NULL;
     }
+    if (!g_account_status) g_account_prefs_loaded = 0;
+    if (g_settings_refresh_pending && g_running) load_settings_status();
 }
 static int load_player_boot_stage(char *out, size_t cap) {
     if (!out || cap == 0) return 0;
@@ -4269,6 +4294,8 @@ static void draw_player_diagnostics(void) {
                    252, 776, 614, C_TEXT, 0);
 }
 static void save_selected_preference(int direction) {
+    // An older account GET must not overwrite a newly saved audio preference.
+    g_prefs_revision++;
     int old_hide = g_pref_hide_adult, old_auto = g_pref_autoplay, old_motion = g_pref_reduce_motion, old_audio = g_pref_audio;
     char body[96];
     if (g_prefs_sel == 0) { g_pref_hide_adult = !g_pref_hide_adult; snprintf(body, sizeof(body), "{\"hideAdult\":%s}", g_pref_hide_adult ? "true" : "false"); }
@@ -4279,7 +4306,7 @@ static void save_selected_preference(int direction) {
         const char *audio[] = { "dub", "leg", "any" };
         snprintf(body, sizeof(body), "{\"audioPref\":\"%s\"}", audio[g_pref_audio]);
     }
-    if (api_send("/api/account/prefs", "PUT", body) != 200) {
+    if (ui_send("/api/account/prefs", "PUT", body) != 200) {
         g_pref_hide_adult = old_hide; g_pref_autoplay = old_auto; g_pref_reduce_motion = old_motion; g_pref_audio = old_audio;
         toast("Nao foi possivel salvar a preferencia");
     } else {
@@ -4290,6 +4317,8 @@ static void save_selected_preference(int direction) {
         g_hero_next = SDL_GetTicks() + 8000;
         toast("Preferencia sincronizada");
     }
+    // Resolve ambiguous cancellation/timeouts from an authoritative fresh GET.
+    if (g_running) load_settings_status();
 }
 static const char *subscription_status_label(const char *status) {
     if (!status || !status[0]) return "Status nao informado";
@@ -4346,7 +4375,7 @@ static int patch_profile(cJSON *body) {
     snprintf(path, sizeof(path), "/api/account/profiles/%d", g_profile_edit_id);
     char *json = cJSON_PrintUnformatted(body);
     if (!json) return 0;
-    long code = api_send(path, "PATCH", json);
+    long code = ui_send(path, "PATCH", json);
     free(json);
     if (code != 200) { toast("Nao foi possivel salvar o perfil"); return 0; }
     cJSON *profile = profile_by_id(g_profile_edit_id);
@@ -4382,7 +4411,7 @@ static void edit_profile_action(void) {
         if (g_profile_edit_id == g_profile_id) { toast("Troque de perfil antes de excluir o atual"); return; }
         if (!g_profile_delete_confirm) { g_profile_delete_confirm = 1; return; }
         char path[96]; snprintf(path, sizeof(path), "/api/account/profiles/%d", g_profile_edit_id);
-        if (api_send(path, "DELETE", "{}") == 200) {
+        if (ui_send(path, "DELETE", "{}") == 200) {
             g_profile_editor = 0; g_profile_delete_confirm = 0;
             begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL);
             toast("Perfil excluido");
@@ -4402,7 +4431,7 @@ static void add_profile_from_settings(void) {
     char *json = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!json) return;
-    long code = api_send("/api/account/profiles", "POST", json);
+    long code = ui_send("/api/account/profiles", "POST", json);
     free(json);
     if (code == 200) { toast("Perfil criado"); begin_catalog_fetch(FETCH_PROFILES, "/api/account/profiles", NULL); }
     else toast("Nao foi possivel criar o perfil");
@@ -4493,7 +4522,7 @@ static void settings_execute(void) {
                 char *json = cJSON_PrintUnformatted(body);
                 cJSON_Delete(body);
                 if (json) {
-                    long code = api_send("/api/account/password", "PATCH", json);
+                    long code = ui_send("/api/account/password", "PATCH", json);
                     memset(json, 0, strlen(json)); free(json);
                     toast(code == 200 ? "Senha alterada" : "Confira a senha atual e tente novamente");
                 }
@@ -4505,7 +4534,7 @@ static void settings_execute(void) {
             cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "email", email);
             char *json = cJSON_PrintUnformatted(body); cJSON_Delete(body);
             if (json) {
-                long code = api_send("/api/account/email", "PATCH", json); free(json);
+                long code = ui_send("/api/account/email", "PATCH", json); free(json);
                 if (code == 200) {
                     cJSON *user = g_account_status ? cJSON_GetObjectItem(g_account_status, "user") : NULL;
                     if (user) cJSON_ReplaceItemInObjectCaseSensitive(user, "email", cJSON_CreateString(email));

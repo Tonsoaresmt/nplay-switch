@@ -1575,3 +1575,16 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   Release v0.12.36 publica/latest. O endpoint releases/latest confirmou tamanho
   24184655 e digest exato. Nplay.nro permanece modificado localmente por ser
   artefato regenerado; nao incluir esse binario em commits posteriores.
+
+## Estabilidade e auditoria 0.12.37 em 01/10/2026
+
+- Continuidade completa e evidencias em docs/RELEASE_0_12_37.md. Fila 128 slots /
+  4 MiB, pending packet limitado separado, geracao para invalidar leitura anterior
+  ao seek, telemetria de reserva de video. Testes usam worker C real com pthreads.
+- Mutacoes da UI e progress GET sairam da thread de rede/desenho compartilhada:
+  ui_request mantem tela responsiva e aguarda join antes de liberar estado.
+- CURLSH nao compartilha mais conexoes concorrentes; DNS/TLS protegidos mantidos.
+- Backend v4 preparado em backend-subtitles-v4. Nao dizer que todas as legendas
+  estao resolvidas: fontes reais divergem (0 e 8 renditions), uma respondeu 404,
+  hot probe/VTT do PC ainda nao e implementado no NRO. Nenhum reprocessamento em lote.
+- Build ARM64 limpo e suite completa passaram. Hardware e Linux nao testados.
