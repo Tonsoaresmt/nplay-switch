@@ -24,6 +24,14 @@ int net_get_profile_id(void);
 void net_configure_curl(CURL *curl);
 void net_configure_curl_isolated(CURL *curl);
 
+// Bounded HTTPS text, no redirects/credentials/logged URLs. Partial bodies are
+// discarded on HTTP/transport failure. Caller owns out on success.
+long net_get_text_limited(const char *url, size_t limit, long timeout_ms,
+                           SDL_atomic_t *cancel, struct membuf *out);
+typedef int (*net_text_chunk_cb)(const char *, size_t, void *);
+long net_stream_text(const char *url, size_t limit, SDL_atomic_t *cancel,
+                      net_text_chunk_cb callback, void *userdata);
+
 // Faz uma requisicao HTTP.
 //   url    : URL completa (https://...)
 //   method : "GET" ou "POST"

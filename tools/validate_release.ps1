@@ -148,6 +148,12 @@ Assert-True ($audioPolicySource -match 'count == 2' -and $audioPolicySource -mat
 Assert-True ($audioPolicySource -match 'continuity_priority' -and $audioPolicySource -match 'outro episodio') 'Pista de outro episodio pode voltar a vencer PT-BR em Dublado.'
 
 $apiSource = Get-Content source/api.c -Raw
+Assert-True ($apiSource -match 'hot_session_id' -and $apiSource -match 'hot_subtitle_session_valid') 'ID textual da sessao remux foi perdido ou confundido com a sessao de heartbeat.'
+$hotSubtitleSource = Get-Content source/hot_subtitles.c -Raw
+Assert-True ($hotSubtitleSource -match 'https://' -and $hotSubtitleSource -match 'index > 100' -and $hotSubtitleSource -match 'HLS_MANIFEST_TRACK_CAP') 'Resolver de legendas remux perdeu restricao de origem, indice ou teto de faixas.'
+$vttSource = Get-Content source/vtt_stream.c -Raw
+Assert-True ($vttSource -match 'VTT_BLOCK_LIMIT' -and $vttSource -match 'WEBVTT' -and $vttSource -match 'skip_lf') 'Parser WebVTT progressivo perdeu limite, cabecalho ou compatibilidade CRLF.'
+Assert-True ($sources -match 'net_stream_text' -and $sources -match 'progressive_subtitle_stop' -and $sources -match 'external_subtitle_clear\(store\); store->progressive = stream') 'Legenda remux deixou de usar transporte isolado, cancelamento proprio ou aplicacao transacional.'
 Assert-True ($mainSource -notmatch '\bapi_send\(' -and $mainSource -notmatch 'api_get_timeout\(p, 2L, 5L\)') 'Operacoes de conta/progresso voltaram a bloquear a UI.'
 $uiRequestSource = Get-Content source/ui_request.c -Raw
 Assert-True ($uiRequestSource -match 'SDL_CreateThread' -and $uiRequestSource -match 'SDL_WaitThread' -and $uiRequestSource -match 'SDL_FINGERDOWN') 'Modal de rede perdeu worker, ownership ou cancelamento touch.'
@@ -194,6 +200,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou ao compilar.' }
 if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou.' }
 & node tools/test_demux_worker.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Concorrencia do worker demux falhou.' }
+& node tools/test_subtitle_io.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/vtt_stream.c tools/test_vtt_stream.c -o build/test_vtt_stream.exe
+if ($LASTEXITCODE -ne 0) { throw 'Parser progressivo WebVTT falhou ao compilar.' }
+& .\build\test_vtt_stream.exe
+if ($LASTEXITCODE -ne 0) { throw 'Parser progressivo WebVTT falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Itools/host-stubs -Iinclude source/ui_request.c source/cJSON.c tools/test_ui_request.c -lm -o build/test_ui_request.exe
 if ($LASTEXITCODE -ne 0) { throw 'Modal de rede falhou ao compilar.' }
 & .\build\test_ui_request.exe
@@ -234,7 +246,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao detectar aud
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
 & .\build\test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou nos cenarios de tempo e sobreposicao.' }
-& $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hot_subtitles.c source/cJSON.c tools/test_hot_subtitles.c -lm -o build/test_hot_subtitles.exe
+Assert-True ($LASTEXITCODE -eq 0) 'Compilacao hot subtitles falhou.'
+& .\build\test_hot_subtitles.exe
+Assert-True ($LASTEXITCODE -eq 0) 'Contrato hot subtitles falhou.'
+& $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
@@ -265,7 +281,7 @@ if (-not $nm) {
 }
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"
-foreach ($symbol in @('ff_https_protocol','ff_hls_demuxer','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
+foreach ($symbol in @('ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
     Assert-True ($symbols -match [regex]::Escape($symbol)) "Simbolo obrigatorio ausente: $symbol"
 }
 

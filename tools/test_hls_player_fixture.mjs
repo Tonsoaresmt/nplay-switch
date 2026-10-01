@@ -143,3 +143,19 @@ assert.match(decodedSubtitles, /Legenda em portugues/,
   'texto WebVTT em portugues nao foi decodificado');
 
 console.log(`HLS PLAYER FIXTURE OK: ${streams.length} faixas, 2 cues, inicio+seek decodificados`);
+
+// Direct VTT used by remux: no HLS demuxer, preserve overlapping intervals.
+function directVttPackets(text) {
+  const result = spawnSync(ffprobe, ['-v','error','-f','webvtt','-show_packets',
+    '-show_entries','packet=pts_time,duration_time','-of','json','pipe:0'],
+    {input:text,encoding:'utf8',timeout:10000,windowsHide:true});
+  if (result.status !== 0) return [];
+  return JSON.parse(result.stdout).packets || [];
+}
+const direct = directVttPackets('\ufeffWEBVTT\n\n00:01.000 --> 00:05.000\nOlá\nsegunda linha\n\n00:03.000 --> 00:06.000\nSobreposta\n\n');
+assert.equal(direct.length, 2);
+assert.deepEqual(direct.map(p=>[Number(p.pts_time),Number(p.duration_time)]), [[1,4],[3,3]]);
+assert.equal(directVttPackets('WEBVTT\n\n').length, 0);
+assert.equal(directVttPackets('WEBVTT\n\n00:01.000 -->').length, 0);
+assert.equal(directVttPackets('<html>503 indisponivel</html>').length, 0);
+console.log('DIRECT VTT FIXTURE OK: BOM, UTF-8, multiline, overlap, empty and malformed/truncated timing');

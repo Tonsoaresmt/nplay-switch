@@ -29,6 +29,7 @@ typedef struct {
     int item_id;
     int session_id;
     int source_id;
+    char hot_session_id[96]; // Secret textual remux id; NOT the heartbeat session.
 
     char kind[24];
     char section[24];

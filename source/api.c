@@ -1,6 +1,7 @@
 #include "api.h"
 #include "net.h"
 #include "diag.h"
+#include "hot_subtitles.h"
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -33,6 +34,7 @@ static void absolute_play_url(const char *play, char *out, size_t cap) {
 }
 
 static void parse_playback_source(cJSON *j, PlaybackSource *out) {
+    out->hot_session_id[0] = 0; // Normal resolver/refresh supersedes hot delivery.
     int value;
     const char *text;
     if ((value = jint(j, "session_id")) > 0) out->session_id = value;
@@ -142,6 +144,9 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
         out->progress = (int)(100 * ready->valuedouble / target->valuedouble);
     if (out->progress > 100) out->progress = 100;
     out->source.item_id = item_id;
+    const char *hot_sid = jstr(json, "session_id");
+    if (hot_subtitle_session_valid(hot_sid))
+        snprintf(out->source.hot_session_id, sizeof(out->source.hot_session_id), "%s", hot_sid);
     out->source.source_id = jint(json, "source_id");
     const char *delivery = jstr(json, "delivery");
     if (delivery) snprintf(out->source.delivery_str, sizeof(out->source.delivery_str), "%s", delivery);

@@ -17,6 +17,7 @@ int SDL_AtomicGet(SDL_atomic_t *);
 SDL_Thread *SDL_CreateThread(int (*)(void *), const char *, void *);
 void SDL_WaitThread(SDL_Thread *, int *);
 int SDL_PollEvent(SDL_Event *);
+int SDL_PushEvent(SDL_Event *);
 void SDL_Delay(Uint32);
 int SDL_SetRenderDrawColor(SDL_Renderer *, unsigned char, unsigned char, unsigned char, unsigned char);
 int SDL_RenderClear(SDL_Renderer *);

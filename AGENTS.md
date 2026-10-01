@@ -227,6 +227,31 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 3. Nao considere a validacao concluida apenas pela compilacao: player, capas e navegacao devem ser testados no Switch quando possivel.
 4. Ao encerrar uma rodada, atualize este arquivo se o estado ou os proximos passos mudarem.
 
+## Legendas de remux em fluxo — 0.12.38 (01/10/2026)
+
+- A sessao textual retornada por `/api/stream/hot` e agora preservada em
+  `PlaybackSource.hot_session_id`. Ela **nao** substitui `PlaybackSource.session_id`,
+  que continua sendo somente o inteiro da sessao de telas/heartbeat.
+- Quando o remux fMP4 nao anuncia `AVStream` de legenda, o Switch consulta
+  `/api/stream/hot/:sid/probe`; as faixas retornadas entram no painel como
+  WebVTT externos. Ao selecionar uma, `/subtitles/:index.vtt` e consumido em
+  fluxo, pois o backend envia `WEBVTT` cedo e mantem a resposta aberta enquanto
+  extrai os cues. Isso evita bloquear a reproducao esperando a extracao acabar.
+- O transporte novo aceita exclusivamente HTTPS, valida TLS e hostname, nao segue
+  redirecionamentos, limita 4 MiB mesmo sem `Content-Length`, nao persiste URL/SID
+  em diagnostico e tem cancelamento proprio. B/toque encerra apenas a legenda;
+  jamais reutilizar `demux_abort`, que tambem derrubaria video e audio.
+- O resultado so substitui a faixa anterior depois que o cabecalho WebVTT foi
+  validado. 404, 503, VTT invalido, timeout, cancelamento ou resposta tardia
+  conservam a selecao anterior. Cues sao protegidos por mutex e a thread e sempre
+  cancelada/joinada antes de trocar episodio ou sair do player.
+- Validacao local 01/10/2026: NRO ARM64 compilado com `-Werror`; simulacoes de
+  cancelamento, join, 404/503, resposta tardia, teto de bytes, WebVTT fragmentado
+  (BOM/CRLF/keepalive/EOF), HLS/seek e WebVTT direto passaram. Pendente obrigatorio
+  em hardware: abrir um remux com legenda, trocar/desligar faixa, seek durante
+  extracao e trocar episodio sem esperar o fim da extracao. Nao alegar paridade
+  total com navegador sem essa confirmacao.
+
 ## Rodada 0.12.18 em 28/09/2026
 
 - Integracao foi feita sobre `origin/codex/switch-rebuild` 0.12.17, sem substituir

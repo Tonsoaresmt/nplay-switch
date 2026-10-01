@@ -66,6 +66,14 @@ int main(void) {
     assert(r.status == HOT_STREAMING && r.source.sequential_stream);
     assert(!strcmp(r.source.play_url, "https://nplay.test/api/media/debrid/secret/video"));
     assert(r.source.source_id == 7 && !strcmp(r.source.container, "mp4"));
+    assert(r.source.session_id == 0 && !r.source.hot_session_id[0]);
+    r = run("{\"status\":\"streaming\",\"delivery\":\"hot\","
+            "\"session_id\":\"1234567890abcdef_safe-session\",\"play_url\":\"/api/media/hot/x/video\"}", 200, 0);
+    assert(!strcmp(r.source.hot_session_id, "1234567890abcdef_safe-session"));
+    assert(r.source.session_id == 0); // Must not become a heartbeat id.
+    r = run("{\"status\":\"streaming\",\"session_id\":\"1234567890abcdef/../bad\","
+            "\"play_url\":\"/api/media/hot/x/video\"}", 200, 0);
+    assert(!r.source.hot_session_id[0]);
     r = run("{\"status\":\"streaming\",\"delivery\":\"debrid\","
             "\"file_name\":\"movie.mp4\",\"play_url\":\"https://cdn.test/movie.mp4\"}", 200, 0);
     assert(r.status == HOT_STREAMING && !r.source.sequential_stream);
@@ -78,7 +86,7 @@ int main(void) {
     run("{\"status\":\"streaming\"}", 200, -1);
     run("{\"error\":\"sem fonte\"}", 409, -1);
     assert(strstr(api_last_error(), "HTTP 409"));
-    assert(calls == 6);
+    assert(calls == 8);
     puts("HOT API CONTRACT OK: remux, MP4, preparo, R2 e erros");
     return 0;
 }
