@@ -1534,7 +1534,7 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - O backend complementar esta em `C:/NplaySwitch/.codex-tmp/backend-device-onboarding`,
   branch `codex/switch-device-onboarding`: `/api/device/code` devolve a matriz,
   usa `no-store` e rate limit; o site preserva `#/pair` entre login, cadastro e
-  visitante. Publicar/deployar esse backend antes do NRO 0.12.35.
+  visitante. O commit `c650809` foi implantado pela execucao `36797192004`.
 - A cota do visitante permaneceu inalterada de proposito. Antes de ampliar para
   “3 conteudos”, definir se sao titulos completos ou previas e qual janela/escopo;
   o comportamento atual e uma previa unica protegida por tempo, dispositivo e IP.
@@ -1542,8 +1542,10 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   `npm run test:tv-pairing` e rotas de dispositivo em `audit_switch_routes.mjs`.
 - Validacao limpa passou na 0.12.35: 24.184.655 bytes, SHA-256
   `4bf8a54555c38189898dc5b0297d6a3541ce25aee48e9c9db97db0f2a342eebc`.
-  Backend chegou ao `main` em `c650809`, mas o workflow de deploy estava desativado
-  manualmente e a API publica ainda respondia sem `qr`. Implantar antes da release.
+  A API publica foi validada depois do deploy: HTTP 200, `Cache-Control: no-store`,
+  codigos presentes e QR `bit-rows-v1` de 29 x 29 modulos. O GitHub Actions foi
+  habilitado temporariamente e restrito a `appleboy/ssh-action@*`; desabilitar de
+  novo depois de publicar e verificar a release 0.12.35.
 - Pendente obrigatorio no hardware: QR em cameras Android/iPhone, login/cadastro/
   visitante, escolha de perfil, cancelar/renovar/expirar, Wi-Fi oscilando, toque e
   legibilidade portatil/dock. Simulacao local nao testa camera nem rede do Switch.

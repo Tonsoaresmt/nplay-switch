@@ -35,9 +35,9 @@
 - Auditoria estatica confere os 45 contratos HTTP entre NRO e backend.
 - Validacao limpa concluida: `Nplay.nro` tem 24.184.655 bytes e SHA-256
   `4bf8a54555c38189898dc5b0297d6a3541ce25aee48e9c9db97db0f2a342eebc`.
-- Backend publicado no `main` em `c650809`. Em 30/09 o workflow de deploy estava
-  desativado manualmente e a API publica ainda nao devolvia `qr`; nao publicar a
-  release do NRO antes de implantar e comprovar o contrato novo em producao.
+- Backend publicado no `main` em `c650809` e implantado pela execucao
+  `36797192004`. A API publica foi comprovada com HTTP 200, `Cache-Control:
+  no-store` e matriz `bit-rows-v1` valida de 29 x 29 modulos antes da release.
 - Pendente obrigatorio: instalar no Switch real, escanear em Android e iPhone,
   percorrer conta existente/cadastro/visitante, cancelar, expirar, desligar Wi-Fi
   e confirmar legibilidade em modo portatil e dock.
