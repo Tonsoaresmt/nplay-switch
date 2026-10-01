@@ -1571,3 +1571,7 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Publicar binario apenas como asset de Release nesta rodada; nao inclui-lo no
   commit. Pendente fisico: Voltar vindo de busca/Home, tap/arraste, cancelar
   retomada, Dublado com ingles/japones salvo e escolha manual/reconnect.
+- Publicacao concluida: commit de codigo f73ee28 em codex/switch-rebuild, GitHub
+  Release v0.12.36 publica/latest. O endpoint releases/latest confirmou tamanho
+  24184655 e digest exato. Nplay.nro permanece modificado localmente por ser
+  artefato regenerado; nao incluir esse binario em commits posteriores.

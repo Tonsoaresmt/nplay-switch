@@ -109,3 +109,6 @@ Fontes oficiais consultadas:
 - Pendente fisico: touch Voltar em Serie/Anime/Dorama vindo de Home e busca,
   cancelar retomada, Dublado com lingua antiga persistida, selecao manual e
   reconnect na mesma reproducao; comparar disponibilidade de legendas da obra real.
+- Publicacao: codigo f73ee28 enviado a codex/switch-rebuild; Release v0.12.36
+  publica/latest confirmada pela API, com o tamanho e digest acima. Nenhuma
+  configuracao de Actions nem deploy de backend foi alterado nesta rodada.
