@@ -548,7 +548,7 @@ static void draw_next_card(SDL_Renderer *r, const PlayerHud *h) {
     text_a(r, "PROXIMO EPISODIO", (int)x + 72, (int)y + 16, K_MUTED, ST_SMALL, a, 0);
     text_a(r, h->next_title && h->next_title[0] ? h->next_title : "Continuar a serie",
            (int)x + 72, (int)y + 40, K_WHITE, ST_NORMAL, a, (int)w - 90);
-    text_a(r, focused ? "A  Assistir agora" : "Direita para escolher", (int)x + 72, (int)y + 74,
+    text_a(r, focused ? "A / Toque  Assistir agora" : "Direita / Toque  Escolher", (int)x + 72, (int)y + 74,
            focused ? K_WHITE : K_DIM, ST_SMALL, a, 0);
     rrect(r, x + 16, y + hh - 10, w - 32, 4, 2, K_WHITE, 0.2f * a);
     rrect(r, x + 16, y + hh - 10, (w - 32) * clamp01(h->next_card_progress), 4, 2, K_ACC, a);

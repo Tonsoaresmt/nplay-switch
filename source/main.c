@@ -451,6 +451,7 @@ static struct {
     int series_id;
     int finished_item_id;
     int first_in_group;
+    int explicit_next;
 } g_episode_pending = {0};
 static char g_ser_plot_lines[3][220];
 static int g_ser_plot_count = 0;
@@ -465,7 +466,12 @@ static void load_downloads(void);
 static void load_history(void);
 static cJSON *history_items(void);
 static int accel_start(int itemId);
-static int accel_wait_and_play(int itemId, const char *title);
+typedef struct {
+    const char *subtitle, *overview, *next_title;
+    int has_next;
+} PlaybackPresentation;
+static int accel_wait_and_play(int itemId, const char *title,
+                               const PlaybackPresentation *presentation);
 static int hot_wait_for_stream(int itemId, int sourceId, const char *title,
                                PlaybackSource *out);
 static void do_search(void);
@@ -476,6 +482,8 @@ int resolve_and_play(int itemId, const char *title);
 int resolve_and_play_details(int itemId, const char *title, const char *subtitle,
                              const char *overview, const char *next_title, int has_next);
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls);
+static int play_with_progress_details(int itemId, const char *title, const char *url,
+                                      int is_hls, const PlaybackPresentation *presentation);
 static void mark_episode_completed_in_detail(int item_id);
 static int choose_next_episode(int series_id, int finished_item_id, int first_in_group,
                                int allow_refresh, int explicit_next,
@@ -929,6 +937,11 @@ static int prompt_resume_playback(const char *title, int position_seconds) {
 // assistindo"). Usado tanto no link direto quanto no arquivo do acelerador.
 // Retorna 1 se o video terminou naturalmente (p/ auto-play do proximo).
 static int play_with_progress(int itemId, const char *title, const char *url, int is_hls) {
+    return play_with_progress_details(itemId, title, url, is_hls, NULL);
+}
+
+static int play_with_progress_details(int itemId, const char *title, const char *url,
+                                      int is_hls, const PlaybackPresentation *presentation) {
     char stable_title[256];
     snprintf(stable_title, sizeof(stable_title), "%s", title && title[0] ? title : "Video");
     double start = 0;
@@ -954,6 +967,12 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.item_id = itemId;
     req.session_id = 0; // Local ou arquivo direto
     req.title = stable_title;
+    if (presentation) {
+        req.subtitle = presentation->subtitle;
+        req.overview = presentation->overview;
+        req.next_title = presentation->next_title;
+        req.has_next = presentation->has_next;
+    }
     req.url = url;
     const char *query = url ? strchr(url, '?') : NULL;
     size_t url_len = url ? (query ? (size_t)(query - url) : strlen(url)) : 0;
@@ -968,6 +987,8 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
     req.start_sec = start;
     req.audio_pref = g_next_audio_pref_override >= 0 ? g_next_audio_pref_override : g_pref_audio;
     req.audio_pref_explicit = g_next_audio_pref_explicit;
+    req.audio_hint = g_next_audio_hint;
+    req.audio_hint_language = g_next_audio_language[0] ? g_next_audio_language : NULL;
     req.progress_cb = on_player_progress;
     req.heartbeat_cb = NULL;
     // Sem renew_cb pois nao e uma stream resolvida via API.
@@ -1001,7 +1022,8 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
         toast(m); 
         return 0;
     }
-    return (res.reason == EXIT_REASON_NATURAL) ? 1 : 0;
+    return res.reason == EXIT_REASON_NEXT_EPISODE ? 2 :
+           res.reason == EXIT_REASON_NATURAL ? 1 : 0;
 }
 
 typedef struct {
@@ -1155,7 +1177,11 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
             }
         } else if (hot == -2) {
             // Instalacoes antigas sem hot-stream mantem a preparacao existente.
-            return accel_wait_and_play(itemId, stable_title);
+            PlaybackPresentation presentation = {
+                .subtitle = stable_subtitle, .overview = stable_overview,
+                .next_title = stable_next, .has_next = has_next && stable_next[0]
+            };
+            return accel_wait_and_play(itemId, stable_title, &presentation);
         } else if (hot != 1) {
             return 0;
         }
@@ -1511,11 +1537,12 @@ static void pump_catalog_fetch(void) {
         int series_id = g_episode_pending.series_id;
         int finished_item_id = g_episode_pending.finished_item_id;
         int first_in_group = g_episode_pending.first_in_group;
+        int explicit_next = g_episode_pending.explicit_next;
         g_episode_pending.active = 0;
         if (applied && jint(cJSON_GetObjectItem(g_ser, "series"), "id") == series_id) {
             char next_title[256];
             int next_id = choose_next_episode(series_id, finished_item_id,
-                                              first_in_group, 0, 0,
+                                              first_in_group, 0, explicit_next,
                                               next_title, sizeof(next_title));
             if (next_id > 0) play_episode_sequence(next_id, series_id, next_title, NULL);
         }
@@ -1774,7 +1801,8 @@ static void draw_accel_wait(const char *title, cJSON *job, int offline, Uint32 n
     SDL_RenderPresent(gRen);
 }
 
-static int accel_wait_and_play(int itemId, const char *title) {
+static int accel_wait_and_play(int itemId, const char *title,
+                               const PlaybackPresentation *presentation) {
     if (accel_start(itemId) != 0) { toast("Nao foi possivel preparar este video"); return 0; }
     cJSON *status = NULL;
     Uint32 next_poll = 0;
@@ -1816,8 +1844,8 @@ static int accel_wait_and_play(int itemId, const char *title) {
                 appletSetMediaPlaybackState(false); g_download_awake = 0;
                 const char *container = jstr(status, "container");
                 if (!container && job) container = jstr(job, "container");
-                rc = play_with_progress(itemId, title, url,
-                                        container && !strcasecmp(container, "m3u8"));
+                rc = play_with_progress_details(itemId, title, url,
+                                        container && !strcasecmp(container, "m3u8"), presentation);
                 waiting = 0;
                 break;
             }
@@ -3776,7 +3804,7 @@ static int prompt_next_episode(cJSON *episode, cJSON *series) {
     return 0;
 }
 static void fetch_episode_context(int series_id, int finished_item_id,
-                                  int first_in_group) {
+                                  int first_in_group, int explicit_next) {
     if (series_id <= 0) return;
     open_series(series_id);
     // A criacao da thread pode falhar antes de existir uma consulta. Evite
@@ -3786,6 +3814,7 @@ static void fetch_episode_context(int series_id, int finished_item_id,
     g_episode_pending.series_id = series_id;
     g_episode_pending.finished_item_id = finished_item_id;
     g_episode_pending.first_in_group = first_in_group;
+    g_episode_pending.explicit_next = explicit_next;
 }
 
 // Return the episode to play, or zero when the user declined, there is no next
@@ -3796,14 +3825,14 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
                                char *title, size_t title_cap) {
     if (series_id <= 0) return 0;
     if (!g_ser || jint(ser_obj(), "id") != series_id) {
-        if (allow_refresh) fetch_episode_context(series_id, finished_item_id, first_in_group);
+        if (allow_refresh) fetch_episode_context(series_id, finished_item_id, first_in_group, explicit_next);
         return 0;
     }
     g_screen = SC_SERIES;
     EpisodeNext next = first_in_group ? episode_first(g_ser) :
                                        episode_after(g_ser, finished_item_id);
     if (!first_in_group && !next.found_current) {
-        if (allow_refresh) fetch_episode_context(series_id, finished_item_id, 0);
+        if (allow_refresh) fetch_episode_context(series_id, finished_item_id, 0, explicit_next);
         else toast("Episodio nao encontrado nesta serie");
         return 0;
     }
@@ -3820,7 +3849,7 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
         return next.item_id;
     }
     if (!first_in_group && next.series_id > 0 && next.series_id != series_id) {
-        fetch_episode_context(next.series_id, 0, 1);
+        fetch_episode_context(next.series_id, 0, 1, explicit_next);
     }
     return 0;
 }
@@ -3829,13 +3858,33 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
                                   cJSON *episode_hint) {
     if (item_id <= 0) return;
     char series_title[256];
+    char fallback_title[256];
+    snprintf(fallback_title, sizeof(fallback_title), "%s", title && title[0] ? title : "Serie");
     int matching_series = g_ser && ser_obj() && jint(ser_obj(), "id") == series_id;
+    // Home/history may open an episode directly. Resolve its complete context
+    // before the player, using the cancellable UI worker (never per frame).
+    if (!matching_series && series_id > 0) {
+        char path[96]; snprintf(path, sizeof(path), "/api/catalog/series/%d", series_id);
+        int cancelled = 0;
+        cJSON *detail = ui_request_get(gRen, path, &g_running, &cancelled);
+        if (cancelled) { if (detail) cJSON_Delete(detail); return; }
+        if (detail && jint(cJSON_GetObjectItem(detail, "series"), "id") == series_id &&
+            episode_find(detail, item_id)) {
+            if (g_ser) cJSON_Delete(g_ser);
+            g_ser = detail;
+            episode_hint = NULL; // The complete detail now owns the episode metadata.
+            matching_series = 1;
+            g_series_audio_explicit = 0;
+            select_series_resume_target(g_ser);
+            rebuild_series_plot();
+        } else if (detail) cJSON_Delete(detail);
+    }
     const char *known_series_title = matching_series ? jstr(ser_obj(), "title") : NULL;
     if ((!known_series_title || !known_series_title[0]) && episode_hint)
         known_series_title = jstr(episode_hint, "series_title");
     snprintf(series_title, sizeof(series_title), "%s",
              known_series_title && known_series_title[0] ? known_series_title :
-             (title && title[0] ? title : "Serie"));
+             fallback_title);
     int audio_hint = 0;
     char audio_language[8] = "";
     while (g_running && item_id > 0) {
@@ -3855,15 +3904,11 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
         g_next_audio_hint = audio_hint;
         snprintf(g_next_audio_language, sizeof(g_next_audio_language), "%s", audio_language);
         cJSON *current_episode = NULL, *next_episode = NULL;
+        EpisodeNext next = {0};
         if (matching_series) {
-            for (int i = 0; i < ser_nep(); i++) {
-                cJSON *candidate = ser_ep_at(i);
-                if (candidate && jint(candidate, "id") == item_id) {
-                    current_episode = candidate;
-                    next_episode = i + 1 < ser_nep() ? ser_ep_at(i + 1) : NULL;
-                    break;
-                }
-            }
+            current_episode = (cJSON *)episode_find(g_ser, item_id);
+            next = episode_after(g_ser, item_id);
+            next_episode = (cJSON *)episode_find(g_ser, next.item_id);
         }
         if (!current_episode && episode_hint &&
             (jint(episode_hint, "id") == item_id || jint(episode_hint, "item_id") == item_id))
@@ -3883,10 +3928,12 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
             if ((!overview || !overview[0]) && matching_series) overview = jstr(ser_obj(), "plot");
         }
         if (next_episode) snprintf(next_context, sizeof(next_context), "%s", ep_display_title(next_episode));
+        else if (next.found_current && next.series_id > 0 && next.series_id != series_id)
+            snprintf(next_context, sizeof(next_context), "Proxima temporada");
         int play_result = resolve_and_play_details(item_id, series_title,
                                                    episode_context[0] ? episode_context : NULL,
                                                    overview, next_context,
-                                                   next_episode != NULL);
+                                                   next_context[0] != '\0');
         g_next_audio_pref_override = -1;
         g_next_audio_pref_explicit = 0;
         g_next_audio_hint = 0;

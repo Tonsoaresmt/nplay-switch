@@ -96,6 +96,17 @@ EpisodeNext episode_first(const cJSON *detail) {
     return find_episode(detail, 0, 1);
 }
 
+const cJSON *episode_find(const cJSON *detail, int item_id) {
+    if (item_id <= 0) return NULL;
+    const cJSON *season, *episode;
+    cJSON_ArrayForEach(season, cJSON_GetObjectItemCaseSensitive(detail, "seasons")) {
+        cJSON_ArrayForEach(episode, season) {
+            if (number(episode, "id") == item_id) return episode;
+        }
+    }
+    return NULL;
+}
+
 int episode_coordinates_adjacent(int season, int episode,
                                  int next_season, int next_episode) {
     if (season <= 0 || episode <= 0 || next_season <= 0 || next_episode <= 0) return 0;

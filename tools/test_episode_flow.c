@@ -21,6 +21,9 @@ int main(void) {
     assert(next.item_id == 101 && next.season_index == 1 && next.episode_index == 0);
     next = episode_after(series, 101);
     assert(next.found_current && next.item_id == 102 && next.flat_index == 3);
+    assert(episode_find(series, 201));
+    assert(episode_find(series, next.item_id));
+    assert(!episode_find(series, 999) && !episode_find(NULL, 0));
     next = episode_after(series, 102);
     assert(next.item_id == 201 && next.season_index == 0);
     next = episode_after(series, 202);

@@ -15,6 +15,8 @@ typedef struct {
 // grouped season. A missing current item never guesses a replacement episode.
 EpisodeNext episode_after(const cJSON *detail, int current_item_id);
 EpisodeNext episode_first(const cJSON *detail);
+// Lookup in the complete detail, not only the season currently on screen.
+const cJSON *episode_find(const cJSON *detail, int item_id);
 int episode_coordinates_adjacent(int season, int episode,
                                  int next_season, int next_episode);
 // Resolve a selecao da biblioteca pelo identificador da obra, nao pela

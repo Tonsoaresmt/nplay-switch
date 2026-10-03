@@ -269,6 +269,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
 & .\build\test_episode_flow.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
+& node tools/test_episode_sequence.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Sequencia real de episodios perdeu contexto ou proximo episodio.' }
+Assert-True ($sources -match 'next_selected \|\| paused \|\| hud_pinned') 'Proximo episodio voltou a ficar escondido durante a pausa.'
+Assert-True ($mainSource -match 'play_with_progress_details' -and $mainSource -match 'presentation->has_next' -and $mainSource -match 'g_episode_pending\.explicit_next') 'Preparacao ou virada de temporada perdeu a acao explicita de proximo episodio.'
+& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
+if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 falhou ao compilar.' }
+& .\build\test_playback_source.exe
+if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 perdeu a fonte escolhida pelo backend.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/device_pairing.c source/cJSON.c tools/test_device_pairing.c -lm -o build/test_device_pairing.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao do pareamento QR falhou ao compilar.' }
 & .\build\test_device_pairing.exe

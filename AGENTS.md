@@ -1698,3 +1698,29 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   traces novos (idle/bytes e reserva). Não declarar solução de todos os stalls.
 - Publicado código 66a5ced em codex/switch-rebuild; Release v0.12.43 latest
   confirmada, asset 24201039 bytes e SHA-256 3b3871db55107c100c54d2b66bbedf64518089b869812b26ba251ccb875acfeb.
+
+## Animes, fonte e próximo episódio — 0.12.44, 03/10/2026
+
+- Usuário reportou Super no Ura de Yani Suu Futari com várias legendas no PC
+  e nenhuma no NRO. Episódio/trace atual ainda ausentes. Backend origin/main
+  a25a576 coloca R2 antes de Animes Drive; teste do resolver C real confirma
+  que NRO não substitui delivery=r2. Isso NÃO verifica esse pacote em produção.
+  Catálogo público exigiu login (401); não contornar nem usar credenciais alheias.
+- Cartão Próximo fica visível em pausa/HUD fixo; Direita seleciona/A confirma,
+  B/esquerda cancela. Toque primeiro seleciona, segundo confirma. Não detecta
+  créditos: janela final continua 45 s; opção manual não depende dela.
+- Contexto direto Home/Histórico usa consulta cancelável única de até 5 s.
+  Ordem vem do detalhe inteiro, inclusive troca de temporada; preparo conserva
+  apresentação/next e retorno NEXT=2. Consulta agrupada conserva explicit_next,
+  não depende de autoplay quando o usuário pediu o próximo manualmente.
+- Diagnóstico conserva provedor allowlisted (animesdrive/hinatasoul) sem URL/SID.
+  Não mexeu em empacotador, política de áudio ou decoder de legendas. Não há
+  migração automática upstream→R2 durante um vídeo, como no site.
+- Simulação executa play_episode_sequence real: b283f72 falha em has_next,
+  atual passa temporadas fora de ordem, final/grupo, abertura direta/cancelar
+  e avanço explícito. API fake valida R2/anime, MP4/provedor e label seguro.
+- Build ARM64 completo -Werror e suite completa/fixtures reais passaram.
+  Hardware e reprodução específica do anime não confirmados. Continuidade e
+  checklist em docs/ANIME_R2_NEXT_0_12_44.md. Publicar NRO só como asset, e
+  registrar digest/publicação após build final. Pedir trace novo antes de
+  atribuir legenda ausente ao provedor ou anunciar correção de produção.

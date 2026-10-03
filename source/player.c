@@ -2295,7 +2295,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
 
         PlayerNextUi next_ui = {0};
-        player_next_ui(hud_base.has_next, cur_pos, dur, next_selected, &next_ui);
+        player_next_ui(hud_base.has_next, cur_pos, dur,
+                       next_selected || paused || hud_pinned, &next_ui);
         hud_base.next_card_alpha = next_ui.alpha;
         hud_base.next_card_progress = next_ui.progress;
         hud_base.focus = next_selected ? PUI_FOCUS_NEXT_CARD : PUI_FOCUS_PLAY;
@@ -2770,11 +2771,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 double target = cur_pos;
                 if (hud_base.has_next && hud_base.next_card_alpha > 0.01f &&
                     tx >= 872 && tx < 1232 && ty >= 432 && ty < 550) {
-                    next_requested = 1;
-                    if (hb) SDL_AtomicSet(&hb->force_progress, 1);
-                    diag_player_event("controls", "next-episode-touch",
-                                      "pos=%.2f dur=%.2f", cur_pos, dur);
-                    running = 0;
+                    if (next_selected) {
+                        next_requested = 1;
+                        if (hb) SDL_AtomicSet(&hb->force_progress, 1);
+                        diag_player_event("controls", "next-episode-touch",
+                                          "pos=%.2f dur=%.2f", cur_pos, dur);
+                        running = 0;
+                    } else {
+                        next_selected = 1;
+                        hud_base.focus = PUI_FOCUS_NEXT_CARD;
+                        hud_base.next_card_alpha = 1.0f;
+                        hud_until = SDL_GetTicks() + 8000;
+                    }
                 } else if (hud_base.has_next && ty >= 620 && tx >= 1195) {
                     next_selected = 1;
                     hud_base.focus = PUI_FOCUS_NEXT_CARD;
@@ -3576,6 +3584,10 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     diag_player_begin(active.item_id, active.session_id, active.source_id,
                       active.container, delivery);
     diag_player_event("player", "run-begin", "start=%.1f", current_pos);
+    diag_player_event("source", "resolved", "provider=%s section=%s season=%d episode=%d next=%d",
+                      active.source_provider[0] ? active.source_provider : "unspecified",
+                      !strcmp(active.section, "anime") ? "anime" : "other",
+                      active.season, active.episode, request->has_next);
 
     while (1) {
         SDL_AtomicSet(&hb.pipeline_ready, 0);

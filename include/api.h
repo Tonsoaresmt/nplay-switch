@@ -38,6 +38,7 @@ typedef struct {
     char section[24];
     char container[24];
     char delivery_str[24];
+    char source_provider[24]; // Allowlisted public label, never URL/token.
     DeliveryType delivery;
 
     char play_url[1536];

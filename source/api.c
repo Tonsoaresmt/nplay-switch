@@ -39,6 +39,7 @@ static void absolute_play_url(const char *play, char *out, size_t cap) {
 
 static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     out->hot_session_id[0] = 0; // Normal resolver/refresh supersedes hot delivery.
+    out->source_provider[0] = 0;
     int value;
     const char *text;
     if ((value = jint(j, "session_id")) > 0) out->session_id = value;
@@ -46,6 +47,9 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     if ((text = jstr(j, "kind"))) snprintf(out->kind, sizeof(out->kind), "%s", text);
     if ((text = jstr(j, "section"))) snprintf(out->section, sizeof(out->section), "%s", text);
     if ((text = jstr(j, "container"))) snprintf(out->container, sizeof(out->container), "%s", text);
+    text = jstr(j, "source_provider");
+    if (text && (!strcmp(text, "animesdrive") || !strcmp(text, "hinatasoul")))
+        snprintf(out->source_provider, sizeof(out->source_provider), "%s", text);
     if ((text = jstr(j, "delivery"))) {
         snprintf(out->delivery_str, sizeof(out->delivery_str), "%s", text);
         out->delivery = !strcmp(text, "r2") ? DELIVERY_R2 :

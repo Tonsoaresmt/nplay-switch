@@ -29,6 +29,12 @@ int main(void) {
     player_next_ui(1, 20.0, 0.0, 1, &ui);
     assert(close_to(ui.alpha, 1.0f) && close_to(ui.progress, 0.0f));
 
+    // Explicit visibility (pause/pinned HUD/selection) works before credits.
+    player_next_ui(1, 120.0, 1440.0, 1, &ui);
+    assert(ui.available && close_to(ui.alpha, 1.0f) && close_to(ui.progress, 0.0f));
+    player_next_ui(0, 120.0, 1440.0, 1, &ui);
+    assert(!ui.available && close_to(ui.alpha, 0.0f));
+
     puts("next episode UI: ok");
     return 0;
 }
