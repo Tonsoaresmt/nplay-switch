@@ -18,6 +18,9 @@ cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
 const char *jstr(cJSON *o, const char *k);
 int jint(cJSON *o, const char *k);
 int arr_len(cJSON *a);
+// A API devolve reason=expired em respostas 401. Separar isso de uma falha de
+// rede permite voltar ao login, sem repetir reconexoes impossiveis.
+int api_last_error_access_expired(void);
 
 typedef enum {
     DELIVERY_UNKNOWN = 0,

@@ -24,10 +24,19 @@ static int fetch_worker(void *userdata) {
         diag_network_event("GET", fetch->path, code, SDL_GetTicks() - started, response.len);
         if (code == 200 && response.data) fetch->result = cJSON_Parse(response.data);
         if (!fetch->result) {
+            cJSON *failure = response.data ? cJSON_Parse(response.data) : NULL;
+            const char *reason = jstr(failure, "reason");
+            const char *message = jstr(failure, "error");
+            fetch->access_expired = code == 401 && reason && !strcmp(reason, "expired");
             if (code == 200) snprintf(fetch->error, sizeof(fetch->error), "Resposta invalida do catalogo");
+            else if (fetch->access_expired)
+                snprintf(fetch->error, sizeof(fetch->error), "Acesso expirado. Entre novamente para renovar.");
+            else if (message && message[0])
+                snprintf(fetch->error, sizeof(fetch->error), "HTTP %ld: %.150s", code, message);
             else if (transport_error && transport_error[0])
                 snprintf(fetch->error, sizeof(fetch->error), "Rede: %.160s", transport_error);
             else snprintf(fetch->error, sizeof(fetch->error), "Servidor respondeu HTTP %ld", code);
+            if (failure) cJSON_Delete(failure);
         }
     }
     membuf_free(&response);
@@ -42,6 +51,7 @@ int catalog_fetch_start(CatalogFetch *fetch, const char *path, const char *beare
     snprintf(fetch->path, sizeof(fetch->path), "%s", path);
     snprintf(fetch->bearer, sizeof(fetch->bearer), "%s", bearer ? bearer : "");
     fetch->error[0] = '\0';
+    fetch->access_expired = 0;
     SDL_AtomicSet(&fetch->done, 0);
     SDL_AtomicSet(&fetch->cancel, 0);
     fetch->thread = SDL_CreateThread(fetch_worker, "catalog-detail", fetch);

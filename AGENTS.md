@@ -1616,3 +1616,20 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Publicado 91da091 em main e codex/switch-rebuild por fast-forward atomico.
   Release latest v0.12.37 confirmada com digest e tamanho exatos pelo GitHub.
   Nplay.nro deixou de ser rastreado, preservado no disco e como asset da Release.
+
+## Expiração de acesso e recuperação 0.12.40 em 03/10/2026
+
+- O NRO reconhece `401` com `reason=expired` no catálogo, na abertura e na
+  recuperação do player. A sessão local é removida e a tela retorna ao login,
+  sem deixar o usuário em reconexão infinita. Toque no botão central de cancelar
+  também interrompe a tela de recuperação.
+- Após 12 s sem quadro nem áudio em HLS já iniciado, o player escala a falha ao
+  supervisor para renovar a sessão; troca de faixa e áudio ainda em fila não
+  acionam essa escalada. A política tem teste de host próprio.
+- O backend correspondente deve limitar tokens R2 ao `access_expires_at` e
+  validar grant+conta em `/api/media/hot/*/video` e `/api/media/debrid/*/video`.
+  A documentação completa está em `docs/SWITCH_ACCESS_EXPIRY_2026_10_03.md`.
+- Validação local: compilação ARM64 sem avisos, testes de áudio/touch/recuperação
+  e a maior parte de `validate_release.ps1` passaram. A etapa final de símbolos
+  depende de `aarch64-none-elf-nm` estar configurado no PowerShell nativo.
+  Pendente obrigatório: conta com vencimento real em R2, hot e debrid no Switch.

@@ -66,8 +66,10 @@
 #define PLAYER_RESTART_TRACK 3
 #define PLAYER_REQUEST_NEXT  4
 #include "player_buffer.h"
+#include "player_recovery.h"
 
 static char g_player_last_error[160] = "";
+static int g_player_last_access_expired = 0;
 static int g_player_audio_index = 0;
 static char g_player_audio_language[8] = "";
 static int g_player_subtitle_index = 0;
@@ -96,6 +98,7 @@ static void player_boot_stage(const char *stage) {
 }
 
 const char *player_last_error(void) { return g_player_last_error; }
+int player_last_error_access_expired(void) { return g_player_last_access_expired; }
 
 static void player_error_text(const char *stage, int code) {
     char detail[AV_ERROR_MAX_STRING_SIZE] = "erro desconhecido";
@@ -1054,6 +1057,7 @@ typedef struct {
     SDL_atomic_t cancel;
     SDL_atomic_t done;
     int rc;
+    int access_expired;
     char error[192];
 } PlayerRecoveryJob;
 
@@ -1062,6 +1066,7 @@ static int player_recovery_thread(void *userdata) {
     job->rc = job->callback(&job->current, &job->renewed, &job->cancel,
                             job->callback_userdata);
     if (job->rc != 0) {
+        job->access_expired = api_last_error_access_expired();
         const char *error = api_last_error();
         if (error && error[0])
             snprintf(job->error, sizeof(job->error), "%s", error);
@@ -1099,6 +1104,12 @@ static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
                 SDL_AtomicSet(&job.cancel, 1);
                 break;
             }
+            if (event.type == SDL_FINGERDOWN && event.tfinger.x > 0.33f &&
+                event.tfinger.x < 0.67f && event.tfinger.y > 0.84f) {
+                cancelled = 1;
+                SDL_AtomicSet(&job.cancel, 1);
+                break;
+            }
         }
         if (!cancelled && joy && (SDL_JoystickGetButton(joy, JOY_B) ||
                                   SDL_JoystickGetButton(joy, JOY_MINUS))) {
@@ -1116,7 +1127,7 @@ static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
     }
     if (job.rc != 0 || !job.renewed.play_url[0]) {
         if (job.error[0]) player_error_message(job.error);
-        return -1;
+        return job.access_expired ? -2 : -1;
     }
     *renewed = job.renewed;
     return 0;
@@ -2973,6 +2984,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (now_ticks < notice_until) draw_notice(ren, notice);
                 SDL_RenderPresent(ren);
             }
+            // Uma oscilacao curta continua sendo tratada pelo transporte. Depois
+            // de 12 s sem quadro nem audio, sair deste demux e deixar o
+            // supervisor renovar a sessao evita reconexao infinita na mesma URL.
+            unsigned audio_queued = adev ? SDL_GetQueuedAudioSize(adev) : 0;
+            if (player_recovery_should_renew_after_stall(
+                    now_ticks - buffering_since, native_hls, logged_first_present,
+                    audio_switch_pending || subtitle_switch_pending, audio_queued)) {
+                diag_player_event("recover", "stall-escalate", "ms=%u audio=%u pos=%.1f",
+                                  now_ticks - buffering_since, audio_queued, cur_pos);
+                player_error_message("Conexao interrompida; renovando sessao");
+                playback_error = -5;
+                break;
+            }
             SDL_Delay(30);
             continue;
         }
@@ -3445,6 +3469,7 @@ static int playback_heartbeat_thread(void *userdata) {
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result) {
     if (!request || !result) return -1;
     memset(result, 0, sizeof(PlayerResult));
+    g_player_last_access_expired = 0;
 
     PlaybackHeartbeat hb = {0};
     hb.item_id = request->item_id;
@@ -3652,6 +3677,10 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                 }
                 if (recovery_rc == 1) {
                     recovery_cancelled = 1;
+                    break;
+                }
+                if (recovery_rc == -2) {
+                    g_player_last_access_expired = 1;
                     break;
                 }
                 if (use_fallback) break;

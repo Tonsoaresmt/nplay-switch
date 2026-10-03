@@ -7,11 +7,15 @@
 #include <strings.h>
 
 static _Thread_local char g_api_last_error[192] = "";
+static _Thread_local int g_api_last_access_expired = 0;
 
 const char *api_last_error(void) { return g_api_last_error; }
+int api_last_error_access_expired(void) { return g_api_last_access_expired; }
 
 static void api_set_error(long code, const char *transport, cJSON *json) {
     const char *message = jstr(json, "error");
+    const char *reason = jstr(json, "reason");
+    g_api_last_access_expired = code == 401 && reason && !strcmp(reason, "expired");
     if (!message || !message[0]) message = jstr(json, "message");
     if (message && message[0])
         snprintf(g_api_last_error, sizeof(g_api_last_error), "HTTP %ld: %.150s", code, message);
@@ -74,6 +78,7 @@ cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
     struct membuf out = { 0 };
     const char *err = NULL;
     g_api_last_error[0] = '\0';
+    g_api_last_access_expired = 0;
     Uint32 started = SDL_GetTicks();
     long code = net_request_timeout_cancel(url, "GET", NULL,
                                            g_token[0] ? g_token : NULL,
@@ -216,6 +221,7 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
     snprintf(url, sizeof(url), "%s/api/stream/%d", BASE, item_id);
     
     g_api_last_error[0] = '\0';
+    g_api_last_access_expired = 0;
     char *body = NULL;
     cJSON *request = cJSON_CreateObject();
     if (!request) {

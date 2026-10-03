@@ -237,6 +237,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Reconhecedor de toque falhou em tap, eixo, arr
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe
+
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude tools/test_player_recovery.c -o build/test_player_recovery.exe
+& .\build\test_player_recovery.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hls_manifest.c tools/test_hls_manifest.c -o build/test_hls_manifest.exe
 if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao compilar.' }

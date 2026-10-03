@@ -87,3 +87,4 @@ typedef struct {
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);
 
 const char *player_last_error(void);
+int player_last_error_access_expired(void);

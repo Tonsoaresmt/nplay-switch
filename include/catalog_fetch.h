@@ -13,6 +13,7 @@ typedef struct {
     char path[512];
     char bearer[640];
     char error[192];
+    int access_expired;
     cJSON *result;
 } CatalogFetch;
 

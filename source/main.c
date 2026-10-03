@@ -1006,6 +1006,7 @@ static int play_with_progress(int itemId, const char *title, const char *url, in
 
 typedef struct {
     int item_id, rc;
+    int access_expired;
     PlaybackSource source;
     char error[192];
     SDL_atomic_t done, cancel;
@@ -1015,9 +1016,27 @@ static int resolve_open_thread(void *userdata) {
     ResolvePoll *poll = (ResolvePoll *)userdata;
     poll->rc = api_resolve_playback_cancel(poll->item_id, NULL,
                                             &poll->cancel, &poll->source);
-    if (poll->rc != 0) snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
+    if (poll->rc != 0) {
+        poll->access_expired = api_last_error_access_expired();
+        snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
+    }
     SDL_AtomicSet(&poll->done, 1);
     return 0;
+}
+
+// Um token JWT pode durar mais que uma assinatura. Quando a API devolve
+// reason=expired, descarte somente a sessao local e mostre o login de novo.
+static void access_expired_to_login(void) {
+    store_clear_token();
+    store_clear_user();
+    store_clear_profile_id();
+    g_token[0] = '\0';
+    g_user[0] = '\0';
+    g_profile_id = 0;
+    g_profile_required = 0;
+    net_set_profile_id(0);
+    toast("Seu acesso expirou. Entre novamente para renovar.");
+    g_screen = SC_LOGIN;
 }
 
 // O remux em tempo real nao oferece Range. Se a pessoa voltar antes de o R2
@@ -1088,6 +1107,10 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
     appletSetMediaPlaybackState(false);
     if (!g_running || cancelled || SDL_AtomicGet(&poll.cancel)) return -2;
     if (poll.rc != 0) {
+        if (poll.access_expired) {
+            access_expired_to_login();
+            return -1;
+        }
         toast(poll.error[0] ? poll.error : "Falha ao abrir a fonte");
         return -1;
     }
@@ -1211,6 +1234,10 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
         if (g_tab == TAB_DOWNLOADS) load_history();
         
         if (run_rc < 0) {
+            if (player_last_error_access_expired()) {
+                access_expired_to_login();
+                return 0;
+            }
             char m[160]; const char *detail = player_last_error();
             if (detail && detail[0]) snprintf(m, sizeof(m), "%s", detail);
             else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", run_rc);
@@ -1388,6 +1415,13 @@ static void pump_catalog_fetch(void) {
         if (result) cJSON_Delete(result);
         g_fetch_current.kind = FETCH_NONE;
         g_fetch_discard = 0;
+        return;
+    }
+    if (g_fetch.access_expired) {
+        if (result) cJSON_Delete(result);
+        g_fetch_current.kind = FETCH_NONE;
+        g_fetch_discard = 0;
+        access_expired_to_login();
         return;
     }
     int applied = 0;
