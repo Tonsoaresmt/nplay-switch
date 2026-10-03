@@ -159,6 +159,7 @@ typedef struct {
     int startup_timeout_logged;
     unsigned fetch_count, slow_fetch_count, empty_waits;
     unsigned worst_fetch_ms, worst_first_byte_ms, last_first_byte_ms, stream_started_tick;
+    Uint32 last_body_tick; // producer only; excludes time blocked by our full ring
     unsigned long long downloaded_bytes;
     int64_t produced_offset, request_start;
     size_t stream_len;
@@ -245,6 +246,8 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
     // ring cheio/backpressure e transferencia em andamento nao sao abortados.
     if (c->streaming && b == 0 &&
         SDL_GetTicks() - c->stream_started_tick >= 8000u) return 1;
+    if (c->streaming && c->stream_len > 0 &&
+        SDL_GetTicks() - c->last_body_tick >= 8000u) return 1;
     return (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
             (c->synchronous && abort_requested())) ? 1 : 0;
 }
@@ -372,6 +375,7 @@ static size_t wr_ring(char *ptr, size_t sz, size_t nm, void *ud) {
         c->produced_offset += take;
         c->stream_len += take;
         off += take;
+        c->last_body_tick = SDL_GetTicks();
         SDL_CondSignal(c->c_data);
         SDL_UnlockMutex(c->mtx);
     }
@@ -393,6 +397,7 @@ static int fetch_stream(CurlIO *c, int64_t start) {
     }
     Uint32 started = SDL_GetTicks();
     c->stream_started_tick = started;
+    c->last_body_tick = started;
     CURLcode rc = curl_easy_perform(c->easy);
     Uint32 took = SDL_GetTicks() - started;
     long code = 0;
@@ -413,9 +418,10 @@ static int fetch_stream(CurlIO *c, int64_t start) {
     // EOF ao demuxer. Preserve apenas falhas e atrasos realmente longos.
     if ((c->running && (rc != CURLE_OK || code < 200 || code >= 400)) ||
         c->last_first_byte_ms >= 1000) {
-        diag_player_event("avio", "http", "id=%d media code=%ld curl=%d conn=%ld first=%u ms=%u",
+        diag_player_event("avio", "http", "id=%d media code=%ld curl=%d conn=%ld first=%u ms=%u idle=%u bytes=%zu",
                           c->resource_id, code, (int)rc, new_connections,
-                          c->last_first_byte_ms, took);
+                          c->last_first_byte_ms, took,
+                          SDL_GetTicks() - c->last_body_tick, c->stream_len);
         c->first_http_logged = 1;
     }
     if (code == 416 && c->size >= 0 && start >= c->size) {
@@ -735,8 +741,11 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     // servidor que nunca responde nao pode manter "Preparando video" sem fim.
     // Segmentos longos continuam sem timeout total e usam deteccao de queda.
     curl_easy_setopt(c->easy, CURLOPT_TIMEOUT, c->synchronous ? 20L : 0L);
-    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_TIME, 30L);
+    // wr_ring deliberately blocks when playback pauses / buffers are full.
+    // Curl's average-speed timer includes this consumer delay. For media use
+    // actual body idle (xfer_cb), rearmed when wr_ring gets space again.
+    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_LIMIT, c->streaming ? 0L : 1024L);
+    curl_easy_setopt(c->easy, CURLOPT_LOW_SPEED_TIME, c->streaming ? 0L : 30L);
     curl_easy_setopt(c->easy, CURLOPT_WRITEFUNCTION, c->streaming ? wr_ring : wr_tmp);
     curl_easy_setopt(c->easy, CURLOPT_WRITEDATA, c);
     curl_easy_setopt(c->easy, CURLOPT_HEADERFUNCTION, hdr_size);

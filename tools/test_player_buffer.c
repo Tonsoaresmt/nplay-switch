@@ -10,6 +10,13 @@ int main(void) {
     assert(!demux_buffer_can_enqueue(1, DEMUX_QUEUE_BYTES, 1));
     assert(!demux_buffer_can_enqueue(0, 0, DEMUX_QUEUE_BYTES + 1));
     assert(!demux_buffer_can_enqueue(0, (size_t)-1, 1));
+    assert(!demux_buffer_should_refill(1, 1000, 0, 0, 249));
+    assert(demux_buffer_should_refill(8, 8000, 0.2, 0, 250));
+    assert(!demux_buffer_should_refill(30, 30000, 0.75, 0, 700));
+    assert(!demux_buffer_should_refill(128, 30000, 0, 0, 700));
+    assert(!demux_buffer_should_refill(3, DEMUX_QUEUE_BYTES * 3u / 4u, 0, 0, 700));
+    assert(!demux_buffer_should_refill(8, 8000, 0.2, -1, 700));
+    assert(!demux_buffer_should_refill(8, 8000, 0, 0, 3000));
     unsigned seed = 17;
     int count = 0; size_t bytes = 0, queue[DEMUX_QUEUE_PACKETS];
     unsigned head = 0, peak = 0;

@@ -73,7 +73,14 @@ int main(void) {
         Uint32 started = SDL_GetTicks();
         while (atomic_load(&reads) < 4 && SDL_GetTicks() - started < 3000) SDL_Delay(1);
         assert(atomic_load(&reads) == 4); // fourth packet parked, not enqueued
-        barrier(&w); demux_worker_clear(&w); atomic_store(&next_pts, 100000); demux_worker_resume(&w);
+        barrier(&w);
+        DemuxSnapshot snapshot = demux_worker_snapshot(&w);
+        assert(snapshot.count == 3 && snapshot.bytes == 3u * (size_t)packet_bytes);
+        assert(snapshot.video_seconds > 0.06 && snapshot.video_seconds < 0.07);
+        demux_worker_clear(&w);
+        snapshot = demux_worker_snapshot(&w);
+        assert(snapshot.count == 0 && snapshot.bytes == 0 && snapshot.video_seconds == 0);
+        atomic_store(&next_pts, 100000); demux_worker_resume(&w);
         wait_count(&w, 3); assert(demux_worker_take(&w, &out, &read_ms) == 1 && out.pts >= 100000);
         wait_count(&w, 3); demux_worker_stop(&w); assert(atomic_load(&live_packets) == 0);
     }

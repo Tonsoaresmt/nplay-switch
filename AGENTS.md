@@ -1677,3 +1677,22 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   traces. O checkpoint é preservado mesmo ao esgotar recuperação/cancelar.
 - Publicado d9c2df6 em codex/switch-rebuild; Release v0.12.42 latest verificada
   com asset 24201039 bytes e digest 29cb1dbdff768f1adcd3f27f5ad189ebed0aaa5d49ea8c8a2aec378a2cb218db.
+
+## Resistência a espera local e seek ocupado — 0.12.43, 03/10/2026
+
+- Segmentos HLS não usam mais LOW_SPEED_TIME (contava espera do consumidor).
+  xfer_cb detecta 8 s sem corpo; wr_ring rearma idle após conseguir espaço.
+  Metadados/arquivos, TLS e memória mantidos. Prova real em libcurl HOST 8.13.0
+  mostrou curl 28 com política antiga escalada e conclusão com nova; idle real
+  continua abortando. SDK Switch é 7.69.1: efeito físico ainda não comprovado.
+- Seek: barreira ocupada sem mutação retorna 5, não reabre. Timeline conserva
+  destino com A repetir/B cancelar; touch conserva ponto/reprodução. Falha real
+  depois de seek continua reabrindo com checkpoint, sem acesso concorrente a fmt.
+- Rebuffer procura 0.75 s de vídeo, somente após 250 ms de starvation; libera
+  até 3 s, EOF/erro, slots cheios ou bytes >=75% do teto. Sem aumentar memória.
+- Callback C real testou espera local de 60 s; helper de seek antigo falhou e
+  atual passou. Worker pthread, snapshot/reserva, supervisor e suíte completa
+  com mídia/símbolos passaram, build ARM64 -Werror. Nunca confundir com Switch.
+- Evidência e limitações: docs/PLAYER_RESILIENCE_0_12_43.md. Próximo: teste
+  físico de pausa longa, menus, busca/touch, perda Wi-Fi e sessão >60 min, com
+  traces novos (idle/bytes e reserva). Não declarar solução de todos os stalls.

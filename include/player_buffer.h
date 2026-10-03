@@ -8,3 +8,13 @@ static inline int demux_buffer_can_enqueue(int count, size_t bytes, size_t incom
     return count >= 0 && count < DEMUX_QUEUE_PACKETS &&
         bytes <= DEMUX_QUEUE_BYTES && incoming <= DEMUX_QUEUE_BYTES - bytes;
 }
+
+// After a visible starvation, rebuild a small video cushion before consuming
+// one packet at a time. Never deadlock on a full queue, EOF, or unknown PTS.
+static inline int demux_buffer_should_refill(int count, size_t bytes,
+                                             double video_seconds, int terminal,
+                                             unsigned waiting_ms) {
+    return waiting_ms >= 250u && waiting_ms < 3000u && !terminal &&
+           count < DEMUX_QUEUE_PACKETS && bytes < DEMUX_QUEUE_BYTES * 3u / 4u &&
+           !(video_seconds >= 0.75);
+}

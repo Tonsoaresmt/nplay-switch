@@ -1325,6 +1325,32 @@ static void demux_worker_request_pause(DemuxWorker *worker) {
     SDL_UnlockMutex(worker->mutex);
 }
 
+typedef struct {
+    int count, terminal;
+    size_t bytes;
+    double video_seconds;
+} DemuxSnapshot;
+
+static DemuxSnapshot demux_worker_snapshot(DemuxWorker *worker) {
+    DemuxSnapshot state = {0};
+    double first = HUGE_VAL, last = -HUGE_VAL;
+    SDL_LockMutex(worker->mutex);
+    state.count = worker->count;
+    state.bytes = worker->queued_bytes;
+    state.terminal = worker->terminal;
+    for (int i = 0; i < worker->count; ++i) {
+        AVPacket *p = worker->queue[(worker->head + i) % DEMUX_QUEUE_PACKETS].packet;
+        AVStream *s = worker->fmt->streams[p->stream_index];
+        if (s->codecpar->codec_type != AVMEDIA_TYPE_VIDEO || p->pts == AV_NOPTS_VALUE) continue;
+        double pts = p->pts * av_q2d(s->time_base);
+        if (pts < first) first = pts;
+        if (pts > last) last = pts;
+    }
+    if (last >= first) state.video_seconds = last - first;
+    SDL_UnlockMutex(worker->mutex);
+    return state;
+}
+
 // 1=barreira atingida, 0=ainda lendo, -1=worker terminou.
 static int demux_worker_pause_state(DemuxWorker *worker) {
     if (!worker || !worker->mutex) return -1;
@@ -1413,6 +1439,9 @@ static int player_seek_with_barrier(DemuxWorker *worker,
                                     SubtitleQueue *subtitles) {
     double original_pos = *cur_pos;
     int barrier = demux_worker_wait_paused(worker, ren, joy, title, headline, 5000u);
+    // The read is merely busy; no seek/context mutation occurred. Preserve
+    // the live pipeline instead of escalating a temporary wait to a reopen.
+    if (barrier == 2) return 5;
     if (barrier != 0) return barrier;
     demux_worker_clear(worker);
     track_operation_begin(watch, headline,
@@ -2361,6 +2390,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 SDL_PauseAudioDevice(adev, 0);
                         } else if (seek_rc == 3) {
                             running = 0;
+                        } else if (seek_rc == 5) {
+                            snprintf(notice, sizeof(notice), "Fonte ocupada  |  A tenta novamente  |  B cancela");
+                            notice_until = SDL_GetTicks() + 4000;
+                            continue; // keep preview/target; no source reopen
                         } else if (seek_rc == 4) {
                             controlled_restart = PLAYER_RESTART_SEEK;
                             running = 0;
@@ -2801,10 +2834,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         buffering_since = 0;
                         last_present_tick = 0;
                         if (hb) SDL_AtomicSet(&hb->force_progress, 1);
-                    } else if (seek_rc == 1) {
+                    } else if (seek_rc == 1 || seek_rc == 5) {
                         double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        if (seek_rc == 5) {
+                            snprintf(notice, sizeof(notice), "Fonte ocupada; tente avancar em instantes");
+                            notice_until = SDL_GetTicks() + 3000;
+                        }
                     } else if (seek_rc == 3) {
                         running = 0;
                     } else if (seek_rc == 4) {
@@ -2935,7 +2972,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
         Uint32 audio_before_ms = adev ? (Uint32)(SDL_GetQueuedAudioSize(adev) * 1000.0 / bps) : 0;
         Uint32 read_ms = 0;
-        int take = demux_worker_take(&demux, pkt, &read_ms);
+        int refill = 0;
+        if (buffering_since && !resume_preroll &&
+            !audio_switch_pending && !subtitle_switch_pending) {
+            DemuxSnapshot reserve = demux_worker_snapshot(&demux);
+            refill = demux_buffer_should_refill(reserve.count, reserve.bytes,
+                reserve.video_seconds, reserve.terminal,
+                SDL_GetTicks() - buffering_since);
+        }
+        int take = refill ? 0 : demux_worker_take(&demux, pkt, &read_ms);
         int ret = take == 1 ? 0 : take == 0 ? AVERROR(EAGAIN) : take;
         if (open_watch.cancelled) {
             running = 0;
@@ -3036,9 +3081,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 Uint32 frozen = waited > buffering_audio_ms ? waited - buffering_audio_ms : 0;
                 wall_start += frozen / 1000.0;
             }
-            if (waited >= 500)
-                diag_player_event("demux", "buffering-end", "ms=%u audioq=%u pos=%.1f",
-                                  waited, adev ? SDL_GetQueuedAudioSize(adev) : 0, cur_pos);
+            if (waited >= 500) {
+                DemuxSnapshot reserve = demux_worker_snapshot(&demux);
+                diag_player_event("demux", "buffering-end", "ms=%u audioq=%u pos=%.1f reserve=%d/%.2fs",
+                                  waited, adev ? SDL_GetQueuedAudioSize(adev) : 0, cur_pos,
+                                  reserve.count, reserve.video_seconds);
+            }
             buffering_since = 0;
         }
         if (aidx >= 0 && pkt->stream_index == aidx && actx) {

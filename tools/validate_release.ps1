@@ -204,6 +204,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Concorrencia do worker demux falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'AVIO de rede falhou.' }
 & node tools/test_player_supervisor.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Supervisor perdeu ponto salvo.' }
+& node tools/test_seek_barrier.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Barreira de seek reabriu fonte ocupada.' }
+& node tools/test_curl_backpressure_probe.mjs
+if ($LASTEXITCODE -ne 0) { throw 'libcurl real falhou em backpressure ou idle.' }
 & node tools/test_subtitle_io.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/vtt_stream.c tools/test_vtt_stream.c -o build/test_vtt_stream.exe
