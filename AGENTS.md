@@ -1675,3 +1675,5 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Evidência/limites/teste físico pendente: docs/PLAYER_RESUME_0_12_42.md.
   Não afirmar fim de todos os stalls: falta reproduzir no console e obter novos
   traces. O checkpoint é preservado mesmo ao esgotar recuperação/cancelar.
+- Publicado d9c2df6 em codex/switch-rebuild; Release v0.12.42 latest verificada
+  com asset 24201039 bytes e digest 29cb1dbdff768f1adcd3f27f5ad189ebed0aaa5d49ea8c8a2aec378a2cb218db.
