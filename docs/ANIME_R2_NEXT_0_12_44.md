@@ -67,6 +67,10 @@ de confirmar que o asset corresponde ao build final.
 Binário final: 24.205.135 bytes; SHA-256
 `9321a245ef44b7a679781480a08b51c8978c28eb6246e57f201651aef046de55`.
 
+Publicação confirmada: commit be6c68c em codex/switch-rebuild, Release
+v0.12.44 pública/latest; endpoint releases/latest confirmou tamanho e digest
+exatos. NRO somente no asset. Nenhum deploy/reprocessamento do backend feito.
+
 ## Próximos passos / hardware
 
 1. Confirmar versão e episódio exato; após tentativa subir

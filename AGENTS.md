@@ -1724,3 +1724,7 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   checklist em docs/ANIME_R2_NEXT_0_12_44.md. Publicar NRO só como asset, e
   registrar digest/publicação após build final. Pedir trace novo antes de
   atribuir legenda ausente ao provedor ou anunciar correção de produção.
+- Publicação confirmada: be6c68c em codex/switch-rebuild, Release latest
+  v0.12.44 não draft/prerelease; Nplay.nro 24205135 bytes, digest SHA-256
+  9321a245ef44b7a679781480a08b51c8978c28eb6246e57f201651aef046de55
+  idêntico ao build final. NRO não rastreado em Git. Atualizador pode buscá-la.
