@@ -1633,3 +1633,23 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   e a maior parte de `validate_release.ps1` passaram. A etapa final de símbolos
   depende de `aarch64-none-elf-nm` estar configurado no PowerShell nativo.
   Pendente obrigatório: conta com vencimento real em R2, hot e debrid no Switch.
+
+## Estabilidade de rede 0.12.41 em 03/10/2026
+
+- Trace fornecido da 0.12.38: segmentos R2 com primeiro byte em 21–22 s,
+  curl 28 em 30 s e posição presa em 3072 s apesar de downloads posteriores.
+  Nenhum 401/403 ou erro de certificado foi observado nesse incidente.
+- `cio_read` não retorna mais EAGAIN depois de 300 ms ao parser de segmento
+  HLS/fMP4; espera no worker separado, com checagem de cancelamento a cada 100 ms.
+  FFmpeg 7.1 registra erro/EOF em `fill_buffer` para retorno negativo.
+- HLS sem byte de corpo por 8 s aborta a tentativa e tenta socket novo.
+  Corpo parcial/backpressure não dispara esse limite; offsets, TLS e teto
+  de memória são preservados. Supervisor de stall 12 s da 0.12.40 permanece.
+- Harness extrai/executa callbacks C reais: baseline falhou no gap de 1500 ms;
+  corrigido passou, incluindo cancelamento, ring, EOF e prazo sem falso abort.
+- Build ARM64 -Werror e `validate_release.ps1 -SkipBuild` completo passaram,
+  incluindo fixtures reais e símbolos com TARGET_NM configurado. A versão
+  não foi testada no hardware; exigir sessão >60 min e traces se persistir.
+- Evidência, comandos e limites: docs/PLAYER_NETWORK_STABILITY_0_12_41.md.
+  Publicar NRO só em Release, nunca no commit. Não afirmar ausência de buffering
+  com rede ruim, nem que legendas/idioma foram alterados nesta rodada.

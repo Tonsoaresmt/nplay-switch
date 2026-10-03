@@ -200,6 +200,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou ao compilar.' }
 if ($LASTEXITCODE -ne 0) { throw 'Politica de buffer falhou.' }
 & node tools/test_demux_worker.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Concorrencia do worker demux falhou.' }
+& node tools/test_curl_avio_wait.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Retomada apos falta temporaria de bytes HLS falhou.' }
 & node tools/test_subtitle_io.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/vtt_stream.c tools/test_vtt_stream.c -o build/test_vtt_stream.exe

@@ -238,8 +238,13 @@ static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
 }
 // aborta o transfer em andamento quando fecha ou pede seek (deixa o close/seek rapidos)
 static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_t e) {
-    (void)a; (void)b; (void)d; (void)e;
+    (void)a; (void)d; (void)e;
     CurlIO *c = (CurlIO *)ud;
+    // Uma conexao persistente parada nao deve consumir os 30 s do low-speed
+    // antes de tentar outro socket. Este limite vale somente ANTES do corpo;
+    // ring cheio/backpressure e transferencia em andamento nao sao abortados.
+    if (c->streaming && b == 0 &&
+        SDL_GetTicks() - c->stream_started_tick >= 8000u) return 1;
     return (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
             (c->synchronous && abort_requested())) ? 1 : 0;
 }
@@ -448,6 +453,9 @@ static int producer_stream(void *arg) {
         }
         SDL_UnlockMutex(c->mtx);
 
+        // A primeira tentativa reusa TLS/TCP. Falha sem corpo tenta um socket
+        // novo; bytes ja recebidos continuam preservados por produced_offset.
+        curl_easy_setopt(c->easy, CURLOPT_FRESH_CONNECT, fail_since ? 1L : 0L);
         int got = fetch_stream(c, prod);
         SDL_LockMutex(c->mtx);
         if (!c->running) { SDL_UnlockMutex(c->mtx); break; }
@@ -566,16 +574,19 @@ static int cio_read(void *opaque, uint8_t *out, int want) {
                 SDL_AtomicAdd(&g_media_old_empty_first, 1);
         }
     }
-    // Na abertura, FFmpeg ainda nao sabe lidar bem com EAGAIN: aguarda o
-    // primeiro byte. Depois disso, devolve o controle a cada 300 ms para a UI
-    // poder desenhar o estado CARREGANDO e continuar recebendo comandos.
+    // Segmentos sao lidos pelo worker demux, separado da UI. Nunca propagar
+    // EAGAIN ao parser HLS/fMP4: fill_buffer do FFmpeg marca EOF+error e uma
+    // falta temporaria no meio de um box pode deixar a leitura presa. Esperar
+    // aqui conserva o parser; UI/controles continuam vivos e abort_requested
+    // interrompe a espera em ate 100 ms. O supervisor limita stalls prolongados.
     int waits = c->delivered ? 3 : 200; // ate 300 ms; 20 s no primeiro acesso
-    while (c->count == 0 && !c->eof && !c->err && c->running && waits-- > 0 &&
+    while (c->count == 0 && !c->eof && !c->err && c->running &&
+           (c->streaming || waits-- > 0) &&
            !startup_deadline_expired() &&
            (c->delivered || SDL_GetTicks() - c->first_read_tick < 20000u)) {
         SDL_CondWaitTimeout(c->c_data, c->mtx, 100);
         // FFmpeg nao consulta interrupt_callback em todas as leituras AVIO.
-        // A checagem corre na thread do player para B continuar responsivo.
+        // A checagem corre no worker de leitura para B continuar responsivo.
         SDL_UnlockMutex(c->mtx);
         int cancelled = abort_requested();
         SDL_LockMutex(c->mtx);
