@@ -1660,3 +1660,18 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   verificação desta rodada. Não declarar implantado. A correção de transporte
   desta release é no cliente e não depende desse deploy. Não contornar política
   de Actions; confirmar conclusão antes de desabilitar o workflow temporário.
+
+## Retomada sem reinício automático — 0.12.42, 03/10/2026
+
+- Usuário confirmou falha na 0.12.41. `resume-from-start` do supervisor era
+  causa reproduzível do reinício: removido, renew/fallback conservam checkpoint.
+- Seek inicial negativo não prossegue desde zero; pontos <3 s/perto do fim
+  não são ignorados. Preroll protege HLS/arquivos; EOF em preroll é erro.
+- Remux sequencial sem busca não finge retomada desde início. Pausa/menus/
+  timeline não contam na janela de buffering/watchdog de retomada.
+- Harness executa `player_run` C real extraído: baseline 7c85e75 falhou no
+  seek 3000→3060 após falha de rede; corrigido passou. Pipeline/SDL são stubs,
+  não hardware. Build ARM64 -Werror e suíte completa com fixtures passaram.
+- Evidência/limites/teste físico pendente: docs/PLAYER_RESUME_0_12_42.md.
+  Não afirmar fim de todos os stalls: falta reproduzir no console e obter novos
+  traces. O checkpoint é preservado mesmo ao esgotar recuperação/cancelar.

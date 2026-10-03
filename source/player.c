@@ -2090,8 +2090,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 post_resume_started = 0;
     SDL_Event e;
 
-    // Retoma de onde parou somente quando ha margem suficiente ate o fim.
-    if (!sequential_stream && start_sec > 3 && (dur <= 0 || start_sec < dur - 5)) {
+    // Nunca apresentar o inicio como se fosse uma retomada. Uma fonte continua
+    // sem busca precisa de outra fonte ou de erro explicito, nao perder progresso.
+    if (sequential_stream && start_sec > 0) {
+        player_error_message("Esta fonte nao permite retomar; buscando alternativa");
+        playback_error = -10;
+        running = 0;
+    }
+    if (running && !sequential_stream && start_sec > 0) {
         if (native_hls) {
             // hls_read_seek calcula o segmento usando first_timestamp. Com o
             // probe de cabecalhos pulado, ele ainda nao existe ate o primeiro
@@ -2136,13 +2142,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (out_resume_seeked) *out_resume_seeked = 1;
                 audio_clock = start_sec; cur_pos = start_sec;
                 wall_start = av_gettime_relative() / 1000000.0 - start_sec;
-                if (native_hls) {
-                    resume_preroll = 1;
-                    resume_target = start_sec;
-                    if (adev) {
-                        SDL_ClearQueuedAudio(adev);
-                        SDL_PauseAudioDevice(adev, 1);
-                    }
+                resume_preroll = 1;
+                resume_target = start_sec;
+                if (adev) {
+                    SDL_ClearQueuedAudio(adev);
+                    SDL_PauseAudioDevice(adev, 1);
                 }
                 // Um seek HLS pode retornar sucesso mas nao entregar o primeiro
                 // quadro. O supervisor preserva o progresso e recupera a fonte.
@@ -2154,6 +2158,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     first_frame_started = SDL_GetTicks();
                     first_frame_budget_ms = 20000u;
                 }
+            } else {
+                diag_player_event("seek", "resume-rejected", "rc=%d saved=%.2f", seek_rc, start_sec);
+                player_error_message("Nao foi possivel retomar no ponto salvo");
+                playback_error = -5;
+                running = 0;
             }
             if (open_watch.timed_out && out_resume_seeked) *out_resume_seeked = 1;
             if (open_watch.cancelled) running = 0;
@@ -2199,7 +2208,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         // use a reabertura completa ja existente como fallback, preservando a
         // posicao e a faixa escolhida.
         if (logged_first_present && resume_preroll) {
-            if (paused) post_resume_started = 0;
+            if (paused || track_menu || timeline_seek) post_resume_started = 0;
             else if (!post_resume_started) post_resume_started = now_ticks;
             else if (now_ticks - post_resume_started >= 20000u) {
                 diag_player_event("controls", "inplace-resume-timeout",
@@ -2864,6 +2873,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
         }
         if (timeline_seek) {
+            buffering_since = 0;
             last_present_tick = 0;
             double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
             if (elapsed > 0.08) elapsed = 0.08;
@@ -2893,6 +2903,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
         if (track_menu) {
+            buffering_since = 0;
             last_present_tick = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -2906,6 +2917,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             continue;
         }
         if (paused) {   // continua desenhando (quadro congelado + HUD)
+            buffering_since = 0;
             last_present_tick = 0;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
             if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
@@ -3346,9 +3358,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
 
     // Um HLS que termina logo apos o seek sem mostrar quadro nao concluiu a
-    // reproducao. Trate como falha para acionar a segunda abertura desde zero.
-    if (native_hls && out_resume_seeked && *out_resume_seeked &&
-        !logged_first_present && reached_end) {
+    // reproducao. Trate como falha preservando o ponto salvo na recuperacao.
+    if (resume_preroll && reached_end) {
         diag_player_event("seek", "resume-empty", "pos=%.1f", start_sec);
         player_error_message("Retomada nao entregou video");
         playback_error = -5;
@@ -3493,7 +3504,6 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     int retry_count = 0, total_recoveries = 0;
     double current_pos = request->start_sec;
     double attempt_start = current_pos;
-    int resume_restart_attempted = 0;
     double dur = 0.0;
     int ever_presented_frame = 0;
     int final_rc = 0;
@@ -3554,7 +3564,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         if (presented_frame) ever_presented_frame = 1;
         // So grave uma nova posicao depois de realmente mostrar video. Uma
         // tentativa de retomada pode atualizar cur_pos sem decodificar nada.
-        if (out_pos > 0 && (presented_frame || rc == 1)) current_pos = out_pos;
+        current_pos = player_recovery_position(current_pos, out_pos, presented_frame, 0);
         if (out_dur > 0) dur = out_dur;
         if (g_player_audio_index > 0) last_audio = g_player_audio_index;
         if (g_player_audio_language[0])
@@ -3562,14 +3572,14 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         last_subtitle = g_player_subtitle_index;
 
         if (rc == PLAYER_RESTART_SEEK || rc == PLAYER_RESTART_TRACK) {
-            current_pos = out_pos;
+            current_pos = player_recovery_position(current_pos, out_pos,
+                presented_frame, rc == PLAYER_RESTART_SEEK);
             attempt_start = current_pos;
             controlled_restarts++;
             // O usuario so consegue pedir seek/faixa depois de uma pipeline
             // funcional. Falhas antigas nao podem consumir para sempre o
             // orcamento de recuperacao de uma sessao longa.
             retry_count = 0;
-            resume_restart_attempted = 0;
             if (rc == PLAYER_RESTART_TRACK) {
                 last_audio_priority = 2;
                 last_subtitle_priority = 1;
@@ -3583,19 +3593,6 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                                                         "Aplicando audio e legendas",
                              "Reabrindo o video com seguranca...  |  B para cancelar",
                              SDL_GetTicks(), 1);
-            SDL_RenderPresent(ren);
-            continue;
-        }
-
-        if (rc < 0 && rc != -11 && resume_seeked && !presented_frame &&
-            !resume_restart_attempted && attempt_start > 3 &&
-            active.container[0] && !strcmp(active.container, "m3u8")) {
-            resume_restart_attempted = 1;
-            attempt_start = 0;
-            diag_player_event("recover", "resume-from-start",
-                              "rc=%d saved=%.1f", rc, current_pos);
-            pui_draw_loading(ren, request->title, "Retomada indisponivel",
-                             "Abrindo o video desde o inicio...", SDL_GetTicks(), 1);
             SDL_RenderPresent(ren);
             continue;
         }
@@ -3719,8 +3716,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             }
             active = renewed;
             SDL_AtomicSet(&hb.session_id, active.session_id);
-            attempt_start = presented_frame ? current_pos :
-                            (resume_restart_attempted ? 0 : current_pos);
+            attempt_start = current_pos;
             retry_count++;
             total_recoveries++;
             result->recovery_count = total_recoveries;
