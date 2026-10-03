@@ -1653,3 +1653,10 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Evidência, comandos e limites: docs/PLAYER_NETWORK_STABILITY_0_12_41.md.
   Publicar NRO só em Release, nunca no commit. Não afirmar ausência de buffering
   com rede ruim, nem que legendas/idioma foram alterados nesta rodada.
+- Publicado commit 7c85e75 em codex/switch-rebuild; Release v0.12.41 confirmada
+  como latest. Asset Nplay.nro de 24201039 bytes e digest SHA-256 coincidem com
+  o build local (afea68abe5dd91d8734eb3a474cff0c812ef05b88e64b57c647fd2cfa0c2fc5b).
+- Deploy anterior do backend de expiração: run 37134528626 ainda queued na
+  verificação desta rodada. Não declarar implantado. A correção de transporte
+  desta release é no cliente e não depende desse deploy. Não contornar política
+  de Actions; confirmar conclusão antes de desabilitar o workflow temporário.
