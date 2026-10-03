@@ -1696,3 +1696,5 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Evidência e limitações: docs/PLAYER_RESILIENCE_0_12_43.md. Próximo: teste
   físico de pausa longa, menus, busca/touch, perda Wi-Fi e sessão >60 min, com
   traces novos (idle/bytes e reserva). Não declarar solução de todos os stalls.
+- Publicado código 66a5ced em codex/switch-rebuild; Release v0.12.43 latest
+  confirmada, asset 24201039 bytes e SHA-256 3b3871db55107c100c54d2b66bbedf64518089b869812b26ba251ccb875acfeb.
