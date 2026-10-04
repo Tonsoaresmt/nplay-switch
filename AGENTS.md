@@ -1,5 +1,19 @@
 # Continuidade para agentes
 
+## Letreiros posicionados — 0.12.48 (04/10/2026)
+
+- Placas/onomatopeias do fansub caiam embaixo misturadas com as falas: o
+  backend usava `-c:s webvtt`, que perde `\pos/\an`. Backend (branch
+  `claude/nplay-tv-switch-review-n4drzv` do Nplay) converte ASS -> WebVTT com
+  `position:X% line:Y% align:A`; web/TV e Switch desenham no lugar.
+- NAO emitir `line:..%,end` nem `position:..%,center`: o Chromium descarta a
+  configuracao inteira. So `line:` em % marca letreiro (hls.js poe position=50
+  em cue comum).
+- Switch le `AV_PKT_DATA_WEBVTT_SETTINGS`; `SubtitleStoreCue` tem 20 bytes;
+  falas e letreiros saem separados (`subtitle_store_signs`, `draw_signs`).
+- Pacotes R2 antigos so ganham posicao com a legenda refeita; sem lote em
+  massa. Ver `docs/SUBTITLE_SIGNS_0_12_48.md`. Hardware nao testado.
+
 ## Rodada 0.12.14 (25/09/2026)
 
 - Auditoria adicional do ciclo Home/Continuar, Historico, detalhe e Biblioteca.

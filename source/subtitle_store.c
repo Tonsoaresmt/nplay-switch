@@ -49,15 +49,45 @@ static int same_text(const SubtitleStore *store, const SubtitleStoreCue *cue,
     return cue->len == len && !memcmp(store->text + cue->text, text, len);
 }
 
+typedef struct { uint8_t flags; uint16_t x, y; } Packed;
+
+static Packed pack(const SubtitlePlacement *at) {
+    Packed p = {0, 0, 0};
+    if (!at || !at->positioned) return p;
+    float x = at->x < 0 ? 0 : at->x > 100 ? 100 : at->x;
+    float y = at->y < 0 ? 0 : at->y > 100 ? 100 : at->y;
+    p.flags = (uint8_t)(1u | ((at->halign & 3u) << 1) | ((at->valign & 3u) << 3));
+    p.x = (uint16_t)(x * 100.0f + 0.5f);
+    p.y = (uint16_t)(y * 100.0f + 0.5f);
+    return p;
+}
+
+static void unpack(const SubtitleStoreCue *cue, SubtitlePlacement *at) {
+    memset(at, 0, sizeof(*at));
+    if (!(cue->flags & 1u)) return;
+    at->positioned = 1;
+    at->halign = (unsigned char)((cue->flags >> 1) & 3u);
+    at->valign = (unsigned char)((cue->flags >> 3) & 3u);
+    at->x = cue->x / 100.0f;
+    at->y = cue->y / 100.0f;
+}
+
+static int same_cue(const SubtitleStore *store, const SubtitleStoreCue *cue,
+                    const char *text, size_t len, Packed at) {
+    return cue->flags == at.flags && cue->x == at.x && cue->y == at.y &&
+           same_text(store, cue, text, len);
+}
+
 // Karaoke quadro a quadro e camadas repetidas: o mesmo texto encostado ou
 // sobreposto vira um unico cue (no host, dezenas de milhares viram poucos).
 static int merge_recent(SubtitleStore *store, SubtitleStoreCue *list, int count,
-                        float start, float end, const char *text, size_t len, int is_long) {
+                        float start, float end, const char *text, size_t len, int is_long,
+                        Packed at) {
     int stop = count > MERGE_LOOKBACK ? count - MERGE_LOOKBACK : 0;
     for (int i = count - 1; i >= stop; i--) {
         SubtitleStoreCue *cue = &list[i];
         if (start < cue->start - 0.001f || start > cue->end + MERGE_GAP ||
-            !same_text(store, cue, text, len)) continue;
+            !same_cue(store, cue, text, len, at)) continue;
         float merged_end = end > cue->end ? end : cue->end;
         if (!is_long && merged_end - cue->start > SUBTITLE_STORE_LONG_SECONDS) return 0;
         cue->end = merged_end;
@@ -70,7 +100,13 @@ static int merge_recent(SubtitleStore *store, SubtitleStoreCue *list, int count,
 }
 
 int subtitle_store_add(SubtitleStore *store, double start, double end, const char *text) {
+    return subtitle_store_add_at(store, start, end, text, NULL);
+}
+
+int subtitle_store_add_at(SubtitleStore *store, double start, double end, const char *text,
+                          const SubtitlePlacement *placement) {
     if (!store) return 0;
+    Packed place = pack(placement);
     if (!text) { store->skipped++; return 1; }
     while (*text == ' ' || *text == '\n' || *text == '\r' || *text == '\t') text++;
     size_t len = strlen(text);
@@ -85,8 +121,8 @@ int subtitle_store_add(SubtitleStore *store, double start, double end, const cha
     if (!(end > start)) end = start + 4.0;
     float s = (float)start, e = (float)end;
     int is_long = end - start > SUBTITLE_STORE_LONG_SECONDS;
-    if (is_long ? merge_recent(store, store->longs, store->long_count, s, e, text, len, 1)
-                : merge_recent(store, store->cues, store->count, s, e, text, len, 0)) return 1;
+    if (is_long ? merge_recent(store, store->longs, store->long_count, s, e, text, len, 1, place)
+                : merge_recent(store, store->cues, store->count, s, e, text, len, 0, place)) return 1;
     if (store->count + store->long_count >= SUBTITLE_STORE_MAX_CUES ||
         store->text_len + len + 1 > SUBTITLE_STORE_MAX_TEXT) {
         store->truncated++;
@@ -100,7 +136,7 @@ int subtitle_store_add(SubtitleStore *store, double start, double end, const cha
         store->text = grown;
         store->text_cap = next;
     }
-    SubtitleStoreCue cue = { s, e, (uint32_t)store->text_len, (uint16_t)len, 0 };
+    SubtitleStoreCue cue = { s, e, (uint32_t)store->text_len, (uint16_t)len, place.flags, 0, place.x, place.y };
     memcpy(store->text + store->text_len, text, len);
     store->text[store->text_len + len] = 0;
     if (is_long) {
@@ -122,7 +158,7 @@ int subtitle_store_add(SubtitleStore *store, double start, double end, const cha
             // Reenvio (legenda do torrent pedida de novo desde o inicio): o
             // mesmo cue ja guardado e descartado em vez de duplicado.
             for (int k = lo - 1; k >= 0 && k >= lo - 32 && store->cues[k].start >= s - 0.002f; k--) {
-                if (same_text(store, &store->cues[k], text, len) &&
+                if (same_cue(store, &store->cues[k], text, len, place) &&
                     store->cues[k].start <= s + 0.002f) {
                     if (e > store->cues[k].end) store->cues[k].end = e;
                     store->merged++;
@@ -145,13 +181,14 @@ int subtitle_store_count(const SubtitleStore *store) {
 }
 
 int subtitle_store_get(const SubtitleStore *store, int index, double *start,
-                       double *end, const char **text) {
+                       double *end, const char **text, SubtitlePlacement *at) {
     if (!store || index < 0 || index >= store->count + store->long_count) return 0;
     const SubtitleStoreCue *cue = index < store->count ? &store->cues[index]
                                                         : &store->longs[index - store->count];
     if (start) *start = cue->start;
     if (end) *end = cue->end;
     if (text) *text = store->text + cue->text;
+    if (at) unpack(cue, at);
     return 1;
 }
 
@@ -197,11 +234,12 @@ const char *subtitle_store_text(SubtitleStore *store, double position) {
     for (int i = lo - 1; i >= 0; i--) {
         const SubtitleStoreCue *cue = &store->cues[i];
         if (cue->start < pos - store->max_short - 0.05f) break;
-        if (pos < cue->end) consider(store, cue, talk, &talk_n, frags, &frag_n);
+        // Letreiros posicionados ficam fora do bloco das falas.
+        if (pos < cue->end && !(cue->flags & 1u)) consider(store, cue, talk, &talk_n, frags, &frag_n);
     }
     for (int i = 0; i < store->long_count; i++) {
         const SubtitleStoreCue *cue = &store->longs[i];
-        if (cue->start <= pos + 0.05f && pos < cue->end)
+        if (cue->start <= pos + 0.05f && pos < cue->end && !(cue->flags & 1u))
             consider(store, cue, talk, &talk_n, frags, &frag_n);
     }
     // Karaoke (silabas soltas) so aparece quando nao disputa com uma fala.
@@ -252,6 +290,32 @@ const char *subtitle_store_text(SubtitleStore *store, double position) {
         store->composed[used] = 0;
     }
     return store->composed;
+}
+
+void subtitle_store_signs(const SubtitleStore *store, double position, SubtitleSigns *signs) {
+    if (!store || !signs) return;
+    float pos = (float)position;
+    int lo = 0, hi = store->count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (store->cues[mid].start <= pos + 0.05f) lo = mid + 1; else hi = mid;
+    }
+    SubtitlePlacement at;
+    // Em ordem de inicio, como o player web (o mais antigo primeiro).
+    int first = lo;
+    while (first > 0 && store->cues[first - 1].start >= pos - store->max_short - 0.05f) first--;
+    for (int i = first; i < lo; i++) {
+        const SubtitleStoreCue *cue = &store->cues[i];
+        if (!(cue->flags & 1u) || pos >= cue->end) continue;
+        unpack(cue, &at);
+        subtitle_signs_add(signs, &at, store->text + cue->text, cue->len);
+    }
+    for (int i = 0; i < store->long_count; i++) {
+        const SubtitleStoreCue *cue = &store->longs[i];
+        if (!(cue->flags & 1u) || cue->start > pos + 0.05f || pos >= cue->end) continue;
+        unpack(cue, &at);
+        subtitle_signs_add(signs, &at, store->text + cue->text, cue->len);
+    }
 }
 
 void subtitle_store_move(SubtitleStore *dst, SubtitleStore *src) {
