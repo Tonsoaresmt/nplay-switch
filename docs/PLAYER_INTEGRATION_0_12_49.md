@@ -8,7 +8,9 @@ Integrados os commits `ba7d46d` (hardening) e `2b8d0d0` (letreiros posicionados)
 
 A integracao automatica de `player.c` e `subtitle_store.c` foi revisada. O conflito do validador foi resolvido mantendo tanto a politica nova de retry quanto a verificacao de settings posicionados. A regressao antiga de subtitle_store tambem passou a ligar subtitle_queue, agora dependencia real do armazenamento.
 
-Nao foram alterados o checkout principal antigo, arquivos locais do usuario, banco ou servidor. Nenhum NRO e rastreado em Git. Nenhuma publicacao de Release/latest foi feita nesta rodada; este documento registra um **build local para teste fisico**.
+Nao foram alterados o checkout principal antigo, arquivos locais do usuario, banco ou servidor. Nenhum NRO e rastreado em Git. Apos a geracao validada, o usuario pediu expressamente a publicacao para testar pelo atualizador. A **Release v0.12.49 foi publicada como latest**, sem atribuir ao build validacao fisica ainda inexistente.
+
+Publicacao confirmada em **04/10/2026, 20:31:27 UTC**: [v0.12.49](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.49), release ID `403196321`, alvo `247610129878aaa665e4a147c1698e182f786ba9`, `draft=false`, `prerelease=false`. A API `/releases/latest` retornou essa versao e o asset Nplay.nro `uploaded`, 24241999 bytes, com digest igual ao SHA-256 local registrado abaixo. O arquivo de checksum tambem foi publicado. Documentacao posterior nao altera o binario dessa release.
 
 ## Defeitos corrigidos e evidencias
 
@@ -59,7 +61,7 @@ Resultado final: **validador completo terminou com codigo 0**, sem `-SkipMediaFi
 
 Nao foi executado NRO em Switch fisico nem a suite Linux integral nesta rodada. Backend novo em producao e o pacote exato das fotos nao foram verificados.
 
-Testar no console antes de promover a versao no atualizador:
+O usuario autorizou promover a versao no atualizador para realizar estes testes no console; continuam pendentes:
 
 1. Mesmo episodio com fala e tres letreiros posicionados: fala embaixo, onomatopeias independentes no quadro.
 2. Pausar/retomar, seek para frente e para tras, trocar audio e legenda: fala/letreiro acompanham a posicao e nao desaparecem prematuramente.

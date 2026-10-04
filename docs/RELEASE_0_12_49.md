@@ -1,6 +1,6 @@
 # Nplay Switch 0.12.49 — letreiros e estabilidade integrados
 
-Versao NRO gerada localmente. Ainda requer confirmacao no Switch fisico antes de ser tratada como validada no console.
+Versao NRO publicada a pedido do usuario para teste pelo atualizador: [v0.12.49](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.49). Ainda requer confirmacao no Switch fisico antes de ser tratada como validada no console.
 
 ## Mudancas
 

@@ -19,6 +19,13 @@
   no console antes do teste fisico. Sem deploy/reprocessamento do backend.
 - Relatorio e comandos: docs/PLAYER_INTEGRATION_0_12_49.md. Pacotes antigos
   sem coordenadas nao ganham posicao apenas atualizando o cliente.
+- Publicacao autorizada expressamente pelo usuario para teste fisico:
+  Release v0.12.49 latest confirmada em 04/10/2026 20:31:27 UTC, nao draft
+  nem prerelease. Alvo 247610129878aaa665e4a147c1698e182f786ba9;
+  NRO 24241999 bytes, digest SHA-256 identico ao build validado:
+  b10eea59d6762dc3eedc7453060dc13572ba0214e65ded9c6dc9be91a130fc0f.
+  Isso habilita o atualizador, NAO conclui teste fisico. Aguardar resultado
+  de fala/letreiros, pausa/seek/troca de faixa e sessao longa no console.
 
 ## Letreiros posicionados — 0.12.48 (04/10/2026)
 
