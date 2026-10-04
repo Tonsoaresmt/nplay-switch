@@ -22,6 +22,7 @@ static double g_hls_timeline_origin;
 static int g_hls_timeline_origin_valid, g_player_chosen_item;
 static char g_reopen_headline[64];
 static void carry_frame_release(void) { g_reopen_headline[0] = 0; }
+static void subtitle_session_clear(void) {}
 static char g_player_audio_language[8], g_player_last_error[192];
 static unsigned tick;
 static void SDL_AtomicSet(SDL_atomic_t *a, int v) { a->value = v; }

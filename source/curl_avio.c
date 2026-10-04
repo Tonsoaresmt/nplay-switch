@@ -22,7 +22,10 @@
 #define FILE_BLOCK   (512 * 1024)
 #define FILE_RINGCAP (16 * 1024 * 1024)
 #define HLS_META_INITIAL (64 * 1024)
-#define HLS_META_MAX     (4 * 1024 * 1024)
+// Teto por recurso textual (playlist, VTT). Legendas de anime com karaoke
+// convertido de ASS passam de 1 MB e podem chegar perto de 4 MB; acima do teto
+// o download falhava e a legenda nunca aparecia. A memoria so cresce sob demanda.
+#define HLS_META_MAX     (8 * 1024 * 1024)
 #define HLS_MEDIA_RINGCAP (4 * 1024 * 1024)
 
 static SDL_atomic_t g_active_contexts = {0};

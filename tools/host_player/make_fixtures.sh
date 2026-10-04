@@ -84,3 +84,5 @@ ffmpeg $Q -i anime_hot.mkv -map 0:s:0 -c:s webvtt "$F/api/stream/hot/$SID/subtit
 printf '{"ok":true,"video":[{"index":0,"codec":"h264","width":1280,"height":720}],"audio":[{"index":1,"codec":"aac","language":"jpn","title":null}],"subtitles":[{"index":2,"codec":"ass","language":"por","title":"Portugues","label":"Portugues"}],"duration":360}\n' \
     > "$F/api/stream/hot/$SID/probe"
 echo "conteudos em $F"
+# Legendas de anime pesadas (karaoke/placas) para os testes de legenda.
+python3 "$HERE/make_subtitle_fixtures.py" "$F"

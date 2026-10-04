@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "player.h"
+#include "player_ui.h"
 #include "text.h"
 #include "net.h"
 #include "ui.h"
@@ -115,6 +116,23 @@ void __wrap_SDL_RenderPresent(SDL_Renderer *r) {
     }
     __real_SDL_RenderPresent(r);
 }
+// Legenda realmente entregue ao HUD: registra cada mudanca de texto. E assim
+// que os testes provam se uma fala aparece (ou some) no tempo certo.
+void __real_pui_draw(SDL_Renderer *, const PlayerHud *, Uint32);
+static char g_last_sub[1100];
+void __wrap_pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
+    const char *text = h && h->subtitle_text ? h->subtitle_text : "";
+    if (strcmp(text, g_last_sub)) {
+        snprintf(g_last_sub, sizeof(g_last_sub), "%s", text);
+        char flat[1100]; size_t k = 0;
+        for (const char *p = text; *p && k + 4 < sizeof(flat); p++) {
+            if (*p == '\n') { memcpy(flat + k, " / ", 3); k += 3; } else flat[k++] = *p;
+        }
+        flat[k] = 0;
+        printf("%8.3f SUB pos=%.2f [%s]\n", now_s(), h ? h->pos : 0, flat);
+    }
+    __real_pui_draw(r, h, now);
+}
 void __real_SDL_PauseAudioDevice(SDL_AudioDeviceID, int);
 void __wrap_SDL_PauseAudioDevice(SDL_AudioDeviceID d, int pause) {
     printf("%8.3f AUDIO %s\n", now_s(), pause ? "pause" : "play");
@@ -184,6 +202,7 @@ int main(int argc, char **argv) {
     req.container = container; req.url = req.playback.play_url; req.section = req.playback.section;
     req.start_sec = getenv("START") ? atof(getenv("START")) : 0;
     req.audio_pref = getenv("AUDIO_PREF") ? atoi(getenv("AUDIO_PREF")) : 0;
+#ifndef HARNESS_LEGACY_044   // 0.12.44 ainda nao tinha o painel Episodios
     static PlayerEpisode eps[64];
     if (getenv("EPISODES")) {
         int n = atoi(getenv("EPISODES")); if (n > 64) n = 64;
@@ -191,6 +210,7 @@ int main(int argc, char **argv) {
             snprintf(eps[i].label, sizeof(eps[i].label), "T1 E%d  Episodio numero %d", i + 1, i + 1); }
         req.episodes = eps; req.episode_count = n; req.episode_current = 2;
     }
+#endif
     req.progress_cb = cb_progress; req.renew_cb = cb_renew; req.fallback_cb = NULL;
     req.heartbeat_cb = cb_heartbeat; req.stop_cb = cb_stop;
 
@@ -199,8 +219,17 @@ int main(int argc, char **argv) {
     PlayerResult res; memset(&res, 0, sizeof(res));
     int rc = player_run(gRen, NULL, &req, &res);
     printf("%8.3f RESULT chosen=%d rc=%d reason=%d pos=%.1f dur=%.1f presented=%d recov=%d audio=%d(%s) sub=%d err='%s'\n",
-           now_s(), res.chosen_item_id, rc, res.reason, res.position, res.duration, res.presented_frame, res.recovery_count,
+#ifdef HARNESS_LEGACY_044
+           now_s(), 0, rc,
+#else
+           now_s(), res.chosen_item_id, rc,
+#endif
+           res.reason, res.position, res.duration, res.presented_frame, res.recovery_count,
+#ifdef HARNESS_LEGACY_044
+           res.audio_index, res.audio_language, res.subtitle_index, "");
+#else
            res.audio_index, res.audio_language, res.subtitle_index, player_last_error());
+#endif
     printf("SUMMARY video_frames=%d presents=%d first_video=%.3f max_video_gap_ms=%.0f gaps_over_250=%d\n",
            g_video_updates, g_presents, g_first_video, g_max_video_gap * 1000, g_gaps_over_250);
     SDL_WaitThread(st, NULL);

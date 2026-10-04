@@ -10,7 +10,15 @@ start_server() { # porta [tls]
     nohup python3 "$HERE/latency_server.py" --root "$F" --port "$1" ${2:+--tls "$WORK/test"} \
         --delay-ms "$D" --jitter-ms "$J" --mbps "$M" --sub-kbps 2 --log "$RUN/server_$1.log" >/dev/null 2>&1 &
 }
-start_server 8765; start_server 8443 tls; sleep 1
+start_server 8765; start_server 8443 tls
+# Falha simulada so no 1o pedido da legenda (R2 e torrent) para provar a nova tentativa.
+start_fail() { # porta padrao [tls]
+    pkill -f "^python3 .*latency_[s]erver.py --root .* --port $1 " 2>/dev/null; sleep 0.3
+    nohup python3 "$HERE/latency_server.py" --root "$F" --port "$1" ${3:+--tls "$WORK/test"} \
+        --delay-ms "$D" --jitter-ms "$J" --mbps "$M" --sub-kbps 2 --fail-match "$2" --fail-from 1 \
+        --fail-count 1 --log "$RUN/server_$1.log" >/dev/null 2>&1 &
+}
+start_fail 8766 subtitle-0.vtt; start_fail 8444 /subtitles/ tls; sleep 1
 export SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy LD_LIBRARY_PATH=$WORK/lib SCRIPT_AFTER_FRAME=1
 run() { local name=$1; shift; env "$@" timeout 120 "$BIN" "$URL" "$CT" > "suite_$name.log" 2>&1; }
 FAILS=0
@@ -51,6 +59,22 @@ check hot "torrent: legenda carregada" "hot-probe tracks=1"
 check hot "torrent: duracao da sonda (360 s)" "sequential-duration demuxer=[0-9.]+ probe=360"
 check hot "torrent: sem cortes de audio" "underruns=0"
 check hot "torrent: progresso com duracao real" "API progress item=4242 pos=[0-9]+ dur=360"
+URL=http://127.0.0.1:8765/r2sub/index.m3u8 CT=m3u8
+run subkara START=150 AUDIO_PREF=1 SCRIPT="6000:MINUS"
+check subkara "legenda com karaoke pesado: fala depois de 8192 eventos" "SUB pos=.*Fala 31 \\(150s\\)"
+check subkara "legenda carregada sem limite de eventos" "subtitle/loaded cues=[0-9]{5}"
+run subkara2 START=30 AUDIO_PREF=1 SCRIPT="7000:MINUS"
+check subkara2 "karaoke nao vira lixo na tela (so a fala)" "!SUB pos=.*Fala [0-9]+ \\([0-9]+s\\) / "
+URL=http://127.0.0.1:8766/r2sub/index.m3u8 CT=m3u8
+run subretry START=150 AUDIO_PREF=1 SCRIPT="12000:MINUS"
+check subretry "legenda R2 volta depois de falha de rede" "subtitle/retry choice=1"
+check subretry "fala aparece depois da nova tentativa" "SUB pos=.*Fala"
+run subseek START=150 AUDIO_PREF=1 SCRIPT="9000:ZR,16000:MINUS"
+check subseek "salto reaproveita a legenda (sem novo download)" "subtitle/session-reuse"
+URL=http://127.0.0.1:8765/api/media/hot/$SID/video CT=mp4
+run hotretry EXTRA_CA=$WORK/test.crt BASE_URL=https://127.0.0.1:8444 DELIVERY=hot SEQUENTIAL=1 HOT_SID=$SID AUDIO_PREF=1 SCRIPT="14000:MINUS"
+check hotretry "legenda do torrent volta depois de falha" "subtitle/stream-retry"
+check hotretry "fala do torrent aparece" "SUB pos=.*Fala"
 for f in suite_*.log; do echo "$f: $(grep -h SUMMARY "$f" | sed 's/SUMMARY //')"; done
 pkill -f "^python3 .*latency_[s]erver.py --root $F " 2>/dev/null
 exit $FAILS
