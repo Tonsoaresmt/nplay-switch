@@ -619,6 +619,59 @@ static void draw_subtitle(SDL_Renderer *r, const PlayerHud *h) {
     }
 }
 
+// Placas e onomatopeias no lugar em que o fansub as colocou, menores que a
+// fala e sem a tarja escura (que cobriria a cena). Antes caiam embaixo,
+// misturadas com o dialogo.
+static void draw_signs(SDL_Renderer *r, const PlayerHud *h) {
+    if (!h->signs || h->signs->count <= 0) return;
+    int vx = h->video_x, vy = h->video_y, vw = h->video_w, vh = h->video_h;
+    if (vw <= 0 || vh <= 0) { vx = 0; vy = 0; vw = PUI_W; vh = PUI_H; }
+    const int lh = 28;
+    for (int i = 0; i < h->signs->count && i < SUBTITLE_SIGNS_MAX; i++) {
+        const SubtitleSign *sign = &h->signs->items[i];
+        char lines[4][SUBTITLE_SIGN_TEXT];
+        int n = 0, widest = 0;
+        const char *p = sign->text;
+        while (*p && n < 4) {
+            const char *e = strchr(p, '\n');
+            size_t len = e ? (size_t)(e - p) : strlen(p);
+            if (len >= sizeof(lines[n])) len = sizeof(lines[n]) - 1;
+            memcpy(lines[n], p, len);
+            lines[n][len] = 0;
+            if (lines[n][0]) {
+                int w = text_w(r, lines[n], ST_NORMAL);
+                if (w > widest) widest = w;
+                n++;
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+        if (!n) continue;
+        int maxw = vw - 16;
+        if (widest > maxw) widest = maxw;
+        float ax = vx + vw * sign->at.x / 100.0f, ay = vy + vh * sign->at.y / 100.0f;
+        int box_h = n * lh;
+        int left = (int)(ax - widest * sign->at.halign / 2.0f);
+        int top = (int)(ay - box_h * sign->at.valign / 2.0f);
+        if (left < vx + 8) left = vx + 8;
+        if (left + widest > vx + vw - 8) left = vx + vw - 8 - widest;
+        if (top < vy + 4) top = vy + 4;
+        if (top + box_h > vy + vh - 4) top = vy + vh - 4 - box_h;
+        for (int k = 0; k < n; k++) {
+            int w = text_w(r, lines[k], ST_NORMAL);
+            if (w > widest) w = widest;
+            int x = sign->at.halign == 0 ? left : sign->at.halign == 2 ? left + widest - w
+                                                                        : left + (widest - w) / 2;
+            int y = top + k * lh;
+            text_a(r, lines[k], x - 1, y - 1, K_BLACK, ST_NORMAL, 0.85f, widest);
+            text_a(r, lines[k], x + 1, y - 1, K_BLACK, ST_NORMAL, 0.85f, widest);
+            text_a(r, lines[k], x - 1, y + 2, K_BLACK, ST_NORMAL, 0.85f, widest);
+            text_a(r, lines[k], x + 2, y + 2, K_BLACK, ST_NORMAL, 0.85f, widest);
+            text_a(r, lines[k], x, y, K_WHITE, ST_NORMAL, 1.0f, widest);
+        }
+    }
+}
+
 static void draw_buffering(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
     if (!h->buffering) return;
     fill(r, 0, 0, PUI_W, PUI_H, K_BLACK, 0.35f);
@@ -724,6 +777,7 @@ void pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
     if (!r || !h) return;
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
     float a = clamp01(h->hud_alpha);
+    draw_signs(r, h);
     draw_subtitle(r, h);
     if (a > 0.01f) {
         draw_pause_info(r, h, clamp01(h->pause_info_alpha) * a);

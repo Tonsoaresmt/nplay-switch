@@ -1,5 +1,6 @@
 #include "subtitle_store.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -101,8 +102,8 @@ int main(void) {
     assert(!strcmp(subtitle_store_text(&store, 203), "sem fim"));
     // Iteracao (copia progressiva do torrent).
     double s, e; const char *t;
-    assert(subtitle_store_get(&store, 1, &s, &e, &t) && !strcmp(t, "Musica: abertura") && e == 95);
-    assert(!subtitle_store_get(&store, 2, &s, &e, &t));
+    assert(subtitle_store_get(&store, 1, &s, &e, &t, NULL) && !strcmp(t, "Musica: abertura") && e == 95);
+    assert(!subtitle_store_get(&store, 2, &s, &e, &t, NULL));
     // Texto longo e cortado sem partir um caractere UTF-8.
     char big[700];
     for (int i = 0; i < 699; i += 2) { big[i] = (char)0xC3; big[i + 1] = (char)0xA9; }
@@ -110,9 +111,42 @@ int main(void) {
     assert(subtitle_store_add(&store, 300, 302, big));
     const char *cut = subtitle_store_text(&store, 301);
     assert(strlen(cut) <= SUBTITLE_TEXT_CAP - 1 && strlen(cut) % 2 == 0);
+    subtitle_store_free(&store);
+
+    // Letreiros posicionados (ass-webvtt.js do backend): fora do bloco de falas,
+    // devolvidos com a posicao. Camadas iguais no mesmo ponto viram um cue;
+    // o mesmo texto em outro ponto e outro letreiro.
+    SubtitlePlacement top = { 50.0f, 2.8f, 1, 1, 0 }, nhac = { 25.0f, 24.6f, 1, 1, 0 };
+    SubtitlePlacement other = { 70.0f, 24.6f, 1, 1, 0 };
+    assert(subtitle_store_add(&store, 10.0, 13.5, "A Yamada pulando uma refeicao?"));
+    for (int layer = 0; layer < 3; layer++)
+        assert(subtitle_store_add_at(&store, 10.0, 12.0, "nhac nhac", &nhac));
+    assert(subtitle_store_add_at(&store, 10.0, 12.0, "nhac nhac", &other));
+    assert(subtitle_store_add_at(&store, 10.0, 14.0, "Nao fique\nligando e desligando", &top));
+    assert(subtitle_store_add_at(&store, 0.0, 95.0, "Placa longa", &top));
+    assert(subtitle_store_count(&store) == 5);
+    assert(!strcmp(subtitle_store_text(&store, 11.0), "A Yamada pulando uma refeicao?"));
+    SubtitleSigns signs = {0};
+    subtitle_store_signs(&store, 11.0, &signs);
+    assert(signs.count == 3);   // nhac nhac (texto repetido uma vez), placa curta e longa
+    int found = 0;
+    for (int i = 0; i < signs.count; i++)
+        if (!strcmp(signs.items[i].text, "Nao fique\nligando e desligando")) {
+            found = 1;
+            assert(fabsf(signs.items[i].at.y - 2.8f) < 0.01f && signs.items[i].at.halign == 1);
+        }
+    assert(found);
+    signs.count = 0;
+    subtitle_store_signs(&store, 60.0, &signs);
+    assert(signs.count == 1 && !strcmp(signs.items[0].text, "Placa longa"));
+    // Copia progressiva preserva a posicao.
+    SubtitlePlacement got;
+    int positioned = 0;
+    for (int i = 0; subtitle_store_get(&store, i, &s, &e, &t, &got); i++) positioned += got.positioned;
+    assert(positioned == 4);
     SubtitleStore moved = {0};
     subtitle_store_move(&moved, &store);
-    assert(subtitle_store_count(&store) == 0 && subtitle_store_count(&moved) == 3);
+    assert(subtitle_store_count(&store) == 0 && subtitle_store_count(&moved) == 5);
     subtitle_store_free(&moved);
     puts("subtitle store: ok");
     return 0;

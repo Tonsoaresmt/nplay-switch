@@ -131,6 +131,20 @@ void __wrap_pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
         flat[k] = 0;
         printf("%8.3f SUB pos=%.2f [%s]\n", now_s(), h ? h->pos : 0, flat);
     }
+    // Letreiros posicionados: registra cada mudanca (texto e ponto de ancora).
+    static char last_signs[1100];
+    char signs[1100] = ""; size_t used = 0;
+#ifndef HARNESS_LEGACY_044
+    for (int i = 0; h && h->signs && i < h->signs->count && used + 64 < sizeof(signs); i++) {
+        const SubtitleSign *sg = &h->signs->items[i];
+        used += (size_t)snprintf(signs + used, sizeof(signs) - used, "[%.60s @%.1f,%.1f a%d] ",
+                                 sg->text, sg->at.x, sg->at.y, sg->at.halign);
+    }
+#endif
+    if (strcmp(signs, last_signs)) {
+        snprintf(last_signs, sizeof(last_signs), "%s", signs);
+        printf("%8.3f SIGN pos=%.2f %s\n", now_s(), h ? h->pos : 0, signs);
+    }
     __real_pui_draw(r, h, now);
 }
 void __real_SDL_PauseAudioDevice(SDL_AudioDeviceID, int);

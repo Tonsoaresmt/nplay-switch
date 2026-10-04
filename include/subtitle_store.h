@@ -4,7 +4,8 @@
 // dezenas de milhares de eventos. O armazenamento anterior guardava 512 bytes
 // por cue e parava em 8192: a partir dai NENHUMA fala aparecia (no host, um
 // episodio com karaoke ficava sem legenda depois da abertura). Aqui cada cue
-// ocupa 16 bytes e o texto vai para uma area compartilhada.
+// ocupa 20 bytes (com a posicao do letreiro) e o texto vai para uma area
+// compartilhada.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -18,7 +19,9 @@ typedef struct {
     float start, end;
     uint32_t text;      // deslocamento na area de texto (terminado em NUL)
     uint16_t len;
-    uint16_t flags;
+    uint8_t flags;      // bit0 letreiro posicionado, bits1-2 ancora x, bits3-4 ancora y
+    uint8_t reserved;
+    uint16_t x, y;      // posicao do letreiro em centesimos de % do quadro
 } SubtitleStoreCue;
 
 typedef struct {
@@ -36,14 +39,19 @@ typedef struct {
 // 1 = guardado, fundido com um cue igual adjacente ou ignorado de proposito
 // (vazio, desenho vetorial do ASS). 0 = limite ou memoria: o cue foi perdido.
 int subtitle_store_add(SubtitleStore *store, double start, double end, const char *text);
+// `at` posicionado = letreiro (placa/onomatopeia), fora do bloco das falas.
+int subtitle_store_add_at(SubtitleStore *store, double start, double end, const char *text,
+                          const SubtitlePlacement *at);
 int subtitle_store_count(const SubtitleStore *store);
-// Itera curtos e depois longos. Retorna 0 fora do intervalo.
+// Itera curtos e depois longos. Retorna 0 fora do intervalo. `at` opcional.
 int subtitle_store_get(const SubtitleStore *store, int index, double *start,
-                       double *end, const char **text);
+                       double *end, const char **text, SubtitlePlacement *at);
 // Texto a exibir em `position`. Repetidos saem uma vez; com muitos cues ao
 // mesmo tempo, fragmentos de karaoke e placas longas cedem lugar a fala
 // (no maximo 4 linhas, o limite do HUD).
 const char *subtitle_store_text(SubtitleStore *store, double position);
+// Letreiros posicionados ativos em `position` (acrescenta a `signs`).
+void subtitle_store_signs(const SubtitleStore *store, double position, SubtitleSigns *signs);
 void subtitle_store_move(SubtitleStore *dst, SubtitleStore *src);
 void subtitle_store_free(SubtitleStore *store);
 // Comandos de desenho do ASS ("m 0 0 l 100 0 ...") viram texto na conversao
