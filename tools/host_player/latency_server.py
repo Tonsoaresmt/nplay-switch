@@ -7,6 +7,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--root'); p.add_argument('--port', type=int, default=8765)
 p.add_argument('--delay-ms', type=float, default=200); p.add_argument('--jitter-ms', type=float, default=100)
 p.add_argument('--mbps', type=float, default=30); p.add_argument('--log'); p.add_argument('--sub-kbps', type=float, default=0); p.add_argument('--tls')
+p.add_argument('--log-query', action='store_true')  # registra a query (ex.: token herdado)
 a = p.parse_args()
 T0 = time.time(); lock = threading.Lock()
 logf = open(a.log, 'a') if a.log else sys.stderr
@@ -19,6 +20,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self): self.serve(head=False)
     def serve(self, head):
         t = time.time()
+        if self.path.startswith('/redir/'):  # imita /api/play -> URL assinada no R2
+            self.send_response(302); self.send_header('Location', '/r2/' + self.path[7:])
+            self.send_header('Content-Length', '0'); self.end_headers()
+            log(f"302 {self.path if a.log_query else self.path.split('?')[0]}"); return
         path = os.path.join(a.root, self.path.split('?')[0].lstrip('/'))
         if not os.path.isfile(path):
             self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); log(f"404 {self.path}"); return
@@ -55,7 +60,8 @@ class H(BaseHTTPRequestHandler):
                         if ahead > 0: time.sleep(ahead)
             except (BrokenPipeError, ConnectionResetError):
                 log(f"ABORT {self.path.split('?')[0]} {start}-{end} sent={sent}"); return
-        log(f"{code} {self.path.split('?')[0]} {start}-{end} bytes={sent} ms={(time.time()-t)*1000:.0f} conn={self.client_address[1]}")
+        shown = self.path if a.log_query else self.path.split('?')[0]
+        log(f"{code} {shown} {start}-{end} bytes={sent} ms={(time.time()-t)*1000:.0f} conn={self.client_address[1]}")
 ThreadingHTTPServer.daemon_threads = True
 srv = ThreadingHTTPServer(('127.0.0.1', a.port), H)
 if a.tls:

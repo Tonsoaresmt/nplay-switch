@@ -10,6 +10,7 @@ static int g_next_audio_pref_explicit, g_next_audio_hint, g_pref_audio, g_last_a
 static char g_next_audio_language[8], g_last_audio_language[8];
 void *gRen;
 static int cancelled_request, requests, plays, jump, expected_next;
+static int g_playback_chain, landing_reloads, chain_seen_during_play;
 static int jint(const cJSON *j, const char *key) {
     const cJSON *v = cJSON_GetObjectItem(j, key); return cJSON_IsNumber(v) ? v->valueint : 0;
 }
@@ -37,6 +38,7 @@ static int resolve_and_play_details(int id, const char *title, const char *subti
     (void)overview; assert(id > 0 && title);
     if (plays < 8) played_ids[plays] = id;
     plays++;
+    if (g_playback_chain > 0) chain_seen_during_play++;
     // Painel Episodios: o player devolve o episodio escolhido (ex.: o anterior).
     if (choose_target && plays == 1) { g_play_chosen_item = choose_target; return 2; }
     if (plays == 1) {
@@ -54,6 +56,8 @@ static int choose_next_episode(int sid, int current, int first, int refresh, int
     if (!ep) return 0;
     snprintf(title, cap, "%s", jstr(ep, "title")); return next.item_id;
 }
+// Wrapper 0.12.46: a Home so recarrega quando a sequencia inteira termina.
+static void playback_memory_leave(void) { if (g_playback_chain == 0) landing_reloads++; }
 #include "episode_sequence.inc"
 
 static void reset(void) {
@@ -71,6 +75,9 @@ int main(void) {
     g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; jump = 1;
     play_episode_sequence(101, 10, "Anime", NULL);
     assert(plays == 2 && !requests);
+    // Dois episodios seguidos: nenhum recarregamento da Home entre eles, um so
+    // ao final da sequencia (antes cada episodio disparava o catalogo).
+    assert(chain_seen_during_play == 2 && landing_reloads == 1 && g_playback_chain == 0);
     reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1;
     play_episode_sequence(102, 10, "Anime", NULL); assert(plays == 1); // next season
     reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 0;
@@ -91,5 +98,5 @@ int main(void) {
     play_episode_sequence(102, 10, "Anime", NULL);
     assert(plays == 2 && played_ids[0] == 102 && played_ids[1] == 101 && built_for == 101);
     reset(); cJSON_Delete(api_detail);
-    puts("actual episode sequence OK: anime, direct context, cancel, chronological next, season boundary, grouped season, finale, explicit jump, episodes panel choice");
+    puts("actual episode sequence OK: anime, direct context, cancel, chronological next, season boundary, grouped season, finale, explicit jump, episodes panel choice, Home reload deferred to chain end");
 }

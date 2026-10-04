@@ -88,6 +88,55 @@ int main(void) {
     free(trimmed);
     const char binary[] = "\0\0\0\x18" "ftypiso6\n#EXTINF:1,\nx\n";
     assert(hls_media_playlist_trim(binary, sizeof(binary) - 1, 5.0, &trimmed, &trimmed_len, &seg, &full) == 0 && !trimmed);
+    // Audio filtrado: lista na ordem do FFmpeg, master com uma unica rendition.
+    const char *r2 =
+        "#EXTM3U\n#EXT-X-VERSION:7\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group_audio\",NAME=\"audio_0\",DEFAULT=YES,LANGUAGE=\"jpn\",URI=\"stream-audio_0_jpn.m3u8\"\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group_audio\",NAME=\"audio_1\",DEFAULT=NO,LANGUAGE=\"por\",URI=\"stream-audio_1_por.m3u8\"\r\n"
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"PT\",LANGUAGE=\"por\",URI=\"subtitle-0.m3u8\"\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=5200000,AUDIO=\"group_audio\",SUBTITLES=\"subs\"\n"
+        "stream-video.m3u8\n";
+    int filterable = 0;
+    assert(hls_manifest_audio_tracks(r2, strlen(r2), tracks, 4, &filterable) == 2 && filterable);
+    assert(!strcmp(tracks[0].language, "jpn") && tracks[0].is_default && !tracks[1].is_default);
+    assert(!strcmp(tracks[1].name, "audio_1") && !strcmp(tracks[1].uri, "stream-audio_1_por.m3u8"));
+    char *kept = NULL; size_t kept_len = 0;
+    assert(hls_manifest_keep_audio(r2, strlen(r2), 1, &kept, &kept_len) == 1);
+    assert(!strstr(kept, "audio_0") && strstr(kept, "audio_1_por") && strstr(kept, "subtitle-0") &&
+           strstr(kept, "stream-video.m3u8") && !strchr(kept, '\r') && kept_len == strlen(kept));
+    int a2 = 0, s2 = 0;
+    assert(hls_manifest_media_counts(kept, kept_len, &a2, &s2) == 1 && a2 == 1 && s2 == 1);
+    free(kept);
+    assert(hls_manifest_keep_audio(r2, strlen(r2), 2, &kept, &kept_len) == 0 && !kept);
+    // Dois grupos (ex.: audio por bitrate) ou rendition sem URI: nao filtrar.
+    const char *groups =
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"lo\",LANGUAGE=\"en\",URI=\"a.m3u8\"\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"hi\",LANGUAGE=\"en\",URI=\"b.m3u8\"\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"lo\"\nv1.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2,AUDIO=\"hi\"\nv2.m3u8\n";
+    assert(hls_manifest_audio_tracks(groups, strlen(groups), tracks, 4, &filterable) == 2 && !filterable);
+    const char *muxed =
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"en\",DEFAULT=YES\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"pt\",URI=\"pt.m3u8\"\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv.m3u8\n";
+    assert(hls_manifest_audio_tracks(muxed, strlen(muxed), tracks, 4, &filterable) == 2 && !filterable);
+    assert(hls_manifest_audio_tracks(r2, strlen(r2), tracks, 1, &filterable) == 1 && !filterable);
+    // URIs que o demuxer abre (sem legendas) e init de uma playlist de midia.
+    char uris[8][HLS_MANIFEST_URI_MAX];
+    assert(hls_manifest_playlist_uris(r2, strlen(r2), uris, 8) == 3);
+    assert(!strcmp(uris[0], "stream-video.m3u8") && !strcmp(uris[1], "stream-audio_0_jpn.m3u8"));
+    assert(hls_manifest_playlist_uris(r2, strlen(r2), uris, 1) == 1 && !strcmp(uris[0], "stream-video.m3u8"));
+    assert(hls_manifest_playlist_uris(groups, strlen(groups), uris, 8) == 4);
+    const char *mapped = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MAP:URI=\"init-video.mp4\"\n#EXTINF:6,\nseg0.m4s\n";
+    char map[64];
+    assert(hls_media_playlist_map_uri(mapped, strlen(mapped), map, sizeof(map)) == 1 && !strcmp(map, "init-video.mp4"));
+    assert(hls_media_playlist_map_uri(r2, strlen(r2), map, sizeof(map)) == 0);
+    // Resolucao igual a do FFmpeg: sem heranca da query (confirmado no 7.1).
+    assert(hls_manifest_resolve_like_ffmpeg("https://cdn.example/a/index.m3u8?token=x",
+                                            "stream-video.m3u8", resolved, sizeof(resolved)) == 1);
+    assert(!strcmp(resolved, "https://cdn.example/a/stream-video.m3u8"));
+    assert(hls_manifest_resolve_like_ffmpeg("https://cdn.example/a/b/v.m3u8",
+                                            "https://r2.example/x.mp4?sig=1", resolved, sizeof(resolved)) == 1);
+    assert(!strcmp(resolved, "https://r2.example/x.mp4?sig=1"));
     puts("hls manifest: ok");
     return 0;
 }

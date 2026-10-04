@@ -8,7 +8,10 @@ if (process.argv.includes('--baseline')) {
   if (old.status) throw new Error(old.stderr);
   main = old.stdout.replace(/\r\n/g, '\n');
 }
-const start = main.indexOf('static void play_episode_sequence(int item_id, int series_id, const char *title,\n                                  cJSON *episode_hint) {');
+// 0.12.46: o corpo fica em play_episode_sequence_run e o wrapper (logo antes
+// de input_series) marca a sequencia para adiar o recarregamento da Home.
+let start = main.indexOf('static void play_episode_sequence_run(int item_id, int series_id, const char *title,');
+if (start < 0) start = main.indexOf('static void play_episode_sequence(int item_id, int series_id, const char *title,\n                                  cJSON *episode_hint) {');
 const end = main.indexOf('\nstatic void input_series(', start);
 if (start < 0 || end < 0) throw new Error('Review sequence harness boundaries');
 mkdirSync('build', { recursive: true });

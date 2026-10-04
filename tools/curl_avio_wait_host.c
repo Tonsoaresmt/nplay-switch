@@ -21,6 +21,7 @@ static int deadline;
 static int locked;
 static Uint32 SDL_GetTicks(void) { return ticks; }
 static int SDL_AtomicAdd(SDL_atomic_t *a, int value) { int old = a->value; a->value += value; return old; }
+static int SDL_AtomicGet(SDL_atomic_t *a) { return a->value; }
 static void SDL_LockMutex(SDL_mutex *m) { (void)m; assert(!locked); locked = 1; }
 static void SDL_UnlockMutex(SDL_mutex *m) { (void)m; assert(locked); locked = 0; }
 static void SDL_CondSignal(SDL_cond *c) { (void)c; }

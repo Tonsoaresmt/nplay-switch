@@ -284,6 +284,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Sequencia real de episodios perdeu contexto ou
 Assert-True ($sources -match 'next_selected \|\| paused \|\| hud_pinned') 'Proximo episodio voltou a ficar escondido durante a pausa.'
 Assert-True ($mainSource -match 'play_with_progress_details' -and $mainSource -match 'presentation->has_next' -and $mainSource -match 'g_episode_pending\.explicit_next') 'Preparacao ou virada de temporada perdeu a acao explicita de proximo episodio.'
 Assert-True ($mainSource -match 'play_episodes_build' -and $mainSource -match 'chosen_item > 0 \? chosen_item') 'Painel Episodios do player nao toca mais o episodio escolhido.'
+Assert-True ($mainSource -match 'g_playback_chain > 0\) return' -and $mainSource -match 'play_episode_sequence_run') 'Home voltou a recarregar entre episodios encadeados.'
+Assert-True ($mainSource -match 'resolve_progress_thread' -and $mainSource -match 'progress_fetched') 'Progresso salvo voltou a ser pedido so depois de /stream.'
+Assert-True ($sources -match 'nplay_curl_avio_hls_prefetch\(url,' -and $sources -match 'HLS_PREFETCH_WAVE') 'Playlists/init HLS voltaram a ser baixadas uma a uma na abertura.'
+Assert-True ($sources -match 'hls_manifest_resolve_like_ffmpeg') 'Busca paralela deve resolver URLs como o FFmpeg (sem herdar query).'
+Assert-True ($sources -match 'player_hls_choose_audio' -and $sources -match 'hls_manifest_keep_audio' -and $sources -match 'audio_from_master') 'HLS voltou a abrir todas as faixas de audio.'
+Assert-True ($sources -match 'subtitle_fetch_start' -and $sources -match 'subtitle_fetch_stop\(&subtitle_fetch\)') 'Legenda do master voltou a bloquear abertura/troca.'
+Assert-True ($sources -match 't_cancel_flag') 'Download de legenda em segundo plano perdeu o cancelamento.'
 & $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
 if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 falhou ao compilar.' }
 & .\build\test_playback_source.exe
