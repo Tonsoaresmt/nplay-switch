@@ -7,7 +7,10 @@ p = argparse.ArgumentParser()
 p.add_argument('--root'); p.add_argument('--port', type=int, default=8765)
 p.add_argument('--delay-ms', type=float, default=200); p.add_argument('--jitter-ms', type=float, default=100)
 p.add_argument('--mbps', type=float, default=30); p.add_argument('--log'); p.add_argument('--sub-kbps', type=float, default=0); p.add_argument('--tls')
-p.add_argument('--log-query', action='store_true')  # registra a query (ex.: token herdado)
+p.add_argument('--log-query', action='store_true')
+# Falha transitoria: pedidos cujo caminho contem --fail-match, do N-esimo (1 = primeiro)
+# ate N+count-1, recebem 503. Simula queda de rede justamente na legenda.
+p.add_argument('--fail-match'); p.add_argument('--fail-from', type=int, default=2); p.add_argument('--fail-count', type=int, default=1)  # registra a query (ex.: token herdado)
 a = p.parse_args()
 T0 = time.time(); lock = threading.Lock()
 logf = open(a.log, 'a') if a.log else sys.stderr
@@ -24,6 +27,12 @@ class H(BaseHTTPRequestHandler):
             self.send_response(302); self.send_header('Location', '/r2/' + self.path[7:])
             self.send_header('Content-Length', '0'); self.end_headers()
             log(f"302 {self.path if a.log_query else self.path.split('?')[0]}"); return
+        if a.fail_match and a.fail_match in self.path:
+            with lock:
+                H.fail_seen = getattr(H, 'fail_seen', 0) + 1; nth = H.fail_seen
+            if a.fail_from <= nth < a.fail_from + a.fail_count:
+                self.send_response(503); self.send_header('Content-Length', '0'); self.end_headers()
+                log(f"503 {self.path.split('?')[0]} (falha simulada {nth})"); return
         path = os.path.join(a.root, self.path.split('?')[0].lstrip('/'))
         if not os.path.isfile(path):
             self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); log(f"404 {self.path}"); return

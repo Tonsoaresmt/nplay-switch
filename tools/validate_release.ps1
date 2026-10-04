@@ -28,7 +28,7 @@ Assert-True ($sources -match 'nplay_curl_avio_open_hls') 'Playlists e segmentos 
 Assert-True ($sources -match 'forced_format = av_find_input_format\("hls"\)') 'Manifesto raiz voltou a passar pelo probe que fecha o processo no Switch.'
 Assert-True ($sources -match 'fmt->pb = avio') 'Manifesto HLS raiz nao e fornecido explicitamente ao demuxer.'
 Assert-True ($sources -match 'avformat_open_input\(&fmt, url, forced_format') 'FFmpeg voltou a sondar automaticamente o manifesto HLS raiz.'
-Assert-True ($sources -match 'HLS_META_INITIAL \(64 \* 1024\)' -and $sources -match 'HLS_META_MAX\s+\(4 \* 1024 \* 1024\)') 'Manifestos HLS perderam o crescimento limitado de memoria.'
+Assert-True ($sources -match 'HLS_META_INITIAL \(64 \* 1024\)' -and $sources -match 'HLS_META_MAX\s+\(8 \* 1024 \* 1024\)') 'Manifestos HLS perderam o crescimento limitado de memoria.'
 Assert-True ($sources -match 'CURLOPT_RANGE, NULL') 'Manifestos HLS voltaram a pedir Range sobre texto reescrito.'
 Assert-True ($sources -match 'HLS_MEDIA_RINGCAP \(4 \* 1024 \* 1024\)' -and $sources -match 'c->streaming \? producer_stream : producer') 'Segmentos HLS perderam o fluxo continuo com buffer limitado.'
 Assert-True ($sources -match 'c->streaming \? wr_ring : wr_tmp' -and $sources -match 'if \(start == 0\) curl_easy_setopt\(c->easy, CURLOPT_RANGE, NULL\)') 'Segmentos HLS voltaram a usar varios ranges sem cache no R2.'
@@ -267,6 +267,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao detectar aud
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
 & .\build\test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou nos cenarios de tempo e sobreposicao.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_store.c tools/test_subtitle_store.c -o build/test_subtitle_store.exe
+if ($LASTEXITCODE -ne 0) { throw 'Armazenamento de legendas falhou ao compilar.' }
+& .\build\test_subtitle_store.exe
+if ($LASTEXITCODE -ne 0) { throw 'Armazenamento de legendas falhou (karaoke, placas, ordem, desenho, reenvio).' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hot_subtitles.c source/cJSON.c tools/test_hot_subtitles.c -lm -o build/test_hot_subtitles.exe
 Assert-True ($LASTEXITCODE -eq 0) 'Compilacao hot subtitles falhou.'
 & .\build\test_hot_subtitles.exe
@@ -291,6 +295,9 @@ Assert-True ($sources -match 'hls_manifest_resolve_like_ffmpeg') 'Busca paralela
 Assert-True ($sources -match 'player_hls_choose_audio' -and $sources -match 'hls_manifest_keep_audio' -and $sources -match 'audio_from_master') 'HLS voltou a abrir todas as faixas de audio.'
 Assert-True ($sources -match 'subtitle_fetch_start' -and $sources -match 'subtitle_fetch_stop\(&subtitle_fetch\)') 'Legenda do master voltou a bloquear abertura/troca.'
 Assert-True ($sources -match 't_cancel_flag') 'Download de legenda em segundo plano perdeu o cancelamento.'
+Assert-True ($sources -match 'subtitle_store_add' -and $sources -match 'subtitle_session_take' -and $sources -match 'subtitle_retry_choice') 'Legenda externa voltou ao limite de 8192 cues, sem cache de sessao ou sem nova tentativa.'
+Assert-True ($sources -notmatch 'store->count >= 8192') 'Teto antigo de 8192 cues voltou: a legenda de anime com karaoke parava no meio.'
+Assert-True ($sources -match 'stream-retry') 'Legenda progressiva do torrent perdeu a nova tentativa apos queda.'
 & $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
 if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 falhou ao compilar.' }
 & .\build\test_playback_source.exe

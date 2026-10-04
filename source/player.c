@@ -32,6 +32,7 @@
 #include "audio_policy.h"
 #include "player_ui.h"
 #include "subtitle_queue.h"
+#include "subtitle_store.h"
 #include "hls_manifest.h"
 #include "hot_subtitles.h"
 #include "vtt_stream.h"
@@ -73,6 +74,12 @@ static int g_player_last_access_expired = 0;
 static int g_player_audio_index = 0;
 static char g_player_audio_language[8] = "";
 static int g_player_subtitle_index = 0;
+// Cues da legenda do master guardados entre as reaberturas da MESMA
+// reproducao (salto, troca de audio, recuperacao de rede). Antes cada
+// reabertura baixava o VTT de novo; uma falha momentanea desligava a legenda
+// pelo resto do episodio. Chave: URL sem query (o token muda na renovacao).
+static SubtitleStore g_session_subtitles;
+static char g_session_subtitle_key[1024];
 // Origem da linha do tempo HLS medida numa abertura sem corte. Aberturas
 // posicionadas enxergam start_time no segmento cortado e precisam dela.
 static double g_hls_timeline_origin = 0;
@@ -713,11 +720,10 @@ static void ass_to_text(const char *ass, char *out, int cap) {
 }
 
 typedef struct ProgressiveSubtitle ProgressiveSubtitle;
+// Cues em subtitle_store (16 bytes cada, sem teto de 8192). Ver o cabecalho:
+// o limite antigo cortava a legenda de animes com karaoke no meio do episodio.
 typedef struct {
-    SubtitleCue *cues;
-    int count;
-    int capacity;
-    char composed[SUBTITLE_COMPOSED_CAP];
+    SubtitleStore cues;
     ProgressiveSubtitle *progressive;
 } ExternalSubtitleStore;
 
@@ -735,51 +741,31 @@ static void progressive_subtitle_stop(ProgressiveSubtitle *stream);
 static void external_subtitle_clear(ExternalSubtitleStore *store) {
     if (!store) return;
     if (store->progressive) progressive_subtitle_stop(store->progressive);
-    free(store->cues);
+    subtitle_store_free(&store->cues);
     memset(store, 0, sizeof(*store));
 }
 
 static int external_subtitle_add(ExternalSubtitleStore *store, double start,
                                  double end, const char *text) {
-    if (!store || !text || !text[0] || store->count >= 8192) return 0;
-    if (store->count == store->capacity) {
-        int next = store->capacity ? store->capacity * 2 : 128;
-        if (next > 8192) next = 8192;
-        SubtitleCue *grown = realloc(store->cues, (size_t)next * sizeof(*grown));
-        if (!grown) return 0;
-        store->cues = grown;
-        store->capacity = next;
-    }
-    SubtitleCue *cue = &store->cues[store->count++];
-    cue->start = start < 0 ? 0 : start;
-    cue->end = end > cue->start ? end : cue->start + 4.0;
-    snprintf(cue->text, sizeof(cue->text), "%s", text);
-    return 1;
+    if (!store) return 0;
+    return subtitle_store_add(&store->cues, start, end, text);
+}
+
+static int external_subtitle_count(const ExternalSubtitleStore *store) {
+    return store ? subtitle_store_count(&store->cues) : 0;
 }
 
 static const char *external_subtitle_text(ExternalSubtitleStore *store,
                                           double position) {
     if (!store) return "";
     ProgressiveSubtitle *progressive = store->progressive;
-    if (progressive) SDL_LockMutex(progressive->mutex);
-    ExternalSubtitleStore *source = progressive ? &progressive->store : store;
-    store->composed[0] = 0;
-    for (int i = 0; i < source->count; i++) {
-        SubtitleCue *cue = &source->cues[i];
-        if (cue->start > position + 0.05) break;
-        if (position >= cue->end) continue;
-        size_t used = strlen(store->composed);
-        size_t remaining = sizeof(store->composed) - used;
-        if (remaining <= 1) break;
-        if (used) {
-            strncat(store->composed, "\n", remaining - 1);
-            used++;
-            remaining = sizeof(store->composed) - used;
-        }
-        strncat(store->composed, cue->text, remaining - 1);
-    }
-    if (progressive) SDL_UnlockMutex(progressive->mutex);
-    return store->composed;
+    if (!progressive) return subtitle_store_text(&store->cues, position);
+    // A thread do torrent acrescenta cues; copie o texto ainda sob o mutex.
+    SDL_LockMutex(progressive->mutex);
+    const char *text = subtitle_store_text(&progressive->store.cues, position);
+    snprintf(store->cues.composed, sizeof(store->cues.composed), "%s", text);
+    SDL_UnlockMutex(progressive->mutex);
+    return store->cues.composed;
 }
 
 static const char *active_subtitle_text(int selected, int external,
@@ -911,6 +897,8 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
                                    sub.start_display_time, sub.end_display_time,
                                    0, &start, &end);
                 if (text[0] && !external_subtitle_add(&loaded, start, end, text)) {
+                    diag_player_event("subtitle", "truncated", "cues=%d",
+                                      external_subtitle_count(&loaded));
                     rc = AVERROR(ENOMEM);
                     avsubtitle_free(&sub);
                     av_packet_unref(packet);
@@ -926,9 +914,16 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
     avformat_close_input(&subfmt);
     subtitle_root_close(root, direct);
     membuf_free(&body);
-    if (loaded.count <= 0 || (direct && (rc != AVERROR_EOF || subtitle_cancelled(cancel)))) {
+    if (external_subtitle_count(&loaded) <= 0 ||
+        (direct && (rc != AVERROR_EOF || subtitle_cancelled(cancel)))) {
         external_subtitle_clear(&loaded); return -1;
     }
+    if (!direct)
+        diag_player_event("subtitle", "loaded", "cues=%d merged=%d skipped=%d kb=%u",
+                          external_subtitle_count(&loaded), loaded.cues.merged,
+                          loaded.cues.skipped,
+                          (unsigned)(((size_t)loaded.cues.capacity * sizeof(SubtitleStoreCue) +
+                                      loaded.cues.text_cap) / 1024));
     external_subtitle_clear(store);
     *store = loaded;
     return 0;
@@ -991,9 +986,10 @@ static int progressive_subtitle_block(void *opaque, const char *block, size_t si
     if (rc != 0) return 0;
     SDL_LockMutex(stream->mutex);
     int ok = 1;
-    for (int i = 0; i < decoded.count; i++) {
-        SubtitleCue *cue = &decoded.cues[i];
-        if (!external_subtitle_add(&stream->store, cue->start, cue->end, cue->text)) { ok = 0; break; }
+    double cue_start = 0, cue_end = 0;
+    const char *cue_text = NULL;
+    for (int i = 0; subtitle_store_get(&decoded.cues, i, &cue_start, &cue_end, &cue_text); i++) {
+        if (!external_subtitle_add(&stream->store, cue_start, cue_end, cue_text)) { ok = 0; break; }
     }
     SDL_UnlockMutex(stream->mutex);
     external_subtitle_clear(&decoded);
@@ -1007,9 +1003,22 @@ static int progressive_subtitle_chunk(const char *data, size_t length, void *opa
 }
 static int progressive_subtitle_worker(void *opaque) {
     ProgressiveSubtitle *stream = opaque;
-    long code = net_stream_text(stream->url, 4u * 1024u * 1024u, &stream->cancel,
-                                progressive_subtitle_chunk, stream);
-    stream->result = code == 200 && vtt_stream_finish(&stream->parser) ? 0 : -1;
+    // A extracao do torrent fica aberta pelo episodio inteiro. Uma queda no
+    // meio deixava so os cues ja recebidos: a legenda parava dali em diante.
+    // Pede de novo (o servidor reextrai desde o inicio); repetidos se fundem.
+    static const Uint32 retry_delays[] = { 2000, 5000, 10000 };
+    for (int attempt = 0; ; attempt++) {
+        long code = net_stream_text(stream->url, 4u * 1024u * 1024u, &stream->cancel,
+                                    progressive_subtitle_chunk, stream);
+        stream->result = code == 200 && vtt_stream_finish(&stream->parser) ? 0 : -1;
+        if (stream->result == 0 || SDL_AtomicGet(&stream->cancel) || attempt >= 3) break;
+        diag_player_event("subtitle", "stream-retry", "attempt=%d code=%ld", attempt + 2, code);
+        for (Uint32 waited = 0; waited < retry_delays[attempt] && !SDL_AtomicGet(&stream->cancel);
+             waited += 50) SDL_Delay(50);
+        if (SDL_AtomicGet(&stream->cancel)) break;
+        vtt_stream_free(&stream->parser);
+        vtt_stream_init(&stream->parser, progressive_subtitle_block, stream);
+    }
     SDL_AtomicSet(&stream->done, 1);
     return 0;
 }
@@ -1075,7 +1084,7 @@ static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *u
     if (cancelled || !SDL_AtomicGet(&stream->ready) || (finished && stream->result != 0)) {
         progressive_subtitle_stop(stream); return cancelled ? -2 : -1;
     }
-    if (finished && !stream->store.count) { progressive_subtitle_stop(stream); return -1; }
+    if (finished && !external_subtitle_count(&stream->store)) { progressive_subtitle_stop(stream); return -1; }
     // Heap-owned session outlives this modal. Close always cancels and joins it.
     external_subtitle_clear(store); store->progressive = stream;
     return 0;
@@ -1137,6 +1146,36 @@ static int subtitle_fetch_poll(SubtitleFetch *fetch, ExternalSubtitleStore *stor
     *store = fetch->loaded;
     memset(&fetch->loaded, 0, sizeof(fetch->loaded));
     return 1;
+}
+
+static void subtitle_session_key(const char *uri, char *out, size_t cap) {
+    if (!uri) uri = "";
+    size_t n = strcspn(uri, "?#");
+    if (n >= cap) n = cap - 1;
+    memcpy(out, uri, n);
+    out[n] = 0;
+}
+
+static int subtitle_session_take(const char *uri, ExternalSubtitleStore *store) {
+    char key[sizeof(g_session_subtitle_key)];
+    subtitle_session_key(uri, key, sizeof(key));
+    if (!key[0] || strcmp(key, g_session_subtitle_key) ||
+        subtitle_store_count(&g_session_subtitles) <= 0) return 0;
+    external_subtitle_clear(store);
+    subtitle_store_move(&store->cues, &g_session_subtitles);
+    g_session_subtitle_key[0] = 0;
+    return 1;
+}
+
+static void subtitle_session_keep(const char *uri, ExternalSubtitleStore *store) {
+    if (!store || store->progressive || external_subtitle_count(store) <= 0) return;
+    subtitle_session_key(uri, g_session_subtitle_key, sizeof(g_session_subtitle_key));
+    subtitle_store_move(&g_session_subtitles, &store->cues);
+}
+
+static void subtitle_session_clear(void) {
+    subtitle_store_free(&g_session_subtitles);
+    g_session_subtitle_key[0] = 0;
 }
 
 // Mesmo padrao de modern_track_labels: nome publicado, idioma quando o nome e
@@ -2224,9 +2263,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     memset(&subtitle_fetch, 0, sizeof(subtitle_fetch));
     if (scur >= 0 && !manifest_subtitle_fallback &&
         open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
+    int subtitle_retry_choice = -1, subtitle_retries = 0;
+    Uint32 subtitle_retry_at = 0;
     if (scur >= 0 && manifest_subtitle_fallback && !hot_external_subtitles) {
         // A faixa fica selecionada enquanto o texto chega; o video nao espera.
-        if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[scur].uri, scur) != 0) {
+        if (subtitle_session_take(manifest_subtitles[scur].uri, &external_subtitles)) {
+            diag_player_event("subtitle", "session-reuse", "choice=%d cues=%d", scur + 1,
+                              external_subtitle_count(&external_subtitles));
+        } else if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[scur].uri, scur) != 0) {
             diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=thread", scur + 1);
             scur = -1;
         }
@@ -2342,6 +2386,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (actx) avcodec_free_context(&actx); \
     if (sctx) avcodec_free_context(&sctx); \
     subtitle_fetch_stop(&subtitle_fetch); \
+    if (scur >= 0 && manifest_subtitle_fallback && !hot_external_subtitles) \
+        subtitle_session_keep(manifest_subtitles[scur].uri, &external_subtitles); \
     external_subtitle_clear(&external_subtitles); \
     if (vctx) avcodec_free_context(&vctx); \
     if (frame) av_frame_free(&frame); \
@@ -2453,6 +2499,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 buffering_audio_ms = 0, longest_buffer_ms = 0;
     Uint32 notice_until = 0;
     char notice[96] = "";
+    if (req->subtitle_hint > 0 && nsub == 0 && !hot_subtitle_session_valid(req->playback.hot_session_id)) {
+        // Recuperacao trocou para uma fonte sem legendas (ex.: MP4 do provedor
+        // depois de o R2 falhar). Avise em vez de a legenda sumir sem motivo.
+        snprintf(notice, sizeof(notice), "Esta fonte nao tem legendas");
+        notice_until = SDL_GetTicks() + 5000;
+        diag_player_event("subtitle", "source-without", "hint=%d", req->subtitle_hint);
+    }
     int hud_pinned = 0, have_video_frame = 0;
     int logged_first_read = 0, logged_first_video_packet = 0;
     int logged_first_video_frame = 0, logged_first_present = 0;
@@ -2631,22 +2684,48 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     snprintf(notice, sizeof(notice), "Legenda %d/%d  %.54s",
                              scur + 1, nsub, hud_sub_names[scur + 1]);
                     notice_until = now_ticks + 2200;
+                } else if (subtitle_retries > 0) {
+                    snprintf(notice, sizeof(notice), "Legenda carregada");
+                    notice_until = now_ticks + 2200;
                 }
+                subtitle_retries = 0;
+                subtitle_retry_choice = -1;
                 diag_player_event("tracks", "subtitle-manifest-applied",
                                   "choice=%d cues=%d ms=%u async=1", scur + 1,
-                                  external_subtitles.count, now_ticks - subtitle_fetch.started);
+                                  external_subtitle_count(&external_subtitles),
+                                  now_ticks - subtitle_fetch.started);
             } else {
                 track_switch_failures++;
-                diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=async ms=%u",
-                                  choice + 1, now_ticks - subtitle_fetch.started);
-                if (scur == choice) {
-                    // Falhou a faixa escolhida na abertura: nada a manter.
-                    scur = -1;
-                    g_player_subtitle_index = 0;
+                diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=async ms=%u retry=%d",
+                                  choice + 1, now_ticks - subtitle_fetch.started, subtitle_retries);
+                if (scur == choice && subtitle_retries < 4) {
+                    // A faixa continua escolhida (e passa para a proxima
+                    // reabertura); so o download e repetido. Antes a falha
+                    // desligava a legenda em silencio pelo resto do episodio.
+                    static const Uint32 retry_delays[] = { 2000, 5000, 10000, 20000 };
+                    subtitle_retry_at = now_ticks + retry_delays[subtitle_retries++];
+                    subtitle_retry_choice = choice;
+                    if (subtitle_retries == 1) {
+                        snprintf(notice, sizeof(notice), "Legenda nao carregou. Tentando de novo...");
+                        notice_until = now_ticks + 2600;
+                    }
+                } else if (scur == choice) {
+                    snprintf(notice, sizeof(notice), "Legenda indisponivel agora  |  X tenta de novo");
+                    notice_until = now_ticks + 3500;
+                } else {
+                    snprintf(notice, sizeof(notice), "Nao consegui carregar esta legenda");
+                    notice_until = now_ticks + 2200;
                 }
-                snprintf(notice, sizeof(notice), "Nao consegui carregar esta legenda");
-                notice_until = now_ticks + 2200;
             }
+        }
+        if (subtitle_retry_choice >= 0 && !subtitle_fetch.thread &&
+            SDL_TICKS_PASSED(now_ticks, subtitle_retry_at)) {
+            int choice = subtitle_retry_choice;
+            subtitle_retry_choice = -1;
+            if (scur == choice &&
+                subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[choice].uri, choice) == 0)
+                diag_player_event("subtitle", "retry", "choice=%d attempt=%d",
+                                  choice + 1, subtitle_retries + 1);
         }
         if (quick_seek_active && SDL_TICKS_PASSED(now_ticks, quick_seek_deadline)) {
             quick_seek_active = 0;
@@ -3021,7 +3100,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             }
                         } else {
                             int next = track_sel - 1;
-                            if (next == scur) {
+                            if (next == scur && next >= 0 && manifest_subtitle_fallback &&
+                                !hot_external_subtitles && !subtitle_fetch.thread &&
+                                external_subtitle_count(&external_subtitles) <= 0) {
+                                // Faixa escolhida mas sem texto (download falhou):
+                                // escolher de novo tenta outra vez na hora.
+                                subtitle_retries = 0;
+                                subtitle_retry_choice = -1;
+                                if (subtitle_fetch_start(&subtitle_fetch,
+                                        manifest_subtitles[next].uri, next) == 0)
+                                    snprintf(notice, sizeof(notice), "Carregando legenda...");
+                            } else if (next == scur) {
                                 snprintf(notice, sizeof(notice), "Legenda atual mantida");
                             } else if (manifest_subtitle_fallback) {
                                 Uint32 switch_started = SDL_GetTicks();
@@ -3074,7 +3163,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                  hud_sub_names[scur + 1]);
                                     diag_player_event("tracks", "subtitle-manifest-applied",
                                         "choice=%d cues=%d ms=%u", scur + 1,
-                                        external_subtitles.count,
+                                        external_subtitle_count(&external_subtitles),
                                         SDL_GetTicks() - switch_started);
                                 } else {
                                     track_switch_failures++;
@@ -4003,6 +4092,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (actx) avcodec_free_context(&actx);
     if (sctx) avcodec_free_context(&sctx);
     subtitle_fetch_stop(&subtitle_fetch);
+    if (scur >= 0 && manifest_subtitle_fallback && !hot_external_subtitles)
+        subtitle_session_keep(manifest_subtitles[scur].uri, &external_subtitles);
     external_subtitle_clear(&external_subtitles);
     avcodec_free_context(&vctx);
     av_frame_free(&frame); av_packet_free(&pkt);
@@ -4082,6 +4173,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     g_hls_timeline_origin = 0;
     g_hls_timeline_origin_valid = 0;
     carry_frame_release();
+    subtitle_session_clear();
     if (!request || !result) return -1;
     memset(result, 0, sizeof(PlayerResult));
     g_player_last_access_expired = 0;
@@ -4156,6 +4248,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         if (last_subtitle_priority) {
             attempt.subtitle_hint = last_subtitle;
             attempt.subtitle_hint_priority = 1;
+        } else if (last_subtitle > 0) {
+            attempt.subtitle_hint = last_subtitle; // so informa: havia legenda
         }
         g_player_audio_index = 0;
         g_player_audio_language[0] = '\0';
@@ -4379,6 +4473,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     ui_popcorn_release();
     nplay_curl_avio_pool_clear();
     carry_frame_release();
+    subtitle_session_clear();
 
     return final_rc;
 }

@@ -1785,3 +1785,29 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
 - Atencao: `make clean` apaga `build/` inteiro, inclusive `build/host_player`.
 - Pendente no Switch: abertura Dublado/Legendado, trocas Y/X, maratona 3+
   episodios; no trace, `meta-prefetch`, `audio-filter`, `async=1`.
+
+## Legenda de anime que sumia e episodio "sem fonte" — 0.12.47, 04/10/2026
+
+- Relato: anime R2 em japones, a legenda parou de aparecer no meio. Causa
+  principal reproduzida na 0.12.44 instalada: teto de 8192 cues (512 B cada).
+  Fansub com karaoke vira dezenas de milhares de cues WebVTT; o resto do
+  episodio ficava sem nenhuma fala. Detalhes em `docs/SUBTITLES_ANIME_0_12_47.md`.
+- `source/subtitle_store.c`: 16 B por cue, area de texto unica, funde repeticoes,
+  ordena, busca binaria, ignora desenho ASS; exibe a fala acima de karaoke e
+  placas (4 linhas). NAO voltar a `SubtitleCue` fixo de 512 B nem a teto 8192.
+- Cues da legenda do master guardados durante a reproducao (`subtitle_session_*`):
+  salto/troca de audio/recuperacao nao baixam de novo. Falha ao baixar repete em
+  2/5/10/20 s mantendo a faixa escolhida; X na mesma faixa tenta na hora.
+  Torrent: legenda progressiva com ate 3 novas tentativas. Teto textual 8 MB.
+- Harness: `SUB pos=... [texto]` registra o texto entregue ao HUD; fixture
+  `r2sub` (karaoke/placas); `latency_server.py --fail-match`; `suite.sh` com 26
+  verificacoes (26/26 em rede boa e Wi-Fi ruim). Binarios antigos para A/B: o
+  harness compila contra 0.12.44 com `-DHARNESS_LEGACY_044`.
+- Episodio de The Big Bang Theory ja concluido dizendo "sem fonte": o Switch
+  envia o item correto; o texto vem do backend (`POST /api/stream/:id` -> 409
+  "Nenhuma fonte ativa disponivel para este conteudo" quando `allActiveSources`
+  fica vazio, ou 503 em modo `r2_only`). Sem acesso ao banco de producao, a causa
+  exata nao foi confirmada. Candidatos no backend: asset R2 removido (painel ou
+  auditoria), fonte torrent desativada/quarentenada pela identidade de pack
+  (`4de76f2` reparo cross-season, `e834c9c` curadoria manual) ou modo r2_only.
+  Conferir `item_sources` desses episodios antes de mudar o cliente.
