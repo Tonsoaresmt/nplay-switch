@@ -11,6 +11,7 @@ char g_token[640] = "test-token";
 static const char *fixture;
 static int calls;
 Uint32 SDL_GetTicks(void) { return 100; }
+int SDL_AtomicGet(SDL_atomic_t *value) { return value->value; }
 void diag_network_event(const char *method, const char *path, long code,
                         unsigned ms, size_t bytes) {
     assert(!strcmp(method, "POST") && !strcmp(path, "/api/stream/42"));

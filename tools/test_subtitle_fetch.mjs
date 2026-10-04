@@ -1,0 +1,17 @@
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
+const source = readFileSync('source/player.c', 'utf8').replace(/\r\n/g, '\n');
+const begin = source.indexOf('typedef struct {\n    char url[HLS_MANIFEST_URI_MAX];');
+const end = source.indexOf('static void subtitle_session_key(', begin);
+if (begin < 0 || end < begin) throw new Error('Review subtitle fetch extraction');
+mkdirSync('build', { recursive: true });
+const keyEnd = source.indexOf('static int subtitle_session_take(', end);
+if (keyEnd < end) throw new Error('Review subtitle cache key extraction');
+writeFileSync('build/subtitle_fetch.inc', source.slice(begin, keyEnd));
+const exe = resolve('build/test_subtitle_fetch.exe');
+const built = spawnSync(process.env.HOST_CC || 'gcc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread', '-Itools/host-stubs', '-Iinclude', '-Ibuild', 'tools/subtitle_fetch_host.c', '-o', exe], { encoding: 'utf8', windowsHide: true });
+if (built.status !== 0) throw new Error(built.stderr || built.error?.message);
+const run = spawnSync(exe, [], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+if (run.status !== 0) throw new Error(run.stderr || run.error?.message);
+process.stdout.write(run.stdout);

@@ -28,7 +28,7 @@ foreach ($endpoint in @(
 }
 Assert-Contains $switchApi '/api/stream/session/%d/refresh' 'Refresh de sessao ausente no Switch.'
 Assert-Contains $switchApi '/api/stream/hot/%d' 'Rota TorBox/hot-stream ausente no Switch.'
-Assert-Contains $switchApi '/api/stream/session/%d/fail' 'Failover de fonte ausente no Switch.'
+Assert-Contains $switchApi 'exclude_source_ids' 'Failover por abertura ausente no Switch.'
 Assert-Contains $switchApi '/api/stream/session/%d/heartbeat' 'Heartbeat ausente no Switch.'
 Assert-Contains $switchPlayer 'fallback_cb' 'Supervisor do player nao usa failover.'
 Assert-Contains $switchMain 'search_scope' 'Busca do Switch nao separa as areas do catalogo.'
@@ -52,6 +52,7 @@ Assert-Contains $catalog "app\.get\('/sagas/:slug'" 'Backend nao possui detalhe 
 Assert-Contains $search "app\.get\('/search-v2'" 'Backend nao possui busca v2.'
 Assert-Contains $search "WHEN c\.section='anime' THEN 'anime'" 'Busca v2 nao classifica anime.'
 Assert-Contains $stream "'/stream/session/:sessionId/refresh'" 'Backend nao possui refresh de sessao.'
+Assert-Contains $stream 'exclude_source_ids' 'Backend nao suporta exclusao nao destrutiva por abertura.'
 Assert-Contains $stream "'/stream/session/:sessionId/fail'" 'Backend nao possui failover de fonte.'
 Assert-Contains $stream "'/stream/session/:sessionId/heartbeat'" 'Backend nao possui heartbeat.'
 Assert-Contains $hot "app\.post\('/stream/hot/:itemId'" 'Backend nao possui hot-stream.'

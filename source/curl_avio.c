@@ -10,6 +10,7 @@
 #include "net.h"
 #include "diag.h"
 #include "hls_manifest.h"
+#include "subtitle_limits.h"
 #include <curl/curl.h>
 #include <SDL.h>
 #include <libavutil/mem.h>
@@ -25,7 +26,7 @@
 // Teto por recurso textual (playlist, VTT). Legendas de anime com karaoke
 // convertido de ASS passam de 1 MB e podem chegar perto de 4 MB; acima do teto
 // o download falhava e a legenda nunca aparecia. A memoria so cresce sob demanda.
-#define HLS_META_MAX     (8 * 1024 * 1024)
+#define HLS_META_MAX     SUBTITLE_DOWNLOAD_MAX
 #define HLS_MEDIA_RINGCAP (4 * 1024 * 1024)
 
 static SDL_atomic_t g_active_contexts = {0};

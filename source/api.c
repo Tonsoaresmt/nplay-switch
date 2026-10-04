@@ -89,11 +89,13 @@ cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
                                            &out, &err, connect_timeout,
                                            total_timeout, cancel);
     diag_network_event("GET", path, code, SDL_GetTicks() - started, out.len);
-    cJSON *j = NULL;
-    if (code == 200 && out.data) j = cJSON_Parse(out.data);
-    if (!j) {
-        if (code == 200) snprintf(g_api_last_error, sizeof(g_api_last_error), "Resposta de catalogo invalida");
-        else api_set_error(code, err, NULL);
+    cJSON *j = out.data ? cJSON_Parse(out.data) : NULL;
+    if (code != 200) {
+        api_set_error(code, err, j);
+        cJSON_Delete(j);
+        j = NULL;
+    } else if (!j) {
+        snprintf(g_api_last_error, sizeof(g_api_last_error), "Resposta de catalogo invalida");
     }
     membuf_free(&out);
     return j;
@@ -216,7 +218,7 @@ int arr_len(cJSON *a) {
 static int resolve_playback_with_timeout(int item_id, const char *quality,
                                          long connect_timeout, long total_timeout,
                                          SDL_atomic_t *cancel,
-                                         PlaybackSource *out) {
+                                         PlaybackSource *out, int excluded_source_id) {
     if (!out) return -1;
     memset(out, 0, sizeof(PlaybackSource));
     out->item_id = item_id;
@@ -234,6 +236,16 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
     }
     if (quality && quality[0]) {
         cJSON_AddStringToObject(request, "quality", quality);
+    }
+    if (excluded_source_id > 0) {
+        cJSON *excluded = cJSON_AddArrayToObject(request, "exclude_source_ids");
+        cJSON *id = cJSON_CreateNumber(excluded_source_id);
+        if (!excluded || !id || !cJSON_AddItemToArray(excluded, id)) {
+            cJSON_Delete(id);
+            cJSON_Delete(request);
+            snprintf(g_api_last_error, sizeof(g_api_last_error), "Memoria insuficiente para recuperar a fonte");
+            return -1;
+        }
     }
     body = cJSON_PrintUnformatted(request);
     cJSON_Delete(request);
@@ -266,21 +278,21 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
 }
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, NULL, out);
+    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, NULL, out, 0);
 }
 
 int api_resolve_playback_cancel(int item_id, const char *quality,
                                 SDL_atomic_t *cancel, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, cancel, out);
+    return resolve_playback_with_timeout(item_id, quality, 8L, 20L, cancel, out, 0);
 }
 
 int api_reresolve_playback(int item_id, const char *quality, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, NULL, out);
+    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, NULL, out, 0);
 }
 
 int api_reresolve_playback_cancel(int item_id, const char *quality,
                                   SDL_atomic_t *cancel, PlaybackSource *out) {
-    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, cancel, out);
+    return resolve_playback_with_timeout(item_id, quality, 4L, 8L, cancel, out, 0);
 }
 
 int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
@@ -331,13 +343,12 @@ static int has_playable_fallback(const PlaybackSource *current, SDL_atomic_t *ca
     cJSON *variant;
     cJSON_ArrayForEach(variant, variants) {
         if (jint(variant, "src_id") == current->source_id) continue;
-        // /fail escolhe o proximo da mesma ordem. Se esse primeiro candidato
-        // nao toca no player nativo, nao desative globalmente a fonte atual.
+        // Preserve native format compatibility before resolving another source.
         const char *container = jstr(variant, "container");
         compatible = container && container[0] &&
             strcmp(container, "embed") && strcmp(container, "torrent") &&
             jstr(variant, "play_url") != NULL;
-        break;
+        if (compatible) break;
     }
     cJSON_Delete(response);
     return compatible;
@@ -345,42 +356,25 @@ static int has_playable_fallback(const PlaybackSource *current, SDL_atomic_t *ca
 
 int api_fail_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
                              PlaybackSource *out) {
-    if (!current || !out || current->session_id <= 0) return -1;
+    if (!current || !out || current->item_id <= 0 || current->session_id <= 0 ||
+        current->source_id <= 0 || (cancel && SDL_AtomicGet(cancel))) return -1;
     if (!has_playable_fallback(current, cancel)) {
+        if ((cancel && SDL_AtomicGet(cancel)) || g_api_last_error[0]) return -1;
         snprintf(g_api_last_error, sizeof(g_api_last_error),
                  "Nenhuma fonte alternativa compativel com o Switch");
         return -1;
     }
-    char path[128], body[80], url[1024];
-    snprintf(path, sizeof(path), "/api/stream/session/%d/fail", current->session_id);
-    snprintf(body, sizeof(body), "{\"source_id\":%d}", current->source_id);
-    snprintf(url, sizeof(url), "%s%s", BASE, path);
-    struct membuf resp = {0};
-    const char *err = NULL;
-    Uint32 started = SDL_GetTicks();
-    long code = net_request_timeout_cancel(url, "POST", body,
-                                           g_token[0] ? g_token : NULL,
-                                           &resp, &err, 4L, 8L, cancel);
-    diag_network_event("POST", path, code, SDL_GetTicks() - started, resp.len);
-    cJSON *json = resp.data ? cJSON_Parse(resp.data) : NULL;
-    if (code != 200 || !json) {
-        api_set_error(code, err, json);
-        if (json) cJSON_Delete(json);
-        membuf_free(&resp);
-        return -1;
-    }
-    // /fail retorna somente um ponteiro assinado. Ele pode apontar para HLS,
-    // MP4, embed ou torrent: nunca reutilize container/delivery da fonte antiga.
-    int next_source_id = jint(json, "source_id");
-    int has_pointer = jstr(json, "play_url") != NULL;
-    cJSON_Delete(json);
-    membuf_free(&resp);
-    if (next_source_id <= 0 || !has_pointer) return -1;
+    if (cancel && SDL_AtomicGet(cancel)) return -1;
+    // Never use the legacy global source mutation after a local playback fault.
+    // /stream understands exclusions scoped to this opening and returns the
+    // complete descriptor. An older backend ignoring exclusions fails safely.
     PlaybackSource complete = {0};
-    if (api_reresolve_playback_cancel(current->item_id,
+    if (resolve_playback_with_timeout(current->item_id,
                                      current->quality[0] ? current->quality : NULL,
-                                     cancel, &complete) != 0 || !complete.play_url[0] ||
-        complete.source_id != next_source_id || !complete.container[0] ||
+                                     4L, 8L, cancel, &complete, current->source_id) != 0)
+        return -1;
+    if ((cancel && SDL_AtomicGet(cancel)) || !complete.play_url[0] ||
+        complete.source_id <= 0 || complete.source_id == current->source_id || !complete.container[0] ||
         !strcmp(complete.container, "embed") ||
         !strcmp(complete.container, "torrent")) {
         snprintf(g_api_last_error, sizeof(g_api_last_error),

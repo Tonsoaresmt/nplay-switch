@@ -20,11 +20,19 @@ start_fail() { # porta padrao [tls]
 }
 start_fail 8766 subtitle-0.vtt; start_fail 8444 /subtitles/ tls; sleep 1
 export SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy LD_LIBRARY_PATH=$WORK/lib SCRIPT_AFTER_FRAME=1
-run() { local name=$1; shift; env "$@" timeout 120 "$BIN" "$URL" "$CT" > "suite_$name.log" 2>&1; }
+declare -A RUN_STATUS
+run() {
+    local name=$1; shift
+    env "$@" timeout 120 "$BIN" "$URL" "$CT" > "suite_$name.log" 2>&1
+    RUN_STATUS[$name]=$?
+}
 FAILS=0
 check() { # nome descricao padrao  (!padrao = nao pode existir; @nal = NAL invalido so apos sair)
     local f="suite_$1.log" pat=$3 ok=
-    if [[ $pat == @nal ]]; then awk '/INJECT MINUS/{m=1} /Invalid NAL/ && !m {bad=1} END{exit bad}' "$f" && ok=1
+    # Absence of an error is not success if the process crashed, timed out,
+    # never rendered a frame, or never reached its final result/summary.
+    if [[ ${RUN_STATUS[$1]:-1} != 0 ]] || ! grep -qE '^SUMMARY video_frames=[1-9][0-9]* ' "$f" || ! grep -q 'RESULT chosen=' "$f"; then ok=
+    elif [[ $pat == @nal ]]; then awk '/INJECT MINUS/{m=1} /Invalid NAL/ && !m {bad=1} END{exit bad}' "$f" && ok=1
     elif [[ $pat == !* ]]; then ! grep -qE "${pat:1}" "$f" && ok=1
     else grep -qE "$pat" "$f" && ok=1; fi
     [ "$ok" ] || FAILS=$((FAILS + 1))

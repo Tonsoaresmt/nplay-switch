@@ -30,6 +30,7 @@
 #include "audio_policy.h"
 #include "touch_input.h"
 #include "device_pairing.h"
+#include "playback_resume.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -967,6 +968,7 @@ static int play_with_progress_details(int itemId, const char *title, const char 
         completed = prog ? jint(prog, "completed") : 0;
         cJSON_Delete(pr);
     }
+    start = playback_resume_position(start, completed);
     if (!completed && start > 10) {
         int choice = prompt_resume_playback(stable_title, (int)start);
         if (choice < 0) return 0;
@@ -1274,6 +1276,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             completed = prog ? jint(prog, "completed") : 0;
             cJSON_Delete(pr);
         }
+        start = playback_resume_position(start, completed);
         if (!completed && start > 10 && src.sequential_stream) {
             if (!prompt_sequential_restart(stable_title)) return 0;
             start = 0;

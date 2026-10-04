@@ -28,7 +28,7 @@ Assert-True ($sources -match 'nplay_curl_avio_open_hls') 'Playlists e segmentos 
 Assert-True ($sources -match 'forced_format = av_find_input_format\("hls"\)') 'Manifesto raiz voltou a passar pelo probe que fecha o processo no Switch.'
 Assert-True ($sources -match 'fmt->pb = avio') 'Manifesto HLS raiz nao e fornecido explicitamente ao demuxer.'
 Assert-True ($sources -match 'avformat_open_input\(&fmt, url, forced_format') 'FFmpeg voltou a sondar automaticamente o manifesto HLS raiz.'
-Assert-True ($sources -match 'HLS_META_INITIAL \(64 \* 1024\)' -and $sources -match 'HLS_META_MAX\s+\(8 \* 1024 \* 1024\)') 'Manifestos HLS perderam o crescimento limitado de memoria.'
+Assert-True ($sources -match 'HLS_META_INITIAL \(64 \* 1024\)' -and $sources -match 'HLS_META_MAX\s+SUBTITLE_DOWNLOAD_MAX' -and (Get-Content 'include/subtitle_limits.h' -Raw) -match '8u \* 1024u \* 1024u') 'Manifestos/VTT perderam o crescimento limitado e teto comum de memoria.'
 Assert-True ($sources -match 'CURLOPT_RANGE, NULL') 'Manifestos HLS voltaram a pedir Range sobre texto reescrito.'
 Assert-True ($sources -match 'HLS_MEDIA_RINGCAP \(4 \* 1024 \* 1024\)' -and $sources -match 'c->streaming \? producer_stream : producer') 'Segmentos HLS perderam o fluxo continuo com buffer limitado.'
 Assert-True ($sources -match 'c->streaming \? wr_ring : wr_tmp' -and $sources -match 'if \(start == 0\) curl_easy_setopt\(c->easy, CURLOPT_RANGE, NULL\)') 'Segmentos HLS voltaram a usar varios ranges sem cache no R2.'
@@ -169,7 +169,7 @@ $uiRequestSource = Get-Content source/ui_request.c -Raw
 Assert-True ($uiRequestSource -match 'SDL_CreateThread' -and $uiRequestSource -match 'SDL_WaitThread' -and $uiRequestSource -match 'SDL_FINGERDOWN') 'Modal de rede perdeu worker, ownership ou cancelamento touch.'
 Assert-True ($apiSource -match 'api_refresh_playback_cancel' -and $apiSource -match 'api_fail_playback_cancel') 'Recuperacao de sessao nao pode ser cancelada por B.'
 Assert-True ($apiSource -match '/api/stream/session/%d/refresh') 'Refresh da mesma sessao nao esta implementado.'
-Assert-True ($apiSource -match '/api/stream/session/%d/fail') 'Failover para outra fonte nao esta implementado.'
+Assert-True ($apiSource -match 'exclude_source_ids' -and $apiSource -notmatch '/api/stream/session/%d/fail') 'Failover deve excluir a fonte nesta abertura, sem desativacao global.'
 Assert-True ($apiSource -match '/api/stream/session/%d/heartbeat') 'Heartbeat da sessao nao esta implementado.'
 Assert-True ($apiSource -match '/api/sync/progress') 'Progresso periodico nao esta implementado.'
 Assert-True ($apiSource -match 'api_reresolve_playback') 'Nova resolucao curta para recuperacao nao esta implementada.'
@@ -220,6 +220,22 @@ if ($LASTEXITCODE -ne 0) { throw 'Barreira de seek reabriu fonte ocupada.' }
 if ($LASTEXITCODE -ne 0) { throw 'libcurl real falhou em backpressure ou idle.' }
 & node tools/test_subtitle_io.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
+& node tools/test_subtitle_transport.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Transporte de legendas rejeitou 8 MiB ou perdeu limite/cancelamento.' }
+& node tools/test_subtitle_fetch.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Legenda desejada perdeu retry, cancelamento ou ownership.' }
+& node tools/test_completed_resume.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Episodio concluido tentou retomar no final ou perdeu retomada parcial.' }
+& node tools/test_host_suite_guards.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Suite do player real aceitou crash, timeout ou log vazio como sucesso.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_store.c tools/test_subtitle_edges.c -o build/test_subtitle_edges.exe
+if ($LASTEXITCODE -ne 0) { throw 'Regressoes de legenda falharam ao compilar.' }
+& .\build\test_subtitle_edges.exe
+if ($LASTEXITCODE -ne 0) { throw 'Fala curta ou cue estendido desapareceu.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_safe_fallback_api.c -lm -o build/test_safe_fallback_api.exe
+if ($LASTEXITCODE -ne 0) { throw 'Failover nao destrutivo falhou ao compilar.' }
+& .\build\test_safe_fallback_api.exe
+if ($LASTEXITCODE -ne 0) { throw 'Failover desativou fonte globalmente ou aceitou resposta invalida.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/vtt_stream.c tools/test_vtt_stream.c -o build/test_vtt_stream.exe
 if ($LASTEXITCODE -ne 0) { throw 'Parser progressivo WebVTT falhou ao compilar.' }
 & .\build\test_vtt_stream.exe
@@ -255,10 +271,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Reconhecedor de toque falhou em tap, eixo, arr
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/audio_policy.c tools/test_audio_policy.c -o build/test_audio_policy.exe
 if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou ao compilar.' }
 & .\build\test_audio_policy.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
 
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude tools/test_player_recovery.c -o build/test_player_recovery.exe
+if ($LASTEXITCODE -ne 0) { throw 'Politica de recuperacao falhou ao compilar.' }
 & .\build\test_player_recovery.exe
-if ($LASTEXITCODE -ne 0) { throw 'Politica de audio falhou nos cenarios HLS/continuidade.' }
+if ($LASTEXITCODE -ne 0) { throw 'Politica de recuperacao falhou nos cenarios de posicao/reconexao.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hls_manifest.c tools/test_hls_manifest.c -o build/test_hls_manifest.exe
 if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao compilar.' }
 & .\build\test_hls_manifest.exe
@@ -295,7 +313,7 @@ Assert-True ($sources -match 'hls_manifest_resolve_like_ffmpeg') 'Busca paralela
 Assert-True ($sources -match 'player_hls_choose_audio' -and $sources -match 'hls_manifest_keep_audio' -and $sources -match 'audio_from_master') 'HLS voltou a abrir todas as faixas de audio.'
 Assert-True ($sources -match 'subtitle_fetch_start' -and $sources -match 'subtitle_fetch_stop\(&subtitle_fetch\)') 'Legenda do master voltou a bloquear abertura/troca.'
 Assert-True ($sources -match 't_cancel_flag') 'Download de legenda em segundo plano perdeu o cancelamento.'
-Assert-True ($sources -match 'subtitle_store_add' -and $sources -match 'subtitle_session_take' -and $sources -match 'subtitle_retry_choice') 'Legenda externa voltou ao limite de 8192 cues, sem cache de sessao ou sem nova tentativa.'
+Assert-True ($sources -match 'subtitle_store_add' -and $sources -match 'subtitle_session_take' -and $sources -match 'subtitle_retry_failed') 'Legenda externa voltou ao limite de 8192 cues, sem cache de sessao ou sem nova tentativa.'
 Assert-True ($sources -notmatch 'store->count >= 8192') 'Teto antigo de 8192 cues voltou: a legenda de anime com karaoke parava no meio.'
 Assert-True ($sources -match 'stream-retry') 'Legenda progressiva do torrent perdeu a nova tentativa apos queda.'
 & $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe

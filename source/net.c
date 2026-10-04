@@ -1,5 +1,6 @@
 // net.c - implementacao da camada de HTTP (libcurl).
 #include "net.h"
+#include "subtitle_limits.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -253,7 +254,7 @@ static size_t limited_text_write(char *ptr, size_t size, size_t count, void *opa
     size_t need = ctx->out->len + bytes + 1;
     if (need > ctx->out->cap) {
         size_t cap = ctx->out->cap ? ctx->out->cap : 4096;
-        while (cap < need) cap *= 2; // limit <= 4 MiB, so no overflow.
+        while (cap < need) cap *= 2; // Bounded by SUBTITLE_DOWNLOAD_MAX.
         if (cap > ctx->limit + 1) cap = ctx->limit + 1;
         char *grown = realloc(ctx->out->data, cap);
         if (!grown) return 0;
@@ -267,7 +268,7 @@ static size_t limited_text_write(char *ptr, size_t size, size_t count, void *opa
 long net_get_text_limited(const char *url, size_t limit, long timeout_ms,
                            SDL_atomic_t *cancel, struct membuf *out) {
     if (!out || out->data || !url || strncmp(url, "https://", 8) ||
-        !limit || limit > 4u * 1024u * 1024u || timeout_ms <= 0 ||
+        !limit || limit > SUBTITLE_DOWNLOAD_MAX || timeout_ms <= 0 ||
         (cancel && SDL_AtomicGet(cancel))) return -1;
     CURL *curl = curl_easy_init();
     if (!curl) return -1;
@@ -314,13 +315,13 @@ static size_t text_stream_write(char *data,size_t size,size_t count,void *opaque
     TextStream *s=opaque;
     if((size&&count>SIZE_MAX/size)||SDL_AtomicGet(s->cancel))return 0;
     size_t bytes=size*count;
-    if(bytes>s->limit-s->received)return 0;
+    if(s->received>s->limit||bytes>s->limit-s->received)return 0;
+    s->last_byte=SDL_GetTicks();s->received+=bytes;
     long status=0;curl_easy_getinfo(s->curl,CURLINFO_RESPONSE_CODE,&status);
     // Preserve the HTTP status for the caller.  Aborting the body on a 404/503
     // turns it into CURLE_WRITE_ERROR and hides the actionable server result.
     if(status&&status!=200)return bytes;
     if(status!=200)return 0;
-    s->last_byte=SDL_GetTicks();s->received+=bytes;
     return s->callback(data,bytes,s->userdata)?bytes:0;
 }
 static int text_stream_progress(void *opaque,curl_off_t a,curl_off_t b,curl_off_t c,curl_off_t d) {
@@ -329,7 +330,7 @@ static int text_stream_progress(void *opaque,curl_off_t a,curl_off_t b,curl_off_
 }
 long net_stream_text(const char *url,size_t limit,SDL_atomic_t *cancel,
                       net_text_chunk_cb callback,void *userdata) {
-    if(!url||strncmp(url,"https://",8)||!cancel||!callback||!limit||limit>4u*1024u*1024u||SDL_AtomicGet(cancel))return -1;
+    if(!url||strncmp(url,"https://",8)||!cancel||!callback||!limit||limit>SUBTITLE_DOWNLOAD_MAX||SDL_AtomicGet(cancel))return -1;
     CURL *curl=curl_easy_init();if(!curl)return -1;
     TextStream stream={.curl=curl,.limit=limit,.last_byte=SDL_GetTicks(),.cancel=cancel,.callback=callback,.userdata=userdata};
     net_configure_curl_isolated(curl);

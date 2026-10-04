@@ -125,6 +125,8 @@ int subtitle_store_add(SubtitleStore *store, double start, double end, const cha
                 if (same_text(store, &store->cues[k], text, len) &&
                     store->cues[k].start <= s + 0.002f) {
                     if (e > store->cues[k].end) store->cues[k].end = e;
+                    float duration = store->cues[k].end - store->cues[k].start;
+                    if (duration > store->max_short) store->max_short = duration;
                     store->merged++;
                     return 1;
                 }
@@ -204,15 +206,22 @@ const char *subtitle_store_text(SubtitleStore *store, double position) {
         if (cue->start <= pos + 0.05f && pos < cue->end)
             consider(store, cue, talk, &talk_n, frags, &frag_n);
     }
-    // Karaoke (silabas soltas) so aparece quando nao disputa com uma fala.
+    // Length alone does not identify karaoke: "Oi" and "É" are real dialogue.
+    // Preserve a small overlap group; only dense fragment clouds are suppressed.
     Candidate chosen[MAX_CANDIDATES];
     int chosen_n = 0;
-    if (talk_n == 0 && frag_n <= 3) {
-        for (int i = 0; i < frag_n; i++) chosen[chosen_n++] = frags[i];
-    } else {
+    int used_lines = 0;
+    if (frag_n <= 3) {
+        for (int i = 0; i < frag_n; i++) {
+            if (used_lines + frags[i].lines > MAX_LINES) continue;
+            chosen[chosen_n++] = frags[i];
+            used_lines += frags[i].lines;
+        }
+    }
+    if (talk_n > 0) {
         // Prioridade para o cue mais curto (fala) dentro do limite de linhas;
         // placas longas ficam de fora quando nao cabe tudo.
-        int used = 0;
+        int used = used_lines;
         for (int taken = 0; taken < talk_n; taken++) {
             int best = -1;
             for (int i = 0; i < talk_n; i++) {

@@ -33,6 +33,8 @@
 #include "player_ui.h"
 #include "subtitle_queue.h"
 #include "subtitle_store.h"
+#include "subtitle_retry.h"
+#include "subtitle_limits.h"
 #include "hls_manifest.h"
 #include "hot_subtitles.h"
 #include "vtt_stream.h"
@@ -817,9 +819,10 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
     SubtitleMemory memory = {0};
     AVIOContext *root = NULL;
     if (direct) {
-        if (!provided && net_get_text_limited(url, 4u * 1024u * 1024u, 15000L, cancel, &body) != 200) return -1;
+        if (!provided && net_get_text_limited(url, SUBTITLE_DOWNLOAD_MAX, 15000L, cancel, &body) != 200) return -1;
         const char *data = provided ? provided : body.data;
         size_t length = provided ? provided_size : body.len;
+        if (!data || length > SUBTITLE_DOWNLOAD_MAX) { membuf_free(&body); return -1; }
         size_t bom = length >= 3 && !memcmp(data, "\xef\xbb\xbf", 3) ? 3 : 0;
         if (length < bom + 6 || memcmp(data + bom, "WEBVTT", 6)) {
             membuf_free(&body); return -1;
@@ -1008,7 +1011,7 @@ static int progressive_subtitle_worker(void *opaque) {
     // Pede de novo (o servidor reextrai desde o inicio); repetidos se fundem.
     static const Uint32 retry_delays[] = { 2000, 5000, 10000 };
     for (int attempt = 0; ; attempt++) {
-        long code = net_stream_text(stream->url, 4u * 1024u * 1024u, &stream->cancel,
+        long code = net_stream_text(stream->url, SUBTITLE_DOWNLOAD_MAX, &stream->cancel,
                                     progressive_subtitle_chunk, stream);
         stream->result = code == 200 && vtt_stream_finish(&stream->parser) ? 0 : -1;
         if (stream->result == 0 || SDL_AtomicGet(&stream->cancel) || attempt >= 3) break;
@@ -1134,10 +1137,14 @@ static int subtitle_fetch_start(SubtitleFetch *fetch, const char *url, int choic
 }
 
 // 1 = pronta (cues trocados para store), -1 = falhou, 0 = nada ou ainda baixando.
-static int subtitle_fetch_poll(SubtitleFetch *fetch, ExternalSubtitleStore *store) {
+static int subtitle_fetch_poll(SubtitleFetch *fetch, ExternalSubtitleStore *store, int desired) {
     if (!fetch->thread || !SDL_AtomicGet(&fetch->done)) return 0;
     SDL_WaitThread(fetch->thread, NULL);
     fetch->thread = NULL;
+    if (fetch->choice != desired) {
+        external_subtitle_clear(&fetch->loaded);
+        return 0; // A cancelled/replaced request cannot overwrite the old track.
+    }
     if (fetch->result != 0) {
         external_subtitle_clear(&fetch->loaded);
         return -1;
@@ -1149,9 +1156,14 @@ static int subtitle_fetch_poll(SubtitleFetch *fetch, ExternalSubtitleStore *stor
 }
 
 static void subtitle_session_key(const char *uri, char *out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
     if (!uri) uri = "";
-    size_t n = strcspn(uri, "?#");
-    if (n >= cap) n = cap - 1;
+    // The query may identify the language/track. Never reuse text solely by
+    // path, nor alias oversized keys by truncation. A renewed signature may
+    // require another download; that is safer than applying the wrong track.
+    size_t n = strcspn(uri, "#");
+    if (n >= cap) return;
     memcpy(out, uri, n);
     out[n] = 0;
 }
@@ -1170,6 +1182,7 @@ static int subtitle_session_take(const char *uri, ExternalSubtitleStore *store) 
 static void subtitle_session_keep(const char *uri, ExternalSubtitleStore *store) {
     if (!store || store->progressive || external_subtitle_count(store) <= 0) return;
     subtitle_session_key(uri, g_session_subtitle_key, sizeof(g_session_subtitle_key));
+    if (!g_session_subtitle_key[0]) { subtitle_store_free(&g_session_subtitles); return; }
     subtitle_store_move(&g_session_subtitles, &store->cues);
 }
 
@@ -2263,8 +2276,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     memset(&subtitle_fetch, 0, sizeof(subtitle_fetch));
     if (scur >= 0 && !manifest_subtitle_fallback &&
         open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
-    int subtitle_retry_choice = -1, subtitle_retries = 0;
-    Uint32 subtitle_retry_at = 0;
+    SubtitleRetry subtitle_retry;
+    subtitle_retry_select(&subtitle_retry, scur);
     if (scur >= 0 && manifest_subtitle_fallback && !hot_external_subtitles) {
         // A faixa fica selecionada enquanto o texto chega; o video nao espera.
         if (subtitle_session_take(manifest_subtitles[scur].uri, &external_subtitles)) {
@@ -2272,7 +2285,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                               external_subtitle_count(&external_subtitles));
         } else if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[scur].uri, scur) != 0) {
             diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=thread", scur + 1);
-            scur = -1;
+            subtitle_retry_failed(&subtitle_retry, scur, SDL_GetTicks());
         }
     } else if (scur >= 0 && manifest_subtitle_fallback) {
         int64_t before_subtitles = av_gettime_relative();
@@ -2670,7 +2683,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
-        int fetched = subtitle_fetch_poll(&subtitle_fetch, &external_subtitles);
+        int fetched = subtitle_fetch_poll(&subtitle_fetch, &external_subtitles, subtitle_retry.desired);
         if (fetched) {
             int choice = subtitle_fetch.choice;
             if (fetched > 0) {
@@ -2684,32 +2697,27 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     snprintf(notice, sizeof(notice), "Legenda %d/%d  %.54s",
                              scur + 1, nsub, hud_sub_names[scur + 1]);
                     notice_until = now_ticks + 2200;
-                } else if (subtitle_retries > 0) {
+                } else if (subtitle_retry.attempts > 0) {
                     snprintf(notice, sizeof(notice), "Legenda carregada");
                     notice_until = now_ticks + 2200;
                 }
-                subtitle_retries = 0;
-                subtitle_retry_choice = -1;
+                subtitle_retry_succeeded(&subtitle_retry, choice);
                 diag_player_event("tracks", "subtitle-manifest-applied",
                                   "choice=%d cues=%d ms=%u async=1", scur + 1,
                                   external_subtitle_count(&external_subtitles),
                                   now_ticks - subtitle_fetch.started);
             } else {
                 track_switch_failures++;
-                diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=async ms=%u retry=%d",
-                                  choice + 1, now_ticks - subtitle_fetch.started, subtitle_retries);
-                if (scur == choice && subtitle_retries < 4) {
-                    // A faixa continua escolhida (e passa para a proxima
-                    // reabertura); so o download e repetido. Antes a falha
-                    // desligava a legenda em silencio pelo resto do episodio.
-                    static const Uint32 retry_delays[] = { 2000, 5000, 10000, 20000 };
-                    subtitle_retry_at = now_ticks + retry_delays[subtitle_retries++];
-                    subtitle_retry_choice = choice;
-                    if (subtitle_retries == 1) {
+                diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=async ms=%u retry=%u",
+                                  choice + 1, now_ticks - subtitle_fetch.started, subtitle_retry.attempts);
+                if (subtitle_retry_failed(&subtitle_retry, choice, now_ticks)) {
+                    // Retry the desired track while preserving the old applied
+                    // track. Changing choice/off cancels the pending retry.
+                    if (subtitle_retry.attempts == 1) {
                         snprintf(notice, sizeof(notice), "Legenda nao carregou. Tentando de novo...");
                         notice_until = now_ticks + 2600;
                     }
-                } else if (scur == choice) {
+                } else if (subtitle_retry.desired == choice) {
                     snprintf(notice, sizeof(notice), "Legenda indisponivel agora  |  X tenta de novo");
                     notice_until = now_ticks + 3500;
                 } else {
@@ -2718,14 +2726,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 }
             }
         }
-        if (subtitle_retry_choice >= 0 && !subtitle_fetch.thread &&
-            SDL_TICKS_PASSED(now_ticks, subtitle_retry_at)) {
-            int choice = subtitle_retry_choice;
-            subtitle_retry_choice = -1;
-            if (scur == choice &&
-                subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[choice].uri, choice) == 0)
-                diag_player_event("subtitle", "retry", "choice=%d attempt=%d",
-                                  choice + 1, subtitle_retries + 1);
+        if (!subtitle_fetch.thread) {
+            int choice = subtitle_retry_due(&subtitle_retry, now_ticks);
+            if (choice >= 0 && choice < nsub) {
+                if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[choice].uri, choice) == 0)
+                    diag_player_event("subtitle", "retry", "choice=%d attempt=%u",
+                                      choice + 1, subtitle_retry.attempts + 1);
+                else if (!subtitle_retry_failed(&subtitle_retry, choice, now_ticks)) {
+                    snprintf(notice, sizeof(notice), "Legenda indisponivel agora  |  X tenta de novo");
+                    notice_until = now_ticks + 3500;
+                }
+            }
         }
         if (quick_seek_active && SDL_TICKS_PASSED(now_ticks, quick_seek_deadline)) {
             quick_seek_active = 0;
@@ -3100,16 +3111,19 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             }
                         } else {
                             int next = track_sel - 1;
+                            if (manifest_subtitle_fallback && !hot_external_subtitles) {
+                                subtitle_retry_select(&subtitle_retry, next);
+                                if (next == scur) subtitle_fetch_stop(&subtitle_fetch);
+                            }
                             if (next == scur && next >= 0 && manifest_subtitle_fallback &&
                                 !hot_external_subtitles && !subtitle_fetch.thread &&
                                 external_subtitle_count(&external_subtitles) <= 0) {
                                 // Faixa escolhida mas sem texto (download falhou):
                                 // escolher de novo tenta outra vez na hora.
-                                subtitle_retries = 0;
-                                subtitle_retry_choice = -1;
                                 if (subtitle_fetch_start(&subtitle_fetch,
                                         manifest_subtitles[next].uri, next) == 0)
                                     snprintf(notice, sizeof(notice), "Carregando legenda...");
+                                else subtitle_retry_failed(&subtitle_retry, next, SDL_GetTicks());
                             } else if (next == scur) {
                                 snprintf(notice, sizeof(notice), "Legenda atual mantida");
                             } else if (manifest_subtitle_fallback) {
@@ -3135,6 +3149,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
                                         continue;
                                     }
+                                    subtitle_retry_failed(&subtitle_retry, next, SDL_GetTicks());
                                 } else {
                                     pui_draw_loading(ren, title, "Carregando legenda",
                                         "Baixando apenas o texto da faixa escolhida...",

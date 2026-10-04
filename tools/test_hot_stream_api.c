@@ -13,6 +13,7 @@ static long fixture_code;
 static int calls;
 
 Uint32 SDL_GetTicks(void) { return 100u; }
+int SDL_AtomicGet(SDL_atomic_t *value) { return value->value; }
 void diag_network_event(const char *method, const char *path, long code,
                         unsigned ms, size_t bytes) {
     assert(!strcmp(method, "POST"));

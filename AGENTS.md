@@ -1811,3 +1811,38 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   auditoria), fonte torrent desativada/quarentenada pela identidade de pack
   (`4de76f2` reparo cross-season, `e834c9c` curadoria manual) ou modo r2_only.
   Conferir `item_sources` desses episodios antes de mudar o cliente.
+
+## Hardening comprovado localmente — 0.12.48, 04/10/2026
+
+- Checkout ativo: `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch
+  `codex/switch-player-hardening`, sobre ca5a7a8/.47. Nao confundir com o
+  main antigo em `C:/NplaySwitch` nem editar os outros arquivos locais do usuario.
+- `playback_resume_position`: completed zera a posicao de abertura nas duas
+  rotas reais de main.c. Parcial conserva o dialogo e a posicao. Baseline .47
+  reproduz completed=1320 iniciando em 1320; teste corrigido inicia em zero.
+- NRO nao usa mais `/session/:id/fail`. Failover pede `/stream/:id` com
+  exclude_source_ids, verifica descriptor completo e rejeita mesma fonte ou
+  formato nao nativo. Erro local nao pode desativar uma fonte globalmente.
+- GET interpreta JSON de erro/expired e failover conserva o erro de rede.
+  Precheck de variantes nao para na primeira incompatibilidade.
+- Legenda desejada separada da aplicada: retry 2/5/10/20s, faixa anterior
+  preservada, cancel proprio e resposta so aplicada apos join se escolha igual.
+- Limite unico SUBTITLE_DOWNLOAD_MAX=8MiB tambem em net.c: o guard de 4MiB
+  ainda existente impedia o aumento anunciado pela .47. Corpo HTTP de erro
+  tambem conta no teto. Cues continuam limitados a 200k/4MiB texto decodificado.
+- Cache de legenda inclui query, rejeita truncamento e ignora so fragmento.
+  Remover query podia aplicar outro idioma no mesmo caminho. Renovar assinatura
+  pode exigir novo download; nao voltar a otimizar apagando identidade da faixa.
+- Fala curta sobreposta nao some; extensao fora de ordem atualiza max_short.
+  Regressao adicional com 200 reenvios permutados e karaokê pesado passou.
+- validate_release inclui regressões de retomada, API, worker/retry/cache,
+  transporte e guard do harness Linux. Testes negativos da suite.sh agora
+  exigem termino correto, RESULT/SUMMARY e video real, nao apenas ausencia de erro.
+- ARM64 -Werror e validacao completa local sem SkipMediaFixtures passaram.
+  Nao testado em Switch fisico; suite integrada Linux nao rodada nesta sessao.
+- Nenhum banco/deploy de backend alterado. Big Bang Theory T2/T3/T4 ainda exige
+  IDs/trace atuais e verificacao autorizada de fontes em producao: completed
+  errado e fonte global desativada sao causas distintas, nao afirmar reparo total.
+- Sem Release/latest desta rodada. Relatorio, evidencias e proximo roteiro:
+  `docs/PLAYER_HARDENING_0_12_48.md`. Antes de publicar, conferir git status,
+  refazer build/validator, digest e teste fisico; manter NRO apenas como asset.
