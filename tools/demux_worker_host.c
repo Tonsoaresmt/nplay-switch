@@ -44,17 +44,20 @@ static SDL_Thread *SDL_CreateThread(int (*fn)(void *), const char *name, void *a
 }
 static void SDL_WaitThread(SDL_Thread *t, int *status) { (void)status; assert(!pthread_join(t->id, NULL)); free(t); }
 static atomic_int live_packets, reads, next_pts;
-static int packet_bytes;
+static int packet_bytes, audio_every; // audio_every>0: um pacote de audio (stream 1) a cada N
+
 static AVPacket *av_packet_alloc(void) { AVPacket *p = calloc(1, sizeof(*p)); assert(p); atomic_fetch_add(&live_packets, 1); return p; }
 static void av_packet_free(AVPacket **p) { if (*p) { free(*p); *p = NULL; atomic_fetch_sub(&live_packets, 1); } }
 static void av_packet_move_ref(AVPacket *out, AVPacket *p) { *out = *p; memset(p, 0, sizeof(*p)); }
 static int av_read_frame(AVFormatContext *fmt, AVPacket *p) {
-    (void)fmt; atomic_fetch_add(&reads, 1); p->size = packet_bytes; p->pts = atomic_fetch_add(&next_pts, 1); return 0;
+    (void)fmt; int n = atomic_fetch_add(&reads, 1); p->size = packet_bytes; p->pts = atomic_fetch_add(&next_pts, 1);
+    p->stream_index = audio_every > 0 && n % audio_every == audio_every - 1 ? 1 : 0;
+    return 0;
 }
 static void diag_player_event(const char *a, const char *b, const char *fmt, ...) { (void)a; (void)b; (void)fmt; }
 #include "demux_worker_test.inc"
 
-static int occupancy(DemuxWorker *w) { SDL_LockMutex(w->mutex); int n = w->count; assert(w->queued_bytes <= DEMUX_QUEUE_BYTES); SDL_UnlockMutex(w->mutex); return n; }
+static int occupancy(DemuxWorker *w) { SDL_LockMutex(w->mutex); int n = w->count; assert(w->queued_bytes <= w->byte_cap); SDL_UnlockMutex(w->mutex); return n; }
 static void wait_count(DemuxWorker *w, int desired) {
     Uint32 started = SDL_GetTicks(); while (occupancy(w) != desired && SDL_GetTicks() - started < 3000) SDL_Delay(1);
     assert(occupancy(w) == desired);
@@ -65,11 +68,13 @@ static void barrier(DemuxWorker *w) {
     assert(demux_worker_pause_state(w) == 1);
 }
 int main(void) {
-    AVCodecParameters codec = {AVMEDIA_TYPE_VIDEO}; AVStream stream = { &codec, 1.0 / 30 }; AVStream *streams[] = { &stream };
+    AVCodecParameters codec = {AVMEDIA_TYPE_VIDEO}, audio_codec = {2};
+    AVStream stream = { &codec, 1.0 / 30 }, audio_stream = { &audio_codec, 1.0 / 48000 };
+    AVStream *streams[] = { &stream, &audio_stream };
     AVFormatContext fmt = { streams }; PlayerOpenDeadline watch = {0}; DemuxWorker w; AVPacket out; Uint32 read_ms;
     for (int repeat = 0; repeat < 25; repeat++) {
         packet_bytes = 1024 * 1024 + 327; atomic_store(&reads, 0); atomic_store(&next_pts, 0);
-        assert(!demux_worker_start(&w, &fmt, &watch)); wait_count(&w, 3);
+        assert(!demux_worker_start(&w, &fmt, &watch, 0)); wait_count(&w, 3);
         Uint32 started = SDL_GetTicks();
         while (atomic_load(&reads) < 4 && SDL_GetTicks() - started < 3000) SDL_Delay(1);
         assert(atomic_load(&reads) == 4); // fourth packet parked, not enqueued
@@ -84,13 +89,33 @@ int main(void) {
         wait_count(&w, 3); assert(demux_worker_take(&w, &out, &read_ms) == 1 && out.pts >= 100000);
         wait_count(&w, 3); demux_worker_stop(&w); assert(atomic_load(&live_packets) == 0);
     }
-    packet_bytes = 12000; atomic_store(&reads, 0); assert(!demux_worker_start(&w, &fmt, &watch));
-    wait_count(&w, 128); barrier(&w); demux_worker_clear(&w); demux_worker_resume(&w); wait_count(&w, 128);
+    int small_fill = (int)(DEMUX_QUEUE_BYTES / 12000u);
+    if (small_fill > DEMUX_QUEUE_PACKETS) small_fill = DEMUX_QUEUE_PACKETS;
+    packet_bytes = 12000; atomic_store(&reads, 0); assert(!demux_worker_start(&w, &fmt, &watch, 0));
+    wait_count(&w, small_fill); barrier(&w); demux_worker_clear(&w); demux_worker_resume(&w); wait_count(&w, small_fill);
     demux_worker_stop(&w); assert(atomic_load(&live_packets) == 0);
-    packet_bytes = DEMUX_QUEUE_BYTES + 1; assert(!demux_worker_start(&w, &fmt, &watch));
+    // Remux sequencial: o teto maior acomoda o bloco de video que antecede o audio.
+    packet_bytes = 30000; atomic_store(&reads, 0); assert(!demux_worker_start(&w, &fmt, &watch, 1));
+    assert(w.byte_cap == DEMUX_QUEUE_BYTES_SEQUENTIAL);
+    wait_count(&w, (int)(DEMUX_QUEUE_BYTES_SEQUENTIAL / 30000u)); demux_worker_stop(&w);
+    assert(atomic_load(&live_packets) == 0);
+    // Audio atras de video: take_stream tira o audio sem perder a ordem do video.
+    packet_bytes = 1000; audio_every = 10; atomic_store(&reads, 0); atomic_store(&next_pts, 0);
+    assert(!demux_worker_start(&w, &fmt, &watch, 0)); wait_count(&w, DEMUX_QUEUE_PACKETS); barrier(&w);
+    assert(demux_worker_take_stream(&w, 1, &out, NULL) == 1 && out.stream_index == 1 && out.pts == 9);
+    assert(demux_worker_take_stream(&w, 1, &out, NULL) == 1 && out.pts == 19 && w.audio_ahead == 2);
+    int64_t last = -1;
+    for (int i = 0; i < 10; i++) {
+        assert(demux_worker_take(&w, &out, NULL) == 1 && out.stream_index == 0 && out.pts > last);
+        last = out.pts;
+    }
+    assert(last == 10); // 0..8 e depois 10: o audio 9 saiu antes e a ordem do video ficou
+    assert(demux_worker_take_stream(&w, 5, &out, NULL) == 0);
+    demux_worker_resume(&w); audio_every = 0; demux_worker_stop(&w); assert(atomic_load(&live_packets) == 0);
+    packet_bytes = DEMUX_QUEUE_BYTES + 1; assert(!demux_worker_start(&w, &fmt, &watch, 0));
     Uint32 started = SDL_GetTicks(); int rc = 0;
     while (!(rc = demux_worker_take(&w, &out, NULL)) && SDL_GetTicks() - started < 3000) SDL_Delay(1);
     assert(rc == AVERROR(ENOBUFS)); demux_worker_stop(&w); assert(atomic_load(&live_packets) == 0);
-    puts("OK actual demux pthread worker: full-byte/full-slot barriers, 25 seeks, stale pending discarded, stop, oversize, no packet leaks");
+    puts("OK actual demux pthread worker: full-byte/full-slot barriers, 25 seeks, stale pending discarded, stop, oversize, sequential cap, audio ahead, no packet leaks");
     return 0;
 }

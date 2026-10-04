@@ -424,6 +424,9 @@ static int g_settings_refresh_pending = 0;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
+// Lista do painel Episodios do player (montada por play_episode_sequence).
+static PlayerEpisode *g_play_episodes = NULL;
+static int g_play_episode_count = 0, g_play_episode_current = -1, g_play_chosen_item = 0;
 static char g_next_audio_language[8] = "", g_last_audio_language[8] = "";
 static int g_next_audio_pref_override = -1;
 static int g_next_audio_pref_explicit = 0;
@@ -989,6 +992,9 @@ static int play_with_progress_details(int itemId, const char *title, const char 
     req.audio_pref_explicit = g_next_audio_pref_explicit;
     req.audio_hint = g_next_audio_hint;
     req.audio_hint_language = g_next_audio_language[0] ? g_next_audio_language : NULL;
+    req.episodes = g_play_episodes;
+    req.episode_count = g_play_episode_count;
+    req.episode_current = g_play_episode_current;
     req.progress_cb = on_player_progress;
     req.heartbeat_cb = NULL;
     // Sem renew_cb pois nao e uma stream resolvida via API.
@@ -1022,6 +1028,7 @@ static int play_with_progress_details(int itemId, const char *title, const char 
         toast(m); 
         return 0;
     }
+    g_play_chosen_item = res.reason == EXIT_REASON_NEXT_EPISODE ? res.chosen_item_id : 0;
     return res.reason == EXIT_REASON_NEXT_EPISODE ? 2 :
            res.reason == EXIT_REASON_NATURAL ? 1 : 0;
 }
@@ -1232,6 +1239,9 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
         req.audio_pref_explicit = g_next_audio_pref_explicit;
         req.audio_hint = g_next_audio_hint;
         req.audio_hint_language = g_next_audio_language[0] ? g_next_audio_language : NULL;
+        req.episodes = g_play_episodes;
+        req.episode_count = g_play_episode_count;
+        req.episode_current = g_play_episode_current;
         if (src.sequential_stream) req.start_sec = 0;
         req.progress_cb = on_player_progress;
         // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
@@ -1272,6 +1282,7 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
         } else {
             rc = res.reason == EXIT_REASON_NEXT_EPISODE ? 2 :
                  res.reason == EXIT_REASON_NATURAL ? 1 : 0;
+            g_play_chosen_item = rc == 2 ? res.chosen_item_id : 0;
         }
     } else {
         toast("Este titulo esta indisponivel no momento");
@@ -3854,6 +3865,51 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
     return 0;
 }
 
+// Monta a lista do painel Episodios a partir do detalhe carregado (todas as
+// temporadas presentes em g_ser), para escolher qualquer episodio no player.
+static void play_episodes_build(int current_item) {
+    free(g_play_episodes);
+    g_play_episodes = NULL;
+    g_play_episode_count = 0;
+    g_play_episode_current = -1;
+    cJSON *seasons = seasons_obj(), *season, *episode;
+    int total = 0;
+    cJSON_ArrayForEach(season, seasons) total += arr_len(season);
+    if (total < 2 || total > 4000) return;
+    g_play_episodes = calloc((size_t)total, sizeof(*g_play_episodes));
+    if (!g_play_episodes) return;
+    cJSON_ArrayForEach(season, seasons) {
+        cJSON_ArrayForEach(episode, season) {
+            int id = jint(episode, "id");
+            if (id <= 0) continue;
+            PlayerEpisode *entry = &g_play_episodes[g_play_episode_count];
+            entry->item_id = id;
+            entry->watched = episode_completed(episode);
+            int sn = jint(episode, "season"), en = jint(episode, "episode");
+            const char *name = ep_display_title(episode);
+            if (sn > 0 || en > 0)
+                snprintf(entry->label, sizeof(entry->label), "T%d E%d  %s", sn > 0 ? sn : 1, en,
+                         name ? name : "");
+            else snprintf(entry->label, sizeof(entry->label), "%s", name ? name : "Episodio");
+            if (id == current_item) g_play_episode_current = g_play_episode_count;
+            g_play_episode_count++;
+        }
+    }
+    if (g_play_episode_count < 2) {
+        free(g_play_episodes);
+        g_play_episodes = NULL;
+        g_play_episode_count = 0;
+        g_play_episode_current = -1;
+    }
+}
+
+static void play_episodes_clear(void) {
+    free(g_play_episodes);
+    g_play_episodes = NULL;
+    g_play_episode_count = 0;
+    g_play_episode_current = -1;
+}
+
 static void play_episode_sequence(int item_id, int series_id, const char *title,
                                   cJSON *episode_hint) {
     if (item_id <= 0) return;
@@ -3930,10 +3986,16 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
         if (next_episode) snprintf(next_context, sizeof(next_context), "%s", ep_display_title(next_episode));
         else if (next.found_current && next.series_id > 0 && next.series_id != series_id)
             snprintf(next_context, sizeof(next_context), "Proxima temporada");
+        if (matching_series) play_episodes_build(item_id);
+        else play_episodes_clear();
+        g_play_chosen_item = 0;
         int play_result = resolve_and_play_details(item_id, series_title,
                                                    episode_context[0] ? episode_context : NULL,
                                                    overview, next_context,
                                                    next_context[0] != '\0');
+        play_episodes_clear();
+        int chosen_item = g_play_chosen_item;
+        g_play_chosen_item = 0;
         g_next_audio_pref_override = -1;
         g_next_audio_pref_explicit = 0;
         g_next_audio_hint = 0;
@@ -3943,9 +4005,11 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
             snprintf(audio_language, sizeof(audio_language), "%s", g_last_audio_language);
         if (play_result != 1 && play_result != 2) return;
         char next_title[256] = {0};
-        int next_id = choose_next_episode(series_id, item_id, 0, 1,
-                                          play_result == 2,
-                                          next_title, sizeof(next_title));
+        // Escolha direta no painel Episodios (inclusive o anterior) dispensa a
+        // regra de proximo episodio e a contagem regressiva.
+        int next_id = play_result == 2 && chosen_item > 0 ? chosen_item :
+            choose_next_episode(series_id, item_id, 0, 1, play_result == 2,
+                                next_title, sizeof(next_title));
         if (next_id <= 0) return;
         item_id = next_id;
         episode_hint = NULL;

@@ -1728,3 +1728,33 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   v0.12.44 não draft/prerelease; Nplay.nro 24205135 bytes, digest SHA-256
   9321a245ef44b7a679781480a08b51c8978c28eb6246e57f201651aef046de55
   idêntico ao build final. NRO não rastreado em Git. Atualizador pode buscá-la.
+
+## Player estavel, seek posicionado e painel Episodios — 0.12.45, 04/10/2026
+
+- Relato: player "emperrado", recarregando a cada avanco/pausa, animes instaveis,
+  legendas falhando e sem trocar de episodio no player. Reproduzido com
+  `tools/host_player/` (player_run REAL no Linux, FFmpeg 7.1 do wheel PyAV,
+  conteudos no formato real do R2/torrent, servidor com latencia). A 0.12.44
+  falha 10 das 18 verificacoes de `suite.sh`; a 0.12.45 passa 18/18 em rede boa
+  e em Wi-Fi ruim (500 ms, 10 Mbps).
+- Causa raiz principal: o seek interno do FFmpeg 7.1 em HLS fMP4 com renditions
+  separadas nao reinicia o demuxer mov; le segmentos novos com indice velho,
+  descarta o audio ate o fim, NAL invalido e nenhum quadro. Reproduzido tambem
+  em PyAV e `ffmpeg -ss`. NAO voltar a chamar avformat_seek_file/av_seek_frame em
+  HLS: seek, Continuar e troca de audio usam abertura posicionada
+  (`hls_media_playlist_trim` + `nplay_curl_avio_set_hls_start`), com cache curto
+  de playlists e `init-*.mp4`. `player_seek_with_barrier` devolve 2 para HLS.
+- L/R/ZL/ZR somam saltos e aplicam 700 ms depois do ultimo toque, sem pausar.
+  Reabertura mostra o ultimo quadro escurecido (`pui_set_loading_backdrop`).
+- Remux sequencial (torrent): duracao vem da sonda (`sequential-duration`); a do
+  demuxer (~2 s) fazia o backend marcar o episodio como visto (>=92%). Reserva
+  512 pacotes/12 MB e audio adiantado (`demux_worker_take_stream`) eliminam as
+  faltas de audio causadas por `frag_keyframe` com GOP longo.
+- Legenda ate 4 linhas (dialogo + placa). Faixas `audio_N` exibem o idioma.
+- Painel Episodios (esquerda): `PlayerRequest.episodes`, `PlayerResult.chosen_item_id`,
+  `play_episodes_build`; escolher o anterior funciona.
+- Validacao: ARM64 `-Werror`, 18 testes C, testes Node do validador (atualizados
+  para os novos caminhos), 146 assercoes do validate_release (11 novas). Detalhes
+  e pendencias de hardware em `docs/PLAYER_STABILITY_0_12_45.md`.
+- Pendente no Switch: saltos e Continuar em R2, troca de audio, anime torrent por
+  10 min, painel Episodios. Abertura inicial em Wi-Fi ruim ainda ~6 s.

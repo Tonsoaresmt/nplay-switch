@@ -120,7 +120,129 @@ static void hls_easy_return(CURL *easy) {
     if (!kept) curl_easy_cleanup(easy);
 }
 
+// ---- Abertura posicionada e cache de metadados HLS ----------------------
+// O seek interno do FFmpeg 7.1 corrompe o demuxer mov das renditions fMP4.
+// Seek, retomada e troca de audio reabrem a fonte com cada playlist de midia
+// comecando no segmento do ponto pedido (hls_media_playlist_trim). Para que a
+// reabertura nao pague de novo master/playlists na rede, os textos originais
+// ficam num cache curto, limitado e descartado ao sair do player.
+#define HLS_META_CACHE_SLOTS 12
+#define HLS_META_CACHE_BYTES (2 * 1024 * 1024)
+#define HLS_META_CACHE_TTL_MS (10u * 60u * 1000u)
+typedef struct {
+    char *url;
+    char effective_url[2048];
+    unsigned char *data;
+    size_t len;
+    Uint32 stored;
+} HlsMetaCacheEntry;
+static HlsMetaCacheEntry g_meta_cache[HLS_META_CACHE_SLOTS];
+static size_t g_meta_cache_bytes = 0;
+static SDL_SpinLock g_meta_cache_lock = 0;
+static double g_hls_start = 0;
+static double g_hls_full_duration = 0;
+static int g_hls_positioned_count = 0;
+static SDL_SpinLock g_hls_start_lock = 0;
+
+void nplay_curl_avio_set_hls_start(double seconds) {
+    SDL_AtomicLock(&g_hls_start_lock);
+    g_hls_start = seconds > 0 ? seconds : 0;
+    if (g_hls_start > 0) { g_hls_full_duration = 0; g_hls_positioned_count = 0; }
+    SDL_AtomicUnlock(&g_hls_start_lock);
+}
+
+int nplay_curl_avio_hls_positioned_count(void) {
+    SDL_AtomicLock(&g_hls_start_lock);
+    int value = g_hls_positioned_count;
+    SDL_AtomicUnlock(&g_hls_start_lock);
+    return value;
+}
+
+double nplay_curl_avio_hls_full_duration(void) {
+    SDL_AtomicLock(&g_hls_start_lock);
+    double value = g_hls_full_duration;
+    SDL_AtomicUnlock(&g_hls_start_lock);
+    return value;
+}
+
+static void meta_cache_drop(HlsMetaCacheEntry *entry) {
+    g_meta_cache_bytes -= entry->len;
+    free(entry->url);
+    free(entry->data);
+    memset(entry, 0, sizeof(*entry));
+}
+
+static void meta_cache_clear(void) {
+    SDL_AtomicLock(&g_meta_cache_lock);
+    for (int i = 0; i < HLS_META_CACHE_SLOTS; i++)
+        if (g_meta_cache[i].url) meta_cache_drop(&g_meta_cache[i]);
+    g_meta_cache_bytes = 0;
+    SDL_AtomicUnlock(&g_meta_cache_lock);
+}
+
+// Copia o corpo em cache para um buffer novo do chamador (malloc).
+static int meta_cache_get(const char *url, unsigned char **data, size_t *len,
+                          char *effective_url, size_t effective_url_size) {
+    int found = 0;
+    Uint32 now = SDL_GetTicks();
+    SDL_AtomicLock(&g_meta_cache_lock);
+    for (int i = 0; i < HLS_META_CACHE_SLOTS && !found; i++) {
+        HlsMetaCacheEntry *entry = &g_meta_cache[i];
+        if (!entry->url || strcmp(entry->url, url)) continue;
+        if (now - entry->stored > HLS_META_CACHE_TTL_MS) { meta_cache_drop(entry); break; }
+        unsigned char *copy = (unsigned char *)malloc(entry->len + 1);
+        if (copy) {
+            memcpy(copy, entry->data, entry->len);
+            copy[entry->len] = 0;
+            *data = copy;
+            *len = entry->len;
+            snprintf(effective_url, effective_url_size, "%s", entry->effective_url);
+            found = 1;
+        }
+    }
+    SDL_AtomicUnlock(&g_meta_cache_lock);
+    return found;
+}
+
+static void meta_cache_put(const char *url, const char *effective_url,
+                           const unsigned char *data, size_t len) {
+    if (!url || !data || len == 0 || len > HLS_META_CACHE_BYTES / 2) return;
+    char *url_copy = strdup(url);
+    unsigned char *copy = (unsigned char *)malloc(len);
+    if (!url_copy || !copy) { free(url_copy); free(copy); return; }
+    memcpy(copy, data, len);
+    SDL_AtomicLock(&g_meta_cache_lock);
+    int slot = -1;
+    for (int i = 0; i < HLS_META_CACHE_SLOTS; i++)
+        if (g_meta_cache[i].url && !strcmp(g_meta_cache[i].url, url)) meta_cache_drop(&g_meta_cache[i]);
+    // Libera os mais antigos ate caber; no pior caso o cache fica vazio.
+    while (1) {
+        int empty = -1, oldest = -1;
+        for (int i = 0; i < HLS_META_CACHE_SLOTS; i++) {
+            if (!g_meta_cache[i].url) { if (empty < 0) empty = i; continue; }
+            if (oldest < 0 || g_meta_cache[i].stored < g_meta_cache[oldest].stored) oldest = i;
+        }
+        if (empty >= 0 && g_meta_cache_bytes + len <= HLS_META_CACHE_BYTES) { slot = empty; break; }
+        if (oldest < 0) break;
+        meta_cache_drop(&g_meta_cache[oldest]);
+    }
+    if (slot >= 0) {
+        HlsMetaCacheEntry *entry = &g_meta_cache[slot];
+        entry->url = url_copy; url_copy = NULL;
+        entry->data = copy; copy = NULL;
+        entry->len = len;
+        entry->stored = SDL_GetTicks();
+        snprintf(entry->effective_url, sizeof(entry->effective_url), "%s",
+                 effective_url && effective_url[0] ? effective_url : url);
+        g_meta_cache_bytes += len;
+    }
+    SDL_AtomicUnlock(&g_meta_cache_lock);
+    free(url_copy);
+    free(copy);
+}
+
 void nplay_curl_avio_pool_clear(void) {
+    meta_cache_clear();
     CURL *idle[HLS_IDLE_HANDLES];
     int count;
     SDL_AtomicLock(&g_hls_idle_lock);
@@ -774,7 +896,22 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
         // retorno de avformat_open_input. Para recursos pequenos, nao existe
         // beneficio em entregar ao demuxer enquanto outra thread ainda altera
         // o mesmo contexto. Baixe, valide e congele o payload primeiro.
-        int got = fetch_block(c, 0);
+        unsigned char *cached = NULL;
+        size_t cached_len = 0;
+        int got;
+        if (meta_cache_get(c->url, &cached, &cached_len, c->effective_url,
+                           sizeof(c->effective_url))) {
+            free(c->tmp);
+            c->tmp = cached;
+            c->tmp_cap = cached_len + 1;
+            got = (int)cached_len;
+            c->fetch_complete = 1;
+            c->size = got;
+        } else {
+            got = fetch_block(c, 0);
+            if (got > 0 && c->fetch_complete && (c->size <= 0 || c->size == got))
+                meta_cache_put(c->url, c->effective_url, c->tmp, (size_t)got);
+        }
         if (got <= 0 || !c->fetch_complete ||
             (c->size > 0 && c->size != got)) {
             diag_player_event("avio", "metadata-invalid",
@@ -793,6 +930,28 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
         c->static_pos = 0;
         c->size = got;
         c->eof = 1;
+        SDL_AtomicLock(&g_hls_start_lock);
+        double start = g_hls_start;
+        SDL_AtomicUnlock(&g_hls_start_lock);
+        if (start > 0) {
+            char *trimmed = NULL;
+            size_t trimmed_len = 0;
+            double segment_start = 0, total = 0;
+            if (hls_media_playlist_trim((const char *)c->ring, c->static_len, start,
+                                        &trimmed, &trimmed_len, &segment_start, &total)) {
+                free(c->ring);
+                c->ring = (unsigned char *)trimmed;
+                c->ring_cap = trimmed_len + 1;
+                c->static_len = trimmed_len;
+                c->size = (int64_t)trimmed_len;
+                diag_player_event("avio", "playlist-positioned", "id=%d start=%.2f segment=%.2f total=%.1f",
+                                  c->resource_id, start, segment_start, total);
+            }
+            SDL_AtomicLock(&g_hls_start_lock);
+            if (total > g_hls_full_duration) g_hls_full_duration = total;
+            if (trimmed) g_hls_positioned_count++;
+            SDL_AtomicUnlock(&g_hls_start_lock);
+        }
         diag_player_event("avio", "metadata-ready", "id=%d bytes=%d", c->resource_id, got);
     } else {
         c->th = SDL_CreateThread(c->streaming ? producer_stream : producer, "cavio", c);
@@ -820,8 +979,22 @@ static int hls_is_metadata_url(const char *url) {
     return strstr(url, "/api/play/") != NULL || strstr(url, "/api/hls") != NULL;
 }
 
+// Secao de inicializacao fMP4 (EXT-X-MAP): poucos KB, imutavel e reaberta em
+// toda abertura posicionada (seek/troca de audio). Tratada como metadado ela
+// fica no cache curto e cada salto economiza uma ida e volta por rendition.
+static int hls_is_init_section_url(const char *url) {
+    if (!url) return 0;
+    const char *query = strchr(url, '?');
+    size_t path_len = query ? (size_t)(query - url) : strlen(url);
+    const char *name = url;
+    for (size_t i = 0; i < path_len; i++) if (url[i] == '/') name = url + i + 1;
+    size_t name_len = path_len - (size_t)(name - url);
+    return name_len > 8 && !strncasecmp(name, "init", 4) &&
+           !strncasecmp(url + path_len - 4, ".mp4", 4);
+}
+
 AVIOContext *nplay_curl_avio_open_hls(const char *url) {
-    if (hls_is_metadata_url(url))
+    if (hls_is_metadata_url(url) || hls_is_init_section_url(url))
         return curl_avio_open_profile(url, -1, HLS_META_INITIAL, 0, 32768, "meta", 1);
     return curl_avio_open_profile(url, -1, 0, HLS_MEDIA_RINGCAP, 65536, "media", 0);
 }
