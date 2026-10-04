@@ -21,6 +21,10 @@ tools/host_player/make_fixtures.sh         # conteudos de teste (~600 MB em buil
 tools/host_player/build.sh                 # compila build/host_player/bin/harness
 ```
 
+Atencao: `make clean` (Makefile do devkitPro) apaga `build/` inteiro, inclusive
+`build/host_player`. Use `HOST_PLAYER_WORK=/outro/lugar` ou rode os tres
+scripts de novo depois de um build limpo do NRO.
+
 `setup.sh` usa os headers de `$DEVKITPRO/portlibs/switch/include` (padrao
 `/opt/devkitpro`). O enum `AV_PIX_FMT_NVTEGRA` fica no fim do enum, entao os
 headers do port continuam compativeis com as bibliotecas do PyAV.
@@ -61,3 +65,7 @@ LEFT RIGHT UP DOWN), `SCRIPT_AFTER_FRAME` (tempos a partir do 1o quadro),
 `EPISODES` (painel Episodios), `SEQUENTIAL`, `HOT_SID`, `DELIVERY`,
 `BASE_URL`/`EXTRA_CA` (API HTTPS local), `SNAPDIR`/`SNAPS` (capturas BMP),
 `AVDEBUG=48` (log do FFmpeg).
+
+`latency_server.py --log-query` registra a query de cada pedido e o prefixo
+`/redir/` responde 302 para `/r2/` (imita `/api/play` -> URL assinada). Foi
+assim que se confirmou como o FFmpeg 7.1 resolve URIs relativas.

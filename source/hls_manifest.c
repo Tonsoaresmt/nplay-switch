@@ -74,8 +74,8 @@ int hls_manifest_subtitle_tracks(const char *body, size_t len,
     return count;
 }
 
-int hls_manifest_resolve_url(const char *base, const char *reference,
-                             char *out, size_t out_size) {
+static int resolve_url(const char *base, const char *reference,
+                       char *out, size_t out_size, int allow_inherit) {
     if (!base || !reference || !out || out_size == 0) return 0;
     out[0] = 0;
     if (!strncasecmp(reference, "http://", 7) ||
@@ -95,7 +95,7 @@ int hls_manifest_resolve_url(const char *base, const char *reference,
     size_t query_len = base_query
         ? (size_t)((base_fragment && base_fragment > base_query
                     ? base_fragment : base + strlen(base)) - base_query) : 0;
-    int inherit_query = base_query && !strchr(reference, '?');
+    int inherit_query = allow_inherit && base_query && !strchr(reference, '?');
     if (reference[0] == '/') {
         int prefix = (int)(path - base);
         int n = snprintf(out, out_size, "%.*s%s%.*s", prefix, base, reference,
@@ -110,6 +110,16 @@ int hls_manifest_resolve_url(const char *base, const char *reference,
                      inherit_query ? (int)query_len : 0,
                      inherit_query ? base_query : "");
     return n >= 0 && (size_t)n < out_size;
+}
+
+int hls_manifest_resolve_url(const char *base, const char *reference,
+                             char *out, size_t out_size) {
+    return resolve_url(base, reference, out, out_size, 1);
+}
+
+int hls_manifest_resolve_like_ffmpeg(const char *base, const char *reference,
+                                     char *out, size_t out_size) {
+    return resolve_url(base, reference, out, out_size, 0);
 }
 
 int hls_manifest_media_counts(const char *body, size_t len,
@@ -269,4 +279,134 @@ int hls_media_playlist_trim(const char *body, size_t len, double start,
     *out_len = b.len;
     if (segment_start) *segment_start = cut_start;
     return 1;
+}
+
+// Percorre as linhas do manifesto sem BOM/espacos iniciais nem CR final.
+typedef struct { const char *at, *end; } LineCursor;
+static int next_line(LineCursor *cursor, const char **line, size_t *len) {
+    if (cursor->at >= cursor->end) return 0;
+    const char *next = memchr(cursor->at, '\n', (size_t)(cursor->end - cursor->at));
+    if (!next) next = cursor->end;
+    const char *l = cursor->at;
+    size_t n = (size_t)(next - l);
+    while (n && (*l == ' ' || *l == '\t' || (unsigned char)*l == 0xef ||
+                 (unsigned char)*l == 0xbb || (unsigned char)*l == 0xbf)) { l++; n--; }
+    while (n && (l[n - 1] == '\r' || l[n - 1] == ' ')) n--;
+    *line = l; *len = n;
+    cursor->at = next < cursor->end ? next + 1 : cursor->end;
+    return 1;
+}
+
+static int is_audio_media(const char *line, size_t n) {
+    return n > 13 && !strncasecmp(line, "#EXT-X-MEDIA:", 13) &&
+           line_contains(line + 13, n - 13, "TYPE=AUDIO");
+}
+
+int hls_manifest_audio_tracks(const char *body, size_t len, HlsManifestTrack *tracks,
+                              int capacity, int *filterable) {
+    if (filterable) *filterable = 0;
+    if (!body || !tracks || capacity <= 0) return 0;
+    LineCursor cursor = { body, body + len };
+    const char *line; size_t n;
+    int count = 0, all_uri = 1, overflow = 0, same_group = 1, variants = 0;
+    char group[64] = "", other[64];
+    while (next_line(&cursor, &line, &n)) {
+        if (line_starts(line, n, "#EXT-X-STREAM-INF:")) {
+            variants++;
+            // Uma variante sem AUDIO= toca o audio muxado nela; filtrar as
+            // renditions nao a afetaria, mas mistura de grupos sim.
+            if (attr_copy(line, n, "AUDIO", other, sizeof(other)) &&
+                group[0] && strcmp(other, group)) same_group = 0;
+            continue;
+        }
+        if (!is_audio_media(line, n)) continue;
+        if (count >= capacity) { overflow = 1; continue; }
+        HlsManifestTrack *track = &tracks[count];
+        memset(track, 0, sizeof(*track));
+        if (!attr_copy(line, n, "URI", track->uri, sizeof(track->uri)) || !track->uri[0])
+            all_uri = 0;
+        attr_copy(line, n, "NAME", track->name, sizeof(track->name));
+        attr_copy(line, n, "LANGUAGE", track->language, sizeof(track->language));
+        char flag[8];
+        track->is_default = attr_copy(line, n, "DEFAULT", flag, sizeof(flag)) &&
+                            !strcasecmp(flag, "YES");
+        if (!attr_copy(line, n, "GROUP-ID", other, sizeof(other))) other[0] = 0;
+        if (!count) snprintf(group, sizeof(group), "%s", other);
+        else if (strcmp(group, other)) same_group = 0;
+        count++;
+    }
+    if (filterable)
+        *filterable = count >= 2 && all_uri && !overflow && same_group &&
+                      group[0] && variants > 0;
+    return count;
+}
+
+int hls_manifest_keep_audio(const char *body, size_t len, int keep,
+                            char **out, size_t *out_len) {
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!body || len == 0 || !out || !out_len || keep < 0) return 0;
+    LineCursor cursor = { body, body + len };
+    const char *line; size_t n;
+    TrimBuffer b = {0};
+    int index = 0, kept = 0;
+    while (next_line(&cursor, &line, &n)) {
+        if (is_audio_media(line, n)) {
+            if (index++ != keep) continue;
+            kept = 1;
+        }
+        if (n) trim_put(&b, line, n);
+    }
+    if (b.failed || !kept) { free(b.data); return 0; }
+    *out = b.data;
+    *out_len = b.len;
+    return 1;
+}
+
+int hls_manifest_playlist_uris(const char *body, size_t len,
+                               char (*uris)[HLS_MANIFEST_URI_MAX], int capacity) {
+    if (!body || !uris || capacity <= 0) return 0;
+    int count = 0;
+    // Variantes (video) primeiro: com teto de capacidade, elas nunca ficam de
+    // fora por causa de muitas renditions de audio listadas antes no master.
+    for (int pass = 0; pass < 2; pass++) {
+        LineCursor cursor = { body, body + len };
+        const char *line; size_t n;
+        int after_stream_inf = 0;
+        while (next_line(&cursor, &line, &n) && count < capacity) {
+            char uri[HLS_MANIFEST_URI_MAX] = "";
+            if (after_stream_inf && n && line[0] != '#') {
+                if (pass == 0 && n < sizeof(uri)) { memcpy(uri, line, n); uri[n] = 0; }
+                after_stream_inf = 0;
+            } else if (line_starts(line, n, "#EXT-X-STREAM-INF:")) {
+                after_stream_inf = 1;
+                continue;
+            } else if (pass == 1 && n > 13 && !strncasecmp(line, "#EXT-X-MEDIA:", 13) &&
+                       (line_contains(line + 13, n - 13, "TYPE=AUDIO") ||
+                        line_contains(line + 13, n - 13, "TYPE=VIDEO"))) {
+                attr_copy(line, n, "URI", uri, sizeof(uri));
+            }
+            if (!uri[0]) continue;
+            int duplicate = 0;
+            for (int i = 0; i < count && !duplicate; i++) duplicate = !strcmp(uris[i], uri);
+            if (!duplicate) snprintf(uris[count++], HLS_MANIFEST_URI_MAX, "%s", uri);
+        }
+    }
+    return count;
+}
+
+int hls_media_playlist_map_uri(const char *body, size_t len, char *out, size_t out_size) {
+    if (!out || out_size == 0) return 0;
+    out[0] = 0;
+    if (!body) return 0;
+    LineCursor cursor = { body, body + len };
+    const char *line; size_t n;
+    while (next_line(&cursor, &line, &n)) {
+        if (line_starts(line, n, "#EXT-X-STREAM-INF") ||
+            line_starts(line, n, "#EXT-X-MEDIA:")) return 0;
+        if (line_starts(line, n, "#EXT-X-MAP:"))
+            return attr_copy(line, n, "URI", out, out_size) && out[0];
+        if (n && line[0] != '#') return 0; // MAP vem antes do primeiro segmento
+    }
+    return 0;
 }

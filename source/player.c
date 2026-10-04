@@ -1081,16 +1081,170 @@ static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *u
     return 0;
 }
 
+// Legenda do master (R2) baixada em segundo plano, como no player do site.
+// Antes a abertura esperava playlist + VTT antes do primeiro quadro (1,3 s em
+// Wi-Fi ruim no host, justamente no caso Legendado dos animes) e a troca de
+// legenda congelava o video durante o download. A faixa anterior continua na
+// tela ate a nova ficar pronta; falha ou cancelamento a preservam.
+typedef struct {
+    char url[HLS_MANIFEST_URI_MAX];
+    int choice;
+    SDL_Thread *thread;
+    SDL_atomic_t cancel, done;
+    ExternalSubtitleStore loaded;
+    int result;
+    Uint32 started;
+} SubtitleFetch;
+
+static int subtitle_fetch_worker(void *opaque) {
+    SubtitleFetch *fetch = opaque;
+    nplay_curl_avio_set_thread_cancel(&fetch->cancel);
+    fetch->result = load_external_subtitle(fetch->url, &fetch->loaded, 0, &fetch->cancel);
+    nplay_curl_avio_set_thread_cancel(NULL);
+    SDL_AtomicSet(&fetch->done, 1);
+    return 0;
+}
+
+static void subtitle_fetch_stop(SubtitleFetch *fetch) {
+    if (!fetch->thread) return;
+    SDL_AtomicSet(&fetch->cancel, 1);
+    SDL_WaitThread(fetch->thread, NULL);
+    fetch->thread = NULL;
+    external_subtitle_clear(&fetch->loaded);
+}
+
+static int subtitle_fetch_start(SubtitleFetch *fetch, const char *url, int choice) {
+    subtitle_fetch_stop(fetch);
+    if (!url || strlen(url) >= sizeof(fetch->url)) return -1;
+    memset(fetch, 0, sizeof(*fetch));
+    snprintf(fetch->url, sizeof(fetch->url), "%s", url);
+    fetch->choice = choice;
+    fetch->started = SDL_GetTicks();
+    fetch->thread = SDL_CreateThread(subtitle_fetch_worker, "subtitle-fetch", fetch);
+    return fetch->thread ? 0 : -1;
+}
+
+// 1 = pronta (cues trocados para store), -1 = falhou, 0 = nada ou ainda baixando.
+static int subtitle_fetch_poll(SubtitleFetch *fetch, ExternalSubtitleStore *store) {
+    if (!fetch->thread || !SDL_AtomicGet(&fetch->done)) return 0;
+    SDL_WaitThread(fetch->thread, NULL);
+    fetch->thread = NULL;
+    if (fetch->result != 0) {
+        external_subtitle_clear(&fetch->loaded);
+        return -1;
+    }
+    external_subtitle_clear(store);
+    *store = fetch->loaded;
+    memset(&fetch->loaded, 0, sizeof(fetch->loaded));
+    return 1;
+}
+
+// Mesmo padrao de modern_track_labels: nome publicado, idioma quando o nome e
+// tecnico (subtitle_0) e numeracao quando ha mais de uma faixa.
 static void external_subtitle_labels(PlayerHud *hud, char names[17][96],
                                      const HlsManifestTrack *tracks, int count) {
     hud->sub_count = count + 1;
     for (int i = 0; i < count; i++) {
         const char *norm = audio_language_normalize(tracks[i].language, tracks[i].name);
-        const char *label = tracks[i].name[0] ? tracks[i].name :
-            !strcmp(norm, "pt") ? "Portugues (Brasil)" : !strcmp(norm, "en") ? "Ingles" :
-            !strcmp(norm, "ja") ? "Japones" : "Legenda";
-        snprintf(names[i+1], 96, "%.95s", label);
-        hud->sub_names[i+1] = names[i+1];
+        const char *label = !track_title_is_technical(tracks[i].name) ? tracks[i].name :
+            norm[0] ? lang_name(norm) : "Legenda";
+        if (count > 1) snprintf(names[i + 1], 96, "%.64s  |  %d/%d", label, i + 1, count);
+        else snprintf(names[i + 1], 96, "%.95s", label);
+        hud->sub_names[i + 1] = names[i + 1];
+    }
+}
+
+// Renditions de audio do master quando o FFmpeg abre somente a escolhida
+// (hls_manifest_keep_audio). O painel lista todas; trocar reabre a fonte.
+typedef struct { char name[96]; char language[24]; int is_default; } MasterAudioTrack;
+
+static const char *master_audio_norm(const MasterAudioTrack *track) {
+    return audio_language_normalize(track->language[0] ? track->language : NULL,
+                                    track->name[0] ? track->name : NULL);
+}
+
+static void master_audio_info(const MasterAudioTrack *tracks, int count,
+                              AudioTrackInfo *info, int *best) {
+    *best = -1;
+    for (int i = 0; i < count; i++) {
+        info[i].language = tracks[i].language[0] ? tracks[i].language : NULL;
+        info[i].title = tracks[i].name[0] ? tracks[i].name : NULL;
+        info[i].is_default = tracks[i].is_default;
+        if (*best < 0 && tracks[i].is_default) *best = i;
+    }
+    if (*best < 0) *best = 0;
+}
+
+// Escolhe pelo master, com a mesma politica aplicada as AVStreams, e entrega
+// ao demuxer um master com so essa rendition. Cada rendition a mais custava
+// playlist + init + 2 segmentos na abertura e em cada salto: no host, abrir
+// em Wi-Fi ruim caiu de 5,3-6,3 s para 3,7-4,0 s com uma faixa a menos.
+static int player_hls_choose_audio(const PlayerRequest *req, AVIOContext *avio,
+                                   MasterAudioTrack *tracks, int *pick) {
+    const unsigned char *body = NULL;
+    size_t length = 0;
+    *pick = -1;
+    if (!nplay_curl_avio_metadata(avio, &body, &length, NULL, 0)) return 0;
+    HlsManifestTrack *parsed = calloc(HLS_MANIFEST_TRACK_CAP, sizeof(*parsed));
+    if (!parsed) return 0;
+    int filterable = 0;
+    int count = hls_manifest_audio_tracks((const char *)body, length, parsed,
+                                          HLS_MANIFEST_TRACK_CAP, &filterable);
+    if (!filterable || count > AUDIO_POLICY_MAX_TRACKS) {
+        if (count > 1) diag_player_event("hls-master", "audio-all", "tracks=%d", count);
+        free(parsed);
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        snprintf(tracks[i].name, sizeof(tracks[i].name), "%s", parsed[i].name);
+        snprintf(tracks[i].language, sizeof(tracks[i].language), "%s", parsed[i].language);
+        tracks[i].is_default = parsed[i].is_default;
+    }
+    free(parsed);
+    AudioTrackInfo info[AUDIO_POLICY_MAX_TRACKS] = {0};
+    int best = 0;
+    master_audio_info(tracks, count, info, &best);
+    char saved[32] = "";
+    store_load_pref_audio(saved, sizeof(saved));
+    int choice = audio_policy_choose(info, count, req->audio_pref,
+                                     req->audio_pref_explicit ? NULL : saved,
+                                     req->audio_hint_language, req->audio_hint,
+                                     req->audio_hint_priority, best);
+    if (choice < 0 || choice >= count) choice = best;
+    char *kept = NULL;
+    size_t kept_len = 0;
+    if (!hls_manifest_keep_audio((const char *)body, length, choice, &kept, &kept_len) ||
+        !nplay_curl_avio_replace_metadata(avio, kept, kept_len)) {
+        free(kept);
+        diag_player_event("hls-master", "audio-filter-fail", "tracks=%d", count);
+        return 0;
+    }
+    *pick = choice;
+    diag_player_event("hls-master", "audio-filter", "tracks=%d keep=%d lang=%s",
+                      count, choice + 1, master_audio_norm(&tracks[choice])[0]
+                          ? master_audio_norm(&tracks[choice]) : "und");
+    return count;
+}
+
+static void master_audio_labels(PlayerHud *hud, char names[][96], char details[][96],
+                                const MasterAudioTrack *tracks, int count,
+                                int inferred_dub) {
+    hud->audio_count = count;
+    for (int i = 0; i < count; i++) {
+        const char *norm = master_audio_norm(&tracks[i]);
+        char numbered[32];
+        snprintf(numbered, sizeof(numbered), "Audio %d", i + 1);
+        const char *display_name = !track_title_is_technical(tracks[i].name) ? tracks[i].name :
+            norm[0] ? lang_name(norm) : numbered;
+        const char *display_lang = lang_label(norm);
+        if (i == inferred_dub) {
+            display_name = "Portugues (dublado)";
+            display_lang = "PT*";
+        }
+        snprintf(names[i], 96, "%.95s", display_name);
+        snprintf(details[i], 96, "%s  |  faixa %d de %d", display_lang, i + 1, count);
+        hud->audio_names[i] = names[i];
+        hud->audio_details[i] = details[i];
     }
 }
 
@@ -1647,6 +1801,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int master_audio_count = 0, master_subtitle_count = 0;
     HlsManifestTrack manifest_subtitles[HLS_MANIFEST_TRACK_CAP] = {0};
     int manifest_subtitle_count = 0;
+    MasterAudioTrack master_audio[HLS_MANIFEST_TRACK_CAP];
+    memset(master_audio, 0, sizeof(master_audio));
+    int master_audio_n = 0, master_audio_pick = -1;
     diag_player_event("format", "alloc-begin", "hls=%d remote=%d", native_hls, remote);
     AVFormatContext *fmt = avformat_alloc_context();
     if (!fmt) {
@@ -1697,6 +1854,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
         diag_player_event("hls-master", "renditions", "audio=%d subtitle=%d",
                           master_audio_count, master_subtitle_count);
+        // Playlists e secoes init em paralelo antes do demuxer pedi-las em fila.
+        // Usa o master completo: as faixas de audio nao abertas tambem ficam no
+        // cache e trocar de audio depois so baixa segmentos. A base e `url`: o
+        // FFmpeg resolve URIs relativas pela URL original, nao pela final do
+        // redirecionamento (conferido no host com 302).
+        if (!open_watch.cancelled && !open_watch.timed_out &&
+            nplay_curl_avio_metadata(avio, &master_body, &master_length, NULL, 0))
+            nplay_curl_avio_hls_prefetch(url, (const char *)master_body, master_length,
+                                         player_open_interrupted, &open_watch);
+        if (master_audio_count > 1 && !sequential_stream)
+            master_audio_n = player_hls_choose_audio(req, avio, master_audio,
+                                                     &master_audio_pick);
         if (open_watch.cancelled || open_watch.timed_out) {
             diag_player_event("format", "root-open-interrupted", "cancel=%d timeout=%d",
                               open_watch.cancelled, open_watch.timed_out);
@@ -1956,13 +2125,24 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int scur = -1, sub_chosen = 0, pt_audio = -1, known_audio = 0;
     AudioTrackInfo audio_tracks[AUDIO_POLICY_MAX_TRACKS] = {0};
     char audio_map[192] = "";
-    for (int i = 0; i < naud; i++) {
-        AVStream *stream = fmt->streams[aidxs[i]];
-        AVDictionaryEntry *language = av_dict_get(stream->metadata, "language", NULL, 0);
-        const char *track_title = stream_track_title(stream);
-        audio_tracks[i].language = language ? language->value : NULL;
-        audio_tracks[i].title = track_title;
-        audio_tracks[i].is_default = !!(stream->disposition & AV_DISPOSITION_DEFAULT);
+    // HLS com o audio filtrado no master: o FFmpeg criou somente a rendition
+    // escolhida (acur real = 0); painel e indices usam a lista do master, na
+    // mesma ordem em que as AVStreams existiriam (pistas de continuidade iguais).
+    int audio_from_master = master_audio_n > 0 && master_audio_pick >= 0 && naud == 1;
+    if (master_audio_n > 0 && !audio_from_master)
+        diag_player_event("hls-master", "audio-filter-mismatch", "naud=%d", naud);
+    int naud_ui = audio_from_master ? master_audio_n : naud;
+    int master_best = 0;
+    if (audio_from_master)
+        master_audio_info(master_audio, master_audio_n, audio_tracks, &master_best);
+    for (int i = 0; i < naud_ui; i++) {
+        if (!audio_from_master) {
+            AVStream *stream = fmt->streams[aidxs[i]];
+            AVDictionaryEntry *language = av_dict_get(stream->metadata, "language", NULL, 0);
+            audio_tracks[i].language = language ? language->value : NULL;
+            audio_tracks[i].title = stream_track_title(stream);
+            audio_tracks[i].is_default = !!(stream->disposition & AV_DISPOSITION_DEFAULT);
+        }
         const char *norm = audio_language_normalize(audio_tracks[i].language, audio_tracks[i].title);
         if (norm[0]) known_audio++;
         if (pt_audio < 0 && !strcmp(norm, "pt")) pt_audio = i;
@@ -1973,21 +2153,24 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         strncat(audio_map, part, sizeof(audio_map) - strlen(audio_map) - 1);
     }
     const char *saved_audio = req->audio_pref_explicit ? NULL : pref_aud;
-    acur = audio_policy_choose(audio_tracks, naud, req->audio_pref, saved_audio,
-                               req->audio_hint_language, req->audio_hint,
-                               req->audio_hint_priority, best_audio);
-    if (acur < 0) acur = 0;
+    int acur_ui = audio_from_master ? master_audio_pick :
+        audio_policy_choose(audio_tracks, naud, req->audio_pref, saved_audio,
+                            req->audio_hint_language, req->audio_hint,
+                            req->audio_hint_priority, best_audio);
+    if (acur_ui < 0) acur_ui = 0;
+    acur = audio_from_master ? 0 : acur_ui;
+    if (audio_from_master) best_audio = master_best;
     int inferred_dub = -1;
-    if (naud == 2 && pt_audio < 0) {
+    if (naud_ui == 2 && pt_audio < 0) {
         int english = -1, unknown = -1;
-        for (int i = 0; i < naud; i++) {
+        for (int i = 0; i < naud_ui; i++) {
             AudioLanguageKind kind = audio_language_kind(audio_tracks[i].language,
                                                           audio_tracks[i].title);
             if (kind == AUDIO_KIND_ENGLISH) english = i;
             else if (kind == AUDIO_KIND_UNKNOWN) unknown = i;
         }
         if (english >= 0 && unknown >= 0 &&
-            audio_policy_choose(audio_tracks, naud, 0, NULL, NULL, 0, 0,
+            audio_policy_choose(audio_tracks, naud_ui, 0, NULL, NULL, 0, 0,
                                 best_audio) == unknown)
             inferred_dub = unknown;
     }
@@ -2023,28 +2206,35 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
 
     int aidx = naud ? aidxs[acur] : -1;
-    g_player_audio_index = naud ? acur + 1 : 0;
+    g_player_audio_index = naud ? acur_ui + 1 : 0;
     snprintf(g_player_audio_language, sizeof(g_player_audio_language), "%s",
              naud ? (stream_norm(fmt, aidx)[0] ? stream_norm(fmt, aidx) : "und") : "");
     diag_player_event("streams", "selected",
-                      "video=%d audio=%d lang=%s pref=%d explicit=%d saved=%s hint=%s/%d priority=%d tracks=%s sub=%d",
+                      "video=%d audio=%d lang=%s pref=%d explicit=%d saved=%s hint=%s/%d priority=%d tracks=%s master=%d sub=%d",
                       vidx, aidx, g_player_audio_language, req->audio_pref,
                       req->audio_pref_explicit, saved_audio && saved_audio[0] ? saved_audio : "-",
                       req->audio_hint_language ? req->audio_hint_language : "-",
                       req->audio_hint, req->audio_hint_priority,
-                      audio_map[0] ? audio_map : "-", nsub);
+                      audio_map[0] ? audio_map : "-", audio_from_master, nsub);
     AVCodecContext *sctx = NULL;
     SubtitleQueue subtitles;
     subtitle_queue_reset(&subtitles);
     ExternalSubtitleStore external_subtitles = {0};
+    SubtitleFetch subtitle_fetch;
+    memset(&subtitle_fetch, 0, sizeof(subtitle_fetch));
     if (scur >= 0 && !manifest_subtitle_fallback &&
         open_sub_dec(fmt, sidxs[scur], &sctx) != 0) scur = -1;
-    if (scur >= 0 && manifest_subtitle_fallback) {
+    if (scur >= 0 && manifest_subtitle_fallback && !hot_external_subtitles) {
+        // A faixa fica selecionada enquanto o texto chega; o video nao espera.
+        if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[scur].uri, scur) != 0) {
+            diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=thread", scur + 1);
+            scur = -1;
+        }
+    } else if (scur >= 0 && manifest_subtitle_fallback) {
         int64_t before_subtitles = av_gettime_relative();
-        int sub_result = hot_external_subtitles
-            ? load_hot_subtitle(ren, title, manifest_subtitles[scur].uri, &external_subtitles)
-            : load_external_subtitle(manifest_subtitles[scur].uri, &external_subtitles, 0, NULL);
-        if (hot_external_subtitles && open_watch.deadline_us > 0)
+        int sub_result = load_hot_subtitle(ren, title, manifest_subtitles[scur].uri,
+                                           &external_subtitles);
+        if (open_watch.deadline_us > 0)
             open_watch.deadline_us += av_gettime_relative() - before_subtitles;
         if (sub_result != 0) {
             diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=%d", scur + 1, sub_result);
@@ -2096,6 +2286,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     modern_track_labels(fmt, aidxs, naud, sidxs, native_nsub,
                         hud_audio_names, hud_audio_details, hud_sub_names,
                         inferred_dub, &hud_base);
+    if (audio_from_master)
+        master_audio_labels(&hud_base, hud_audio_names, hud_audio_details,
+                            master_audio, master_audio_n, inferred_dub);
     if (manifest_subtitle_fallback) {
         external_subtitle_labels(&hud_base, hud_sub_names, manifest_subtitles, nsub);
     }
@@ -2148,6 +2341,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (swr) swr_free(&swr); \
     if (actx) avcodec_free_context(&actx); \
     if (sctx) avcodec_free_context(&sctx); \
+    subtitle_fetch_stop(&subtitle_fetch); \
     external_subtitle_clear(&external_subtitles); \
     if (vctx) avcodec_free_context(&vctx); \
     if (frame) av_frame_free(&frame); \
@@ -2423,6 +2617,37 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
+        int fetched = subtitle_fetch_poll(&subtitle_fetch, &external_subtitles);
+        if (fetched) {
+            int choice = subtitle_fetch.choice;
+            if (fetched > 0) {
+                int was_switch = scur != choice;
+                scur = choice;
+                g_player_subtitle_index = scur + 1;
+                const char *norm = audio_language_normalize(
+                    manifest_subtitles[scur].language, manifest_subtitles[scur].name);
+                if (was_switch) {
+                    if (norm[0]) store_save_pref_sub(norm);
+                    snprintf(notice, sizeof(notice), "Legenda %d/%d  %.54s",
+                             scur + 1, nsub, hud_sub_names[scur + 1]);
+                    notice_until = now_ticks + 2200;
+                }
+                diag_player_event("tracks", "subtitle-manifest-applied",
+                                  "choice=%d cues=%d ms=%u async=1", scur + 1,
+                                  external_subtitles.count, now_ticks - subtitle_fetch.started);
+            } else {
+                track_switch_failures++;
+                diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=async ms=%u",
+                                  choice + 1, now_ticks - subtitle_fetch.started);
+                if (scur == choice) {
+                    // Falhou a faixa escolhida na abertura: nada a manter.
+                    scur = -1;
+                    g_player_subtitle_index = 0;
+                }
+                snprintf(notice, sizeof(notice), "Nao consegui carregar esta legenda");
+                notice_until = now_ticks + 2200;
+            }
+        }
         if (quick_seek_active && SDL_TICKS_PASSED(now_ticks, quick_seek_deadline)) {
             quick_seek_active = 0;
             if (!timeline_seek && !track_menu && !next_selected) {
@@ -2528,10 +2753,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (tx >= 210 && tx < 620) touched_menu = TRACK_MENU_AUDIO;
                     else if (tx >= 660 && tx < 1070) touched_menu = TRACK_MENU_SUB;
                     if (touched_menu && ty >= 234 && ty < 570) {
-                        int total = touched_menu == TRACK_MENU_AUDIO ? naud : nsub + 1;
+                        int total = touched_menu == TRACK_MENU_AUDIO ? naud_ui : nsub + 1;
                         int selected = touched_menu == track_menu
                             ? track_sel
-                            : (touched_menu == TRACK_MENU_AUDIO ? acur : scur + 1);
+                            : (touched_menu == TRACK_MENU_AUDIO ? acur_ui : scur + 1);
                         int first = selected - 3;
                         if (first > total - 6) first = total - 6;
                         if (first < 0) first = 0;
@@ -2673,11 +2898,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     continue;
                 }
                 if (track_menu) {
-                    int total = (track_menu == TRACK_MENU_AUDIO) ? naud : nsub + 1;
+                    int total = (track_menu == TRACK_MENU_AUDIO) ? naud_ui : nsub + 1;
                     if (b == JOY_UP && track_sel > 0) track_sel--;
                     else if (b == JOY_DOWN && track_sel + 1 < total) track_sel++;
-                    else if (b == JOY_DLEFT && track_menu == TRACK_MENU_SUB && naud > 0) {
-                        track_menu = TRACK_MENU_AUDIO; track_sel = acur;
+                    else if (b == JOY_DLEFT && track_menu == TRACK_MENU_SUB && naud_ui > 0) {
+                        track_menu = TRACK_MENU_AUDIO; track_sel = acur_ui;
                     }
                     else if (b == JOY_DRIGHT && track_menu == TRACK_MENU_AUDIO && nsub > 0) {
                         track_menu = TRACK_MENU_SUB; track_sel = scur + 1;
@@ -2692,20 +2917,23 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
                     } else if (b == JOY_A) {
                         if (track_menu == TRACK_MENU_AUDIO) {
-                            if (track_sel == acur) {
+                            if (track_sel == acur_ui) {
                                 snprintf(notice, sizeof(notice), "Audio atual mantido");
                             } else if (native_hls) {
                                 // Trocar a rendition HLS exige seek, que o FFmpeg
                                 // 7.1 corrompe em fMP4. Reabra no mesmo ponto com a
                                 // faixa exata escolhida (prioridade manual).
-                                int next_idx = aidxs[track_sel];
-                                const char *selected_norm = stream_norm(fmt, next_idx);
+                                int next_idx = audio_from_master ? -1 : aidxs[track_sel];
+                                const char *selected_norm = audio_from_master
+                                    ? master_audio_norm(&master_audio[track_sel])
+                                    : stream_norm(fmt, next_idx);
                                 g_player_audio_index = track_sel + 1;
                                 snprintf(g_player_audio_language, sizeof(g_player_audio_language),
                                          "%s", selected_norm[0] ? selected_norm : "und");
                                 if (selected_norm[0]) store_save_pref_audio(selected_norm);
                                 diag_player_event("tracks", "audio-positioned-reopen",
-                                                  "from=%d to=%d pos=%.2f", aidx, next_idx, cur_pos);
+                                                  "from=%d to=%d choice=%d pos=%.2f", aidx,
+                                                  next_idx, track_sel + 1, cur_pos);
                                 controlled_restart = PLAYER_RESTART_TRACK;
                                 track_menu = 0;
                                 running = 0;
@@ -2738,6 +2966,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                             actx = next_actx;
                                             next_actx = NULL;
                                             acur = track_sel;
+                                            acur_ui = acur;
                                             aidx = next_idx;
                                             atb = fmt->streams[aidx]->time_base;
                                             swr_rate = 0; swr_fmt = -1; swr_ch = 0;
@@ -2798,18 +3027,32 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 Uint32 switch_started = SDL_GetTicks();
                                 int changed = 0;
                                 if (next < 0) {
+                                    subtitle_fetch_stop(&subtitle_fetch);
                                     external_subtitle_clear(&external_subtitles);
                                     scur = -1;
                                     store_save_pref_sub("off");
                                     changed = 1;
+                                } else if (!hot_external_subtitles) {
+                                    // Em segundo plano: o video continua e a
+                                    // legenda atual fica ate a nova chegar.
+                                    if (subtitle_fetch_start(&subtitle_fetch,
+                                            manifest_subtitles[next].uri, next) == 0) {
+                                        snprintf(notice, sizeof(notice), "Carregando legenda...");
+                                        notice_until = SDL_GetTicks() + 1500;
+                                        track_menu = 0;
+                                        double resume_now = av_gettime_relative() / 1000000.0;
+                                        wall_start = resume_now - cur_pos;
+                                        audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
+                                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                                        continue;
+                                    }
                                 } else {
                                     pui_draw_loading(ren, title, "Carregando legenda",
                                         "Baixando apenas o texto da faixa escolhida...",
                                         SDL_GetTicks(), 1);
                                     SDL_RenderPresent(ren);
-                                    int sub_result = hot_external_subtitles
-                                        ? load_hot_subtitle(ren, title, manifest_subtitles[next].uri, &external_subtitles)
-                                        : load_external_subtitle(manifest_subtitles[next].uri, &external_subtitles, 0, NULL);
+                                    int sub_result = load_hot_subtitle(ren, title,
+                                        manifest_subtitles[next].uri, &external_subtitles);
                                     if (sub_result == 0) {
                                         scur = next;
                                         const char *norm = audio_language_normalize(
@@ -3008,8 +3251,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     diag_player_event("seek", "quick-step", "target=%.2f", t);
                 }
                 else if (b == JOY_Y) {
-                    if (naud > 1) {
-                        track_menu = TRACK_MENU_AUDIO; track_sel = acur;
+                    if (naud_ui > 1) {
+                        track_menu = TRACK_MENU_AUDIO; track_sel = acur_ui;
                         if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
                     } else snprintf(notice, sizeof(notice), "Este video possui apenas um audio");
                     if (!track_menu) notice_until = SDL_GetTicks() + 2200;
@@ -3071,7 +3314,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (adev) SDL_PauseAudioDevice(adev, paused);
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
                 } else if (ty >= 620 && tx >= 1090 && tx < 1195 &&
-                           (naud > 1 || nsub > 0 || hot_subtitle_session_valid(req->playback.hot_session_id))) {
+                           (naud_ui > 1 || nsub > 0 || hot_subtitle_session_valid(req->playback.hot_session_id))) {
                     if (!nsub && hot_subtitle_session_valid(req->playback.hot_session_id)) {
                         hot_probe_retry = 1;
                         continue;
@@ -3079,8 +3322,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     // O HUD moderno possui uma unica acao de faixas no canto
                     // direito. O mapeamento antigo tinha dois botoes invisiveis
                     // nessa regiao e fazia o toque alternar o painel fixo.
-                    track_menu = naud > 1 ? TRACK_MENU_AUDIO : TRACK_MENU_SUB;
-                    track_sel = track_menu == TRACK_MENU_AUDIO ? acur : scur + 1;
+                    track_menu = naud_ui > 1 ? TRACK_MENU_AUDIO : TRACK_MENU_SUB;
+                    track_sel = track_menu == TRACK_MENU_AUDIO ? acur_ui : scur + 1;
                     if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
                 }
                 if (touch_seek) {
@@ -3204,7 +3447,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 scur, manifest_subtitle_fallback, &subtitles,
                 &external_subtitles, timeline_seek_from);
             draw_hud(ren, &hud_base, timeline_seek_from, dur, 1, vol,
-                     acur, scur, !sequential_stream, NULL,
+                     acur_ui, scur, !sequential_stream, NULL,
                      timeline_seek_target, scrub_label[0] ? scrub_label : NULL,
                      active_subtitle);
             SDL_RenderPresent(ren);
@@ -3239,7 +3482,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 scur, manifest_subtitle_fallback, &subtitles,
                 &external_subtitles, cur_pos);
             draw_modern_track_menu(ren, &hud_base, track_menu, track_sel,
-                                   acur, scur, active_subtitle);
+                                   acur_ui, scur, active_subtitle);
             SDL_RenderPresent(ren);
             SDL_Delay(30);
             continue;
@@ -3253,7 +3496,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 scur, manifest_subtitle_fallback, &subtitles,
                 &external_subtitles, cur_pos);
             draw_hud(ren, &hud_base, cur_pos, dur, 1, vol,
-                     acur, scur, !sequential_stream, NULL, -1, NULL,
+                     acur_ui, scur, !sequential_stream, NULL, -1, NULL,
                      active_subtitle);
             if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
             SDL_RenderPresent(ren);
@@ -3331,7 +3574,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     scur, manifest_subtitle_fallback, &subtitles,
                     &external_subtitles, cur_pos);
                 draw_hud(ren, &hud_base, cur_pos, dur, 0, vol,
-                         acur, scur, !sequential_stream, dots, -1, NULL,
+                         acur_ui, scur, !sequential_stream, dots, -1, NULL,
                          active_subtitle);
                 if (now_ticks < notice_until) draw_notice(ren, notice);
                 SDL_RenderPresent(ren);
@@ -3610,7 +3853,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         &external_subtitles, cur_pos);
                     if (hud_pinned || SDL_GetTicks() < hud_until) {
                         draw_hud(ren, &hud_base, cur_pos, dur, 0, vol,
-                                 acur, scur, !sequential_stream, NULL, -1, NULL,
+                                 acur_ui, scur, !sequential_stream, NULL, -1, NULL,
                                  active_subtitle);
                     } else {
                         draw_subtitle_overlay(ren, &hud_base, active_subtitle);
@@ -3759,6 +4002,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     av_freep(&audio_buf);
     if (actx) avcodec_free_context(&actx);
     if (sctx) avcodec_free_context(&sctx);
+    subtitle_fetch_stop(&subtitle_fetch);
     external_subtitle_clear(&external_subtitles);
     avcodec_free_context(&vctx);
     av_frame_free(&frame); av_packet_free(&pkt);

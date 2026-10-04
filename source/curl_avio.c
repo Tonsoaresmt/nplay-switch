@@ -288,7 +288,14 @@ typedef struct {
     long response_code;
     char effective_url[2048];
     char profile[8];
+    SDL_atomic_t *cancel_flag; // cancelamento da thread que abriu (busca/legenda)
 } CurlIO;
+
+// Threads auxiliares (busca paralela, legenda em segundo plano) nao podem
+// usar o callback de B da thread de render. Cada uma registra sua propria
+// flag; todo recurso aberto nela herda a flag e a transferencia e abortada.
+static _Thread_local SDL_atomic_t *t_cancel_flag = NULL;
+void nplay_curl_avio_set_thread_cancel(SDL_atomic_t *cancel) { t_cancel_flag = cancel; }
 
 static size_t wr_tmp(char *ptr, size_t sz, size_t nm, void *ud) {
     CurlIO *c = (CurlIO *)ud;
@@ -370,6 +377,7 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
         SDL_GetTicks() - c->stream_started_tick >= 8000u) return 1;
     if (c->streaming && c->stream_len > 0 &&
         SDL_GetTicks() - c->last_body_tick >= 8000u) return 1;
+    if (c->cancel_flag && SDL_AtomicGet(c->cancel_flag)) return 1;
     return (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
             (c->synchronous && abort_requested())) ? 1 : 0;
 }
@@ -811,37 +819,7 @@ static int64_t cio_seek(void *opaque, int64_t off, int whence) {
     return np;
 }
 
-static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
-                                           size_t block_size, size_t ring_cap,
-                                           int avio_buffer_size, const char *profile,
-                                           int synchronous) {
-    if (!url || !url[0]) return NULL;
-    CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
-    if (!c) return NULL;
-    size_t url_len = strlen(url);
-    c->url = (char *)malloc(url_len + 1);
-    if (!c->url) { free_cio(c); return NULL; }
-    memcpy(c->url, url, url_len + 1);
-    c->size = expected_size > 0 ? expected_size : -1;
-    c->resource_id = SDL_AtomicAdd(&g_resource_sequence, 1) + 1;
-    snprintf(c->profile, sizeof(c->profile), "%s", profile ? profile : "file");
-    c->response_length = c->range_total = -1;
-    c->seek_req = -1; c->base = 0; c->running = 1;
-    c->block_size = block_size;
-    c->synchronous = synchronous;
-    c->streaming = profile && !strcmp(profile, "media");
-    c->opened_tick = SDL_GetTicks();
-    c->pooled = profile && (!strcmp(profile, "media") || !strcmp(profile, "meta"));
-    c->ring_cap = synchronous ? 0 : ring_cap;
-    c->tmp_cap = synchronous ? HLS_META_INITIAL : c->streaming ? 0 : block_size;
-    c->tmp_limit = synchronous ? HLS_META_MAX : c->streaming ? 0 : block_size;
-    c->ring = synchronous ? NULL : (unsigned char *)malloc(c->ring_cap);
-    c->tmp  = c->tmp_cap ? (unsigned char *)malloc(c->tmp_cap) : NULL;
-    c->easy = c->pooled ? hls_easy_take() : curl_easy_init();
-    c->mtx = SDL_CreateMutex();
-    c->c_data = SDL_CreateCond();
-    c->c_space = SDL_CreateCond();
-    if ((!synchronous && !c->ring) || (c->tmp_cap && !c->tmp) || !c->easy || !c->mtx || !c->c_data || !c->c_space) { free_cio(c); return NULL; }
+static void cio_setup_easy(CurlIO *c) {
     curl_easy_setopt(c->easy, CURLOPT_URL, c->url);
     curl_easy_setopt(c->easy, CURLOPT_USERAGENT, "Nplay-Switch/1.0");
     curl_easy_setopt(c->easy, CURLOPT_FOLLOWLOCATION, 1L);
@@ -880,6 +858,41 @@ static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_siz
     // Nao use o CURLSH 7.69 da UI: compartilhar conexoes entre produtores
     // simultaneos causou crash no hardware.
     net_configure_curl_isolated(c->easy);
+}
+
+static AVIOContext *curl_avio_open_profile(const char *url, int64_t expected_size,
+                                           size_t block_size, size_t ring_cap,
+                                           int avio_buffer_size, const char *profile,
+                                           int synchronous) {
+    if (!url || !url[0]) return NULL;
+    CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
+    if (!c) return NULL;
+    size_t url_len = strlen(url);
+    c->url = (char *)malloc(url_len + 1);
+    if (!c->url) { free_cio(c); return NULL; }
+    memcpy(c->url, url, url_len + 1);
+    c->size = expected_size > 0 ? expected_size : -1;
+    c->resource_id = SDL_AtomicAdd(&g_resource_sequence, 1) + 1;
+    snprintf(c->profile, sizeof(c->profile), "%s", profile ? profile : "file");
+    c->response_length = c->range_total = -1;
+    c->seek_req = -1; c->base = 0; c->running = 1;
+    c->block_size = block_size;
+    c->synchronous = synchronous;
+    c->streaming = profile && !strcmp(profile, "media");
+    c->opened_tick = SDL_GetTicks();
+    c->cancel_flag = t_cancel_flag;
+    c->pooled = profile && (!strcmp(profile, "media") || !strcmp(profile, "meta"));
+    c->ring_cap = synchronous ? 0 : ring_cap;
+    c->tmp_cap = synchronous ? HLS_META_INITIAL : c->streaming ? 0 : block_size;
+    c->tmp_limit = synchronous ? HLS_META_MAX : c->streaming ? 0 : block_size;
+    c->ring = synchronous ? NULL : (unsigned char *)malloc(c->ring_cap);
+    c->tmp  = c->tmp_cap ? (unsigned char *)malloc(c->tmp_cap) : NULL;
+    c->easy = c->pooled ? hls_easy_take() : curl_easy_init();
+    c->mtx = SDL_CreateMutex();
+    c->c_data = SDL_CreateCond();
+    c->c_space = SDL_CreateCond();
+    if ((!synchronous && !c->ring) || (c->tmp_cap && !c->tmp) || !c->easy || !c->mtx || !c->c_data || !c->c_space) { free_cio(c); return NULL; }
+    cio_setup_easy(c);
 
     unsigned char *avio_buf = (unsigned char *)av_malloc((size_t)avio_buffer_size);
     if (!avio_buf) { free_cio(c); return NULL; }
@@ -1024,6 +1037,157 @@ int nplay_curl_avio_metadata(AVIOContext *ctx, const unsigned char **data,
         snprintf(effective_url, effective_url_size, "%s",
                  c->effective_url[0] ? c->effective_url : c->url);
     return 1;
+}
+
+int nplay_curl_avio_replace_metadata(AVIOContext *ctx, char *body, size_t len) {
+    if (!ctx || !ctx->opaque || !body || len == 0) return 0;
+    CurlIO *c = (CurlIO *)ctx->opaque;
+    // Somente antes de o demuxer ler: o buffer do AVIO ainda esta vazio.
+    if (!c->static_data || c->static_pos != 0 || ctx->pos != 0 ||
+        ctx->buf_ptr != ctx->buf_end) return 0;
+    free(c->ring);
+    c->ring = (unsigned char *)body;
+    c->ring_cap = len + 1;
+    c->static_len = len;
+    c->size = (int64_t)len;
+    return 1;
+}
+
+// ---- Busca paralela de metadados HLS ------------------------------------
+// O demuxer HLS do FFmpeg pede master, playlists e secoes init uma depois da
+// outra, cada uma pagando uma ida e volta inteira. Medido no host com Wi-Fi
+// ruim (500 ms): 4,9 s dos 5,7 s ate o primeiro quadro eram essas esperas.
+// Antes de avformat_open_input, estes recursos pequenos sao baixados em
+// paralelo para o cache curto; o FFmpeg continua pedindo-os na mesma ordem,
+// mas cada pedido sai do cache sem rede. Os handles voltam aquecidos ao pool.
+#define HLS_PREFETCH_WORKERS 4
+#define HLS_PREFETCH_MAX 16
+// Cada onda cabe junto com o master nos 12 slots do cache sem expulsar nada
+// que a propria abertura ainda vai pedir.
+#define HLS_PREFETCH_WAVE 5
+typedef struct {
+    char (*urls)[HLS_MANIFEST_URI_MAX];
+    int count;
+    SDL_atomic_t next, cancel, stored, failed, active;
+} PrefetchJob;
+
+static int meta_cache_has(const char *url) {
+    int found = 0;
+    Uint32 now = SDL_GetTicks();
+    SDL_AtomicLock(&g_meta_cache_lock);
+    for (int i = 0; i < HLS_META_CACHE_SLOTS && !found; i++) {
+        HlsMetaCacheEntry *entry = &g_meta_cache[i];
+        found = entry->url && !strcmp(entry->url, url) &&
+                now - entry->stored <= HLS_META_CACHE_TTL_MS;
+    }
+    SDL_AtomicUnlock(&g_meta_cache_lock);
+    return found;
+}
+
+static int prefetch_one(const char *url, SDL_atomic_t *cancel) {
+    CurlIO *c = (CurlIO *)calloc(1, sizeof(CurlIO));
+    if (!c) return -1;
+    c->url = strdup(url);
+    c->synchronous = 1;
+    c->running = 1;
+    c->seek_req = -1;
+    c->size = c->response_length = c->range_total = -1;
+    c->first_http_logged = 1; // erros continuam no trace; sucesso nao grava SD
+    c->cancel_flag = cancel;
+    c->tmp_cap = HLS_META_INITIAL;
+    c->tmp_limit = HLS_META_MAX;
+    c->tmp = (unsigned char *)malloc(c->tmp_cap);
+    c->easy = hls_easy_take();
+    snprintf(c->profile, sizeof(c->profile), "pre");
+    int rc = -1;
+    if (c->url && c->tmp && c->easy) {
+        cio_setup_easy(c);
+        int got = fetch_block(c, 0);
+        if (got > 0 && c->fetch_complete && (c->size <= 0 || c->size == got)) {
+            meta_cache_put(c->url, c->effective_url, c->tmp, (size_t)got);
+            rc = 0;
+        }
+    }
+    // Um handle que falhou pode estar com a conexao quebrada: nao volta ao pool.
+    if (c->easy) {
+        if (rc == 0) hls_easy_return(c->easy);
+        else curl_easy_cleanup(c->easy);
+    }
+    free(c->url); free(c->tmp); free(c);
+    return rc;
+}
+
+static int prefetch_worker(void *arg) {
+    PrefetchJob *job = (PrefetchJob *)arg;
+    for (;;) {
+        int i = SDL_AtomicAdd(&job->next, 1);
+        if (i >= job->count || SDL_AtomicGet(&job->cancel)) break;
+        if (meta_cache_has(job->urls[i])) continue;
+        if (prefetch_one(job->urls[i], &job->cancel) == 0) SDL_AtomicAdd(&job->stored, 1);
+        else SDL_AtomicAdd(&job->failed, 1);
+    }
+    SDL_AtomicAdd(&job->active, -1);
+    return 0;
+}
+
+// Uma onda de downloads paralelos. poll roda na thread chamadora (render),
+// que continua desenhando e lendo B; retornar !=0 cancela a onda.
+static int prefetch_wave(PrefetchJob *job, int (*poll)(void *), void *userdata) {
+    if (job->count <= 0) return 0;
+    int workers = job->count < HLS_PREFETCH_WORKERS ? job->count : HLS_PREFETCH_WORKERS;
+    SDL_Thread *threads[HLS_PREFETCH_WORKERS] = {0};
+    SDL_AtomicSet(&job->active, workers);
+    for (int i = 0; i < workers; i++) {
+        threads[i] = SDL_CreateThread(prefetch_worker, "hls-prefetch", job);
+        if (!threads[i]) SDL_AtomicAdd(&job->active, -1);
+    }
+    while (SDL_AtomicGet(&job->active) > 0) {
+        if (!SDL_AtomicGet(&job->cancel) && poll && poll(userdata))
+            SDL_AtomicSet(&job->cancel, 1);
+        SDL_Delay(4);
+    }
+    for (int i = 0; i < workers; i++) if (threads[i]) SDL_WaitThread(threads[i], NULL);
+    return SDL_AtomicGet(&job->cancel) ? -1 : 0;
+}
+
+int nplay_curl_avio_hls_prefetch(const char *master_url, const char *body, size_t len,
+                                 int (*poll)(void *), void *userdata) {
+    if (!master_url || !body || len == 0) return 0;
+    Uint32 started = SDL_GetTicks();
+    char (*raw)[HLS_MANIFEST_URI_MAX] = malloc(sizeof(*raw) * HLS_PREFETCH_MAX);
+    char (*urls)[HLS_MANIFEST_URI_MAX] = malloc(sizeof(*urls) * HLS_PREFETCH_MAX);
+    if (!raw || !urls) { free(raw); free(urls); return 0; }
+    int found = hls_manifest_playlist_uris(body, len, raw, HLS_PREFETCH_MAX), count = 0;
+    for (int i = 0; i < found && count < HLS_PREFETCH_WAVE; i++)
+        if (hls_manifest_resolve_like_ffmpeg(master_url, raw[i], urls[count], HLS_MANIFEST_URI_MAX))
+            count++;
+    PrefetchJob playlists = { .urls = urls, .count = count };
+    int rc = prefetch_wave(&playlists, poll, userdata);
+    // Segunda onda: secoes init (EXT-X-MAP) das playlists ja em cache. A base
+    // e a URL da playlist como o FFmpeg a pediu, sem query herdada.
+    int inits = 0;
+    for (int i = 0; rc == 0 && i < count && inits < HLS_PREFETCH_WAVE; i++) {
+        unsigned char *data = NULL; size_t data_len = 0;
+        char effective[HLS_MANIFEST_URI_MAX];
+        if (!meta_cache_get(urls[i], &data, &data_len, effective, sizeof(effective))) continue;
+        char map[HLS_MANIFEST_URI_MAX];
+        if (hls_media_playlist_map_uri((const char *)data, data_len, map, sizeof(map)) &&
+            hls_manifest_resolve_like_ffmpeg(urls[i], map, raw[inits], HLS_MANIFEST_URI_MAX)) {
+            int duplicate = 0;
+            for (int k = 0; k < inits && !duplicate; k++) duplicate = !strcmp(raw[k], raw[inits]);
+            if (!duplicate) inits++;
+        }
+        free(data);
+    }
+    PrefetchJob sections = { .urls = raw, .count = inits };
+    if (rc == 0) rc = prefetch_wave(&sections, poll, userdata);
+    int stored = SDL_AtomicGet(&playlists.stored) + SDL_AtomicGet(&sections.stored);
+    diag_player_event("avio", "meta-prefetch", "playlists=%d inits=%d stored=%d failed=%d cancel=%d ms=%u",
+                      count, inits, stored,
+                      SDL_AtomicGet(&playlists.failed) + SDL_AtomicGet(&sections.failed),
+                      rc < 0, SDL_GetTicks() - started);
+    free(raw); free(urls);
+    return rc < 0 ? -1 : stored;
 }
 
 void nplay_curl_avio_stats(int *active_contexts, int *reserved_kb) {

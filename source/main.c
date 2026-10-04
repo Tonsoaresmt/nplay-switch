@@ -814,11 +814,18 @@ static void playback_memory_enter(void) {
     }
 }
 
+// >0 enquanto play_episode_sequence encadeia episodios. Entre um episodio e o
+// proximo nao ha catalogo na tela; recarregar a Home ali disputava rede com a
+// abertura do episodio seguinte e deixava o JSON inteiro na memoria durante a
+// reproducao (so e aplicado ao voltar ao loop principal).
+static int g_playback_chain = 0;
+
 static void playback_memory_leave(void) {
     cover_resume_after_playback();
     // O player descarta as landings para liberar memoria ao HLS. Recarregue a
     // aba atual assim que ele termina, enquanto o detalhe ainda esta aberto:
     // esperar o usuario apertar B produzia uma tela vazia de "Carregando".
+    if (g_playback_chain > 0) return;
     if (g_tab <= TAB_SAGAS && !g_land) load_landing(g_tab);
 }
 
@@ -1039,16 +1046,35 @@ typedef struct {
     PlaybackSource source;
     char error[192];
     SDL_atomic_t done, cancel;
+    // Progresso salvo pedido junto com /stream: antes era uma segunda ida e
+    // volta a API so depois da fonte resolvida (e outra tela de espera).
+    int want_progress, progress_fetched;
+    SDL_atomic_t progress_cancel; // B ou falha de /stream: nao esperar o progresso
+    cJSON *progress;
 } ResolvePoll;
+
+static int resolve_progress_thread(void *userdata) {
+    ResolvePoll *poll = (ResolvePoll *)userdata;
+    char path[96]; snprintf(path, sizeof(path), "/api/sync/progress/%d", poll->item_id);
+    poll->progress = api_get_timeout_cancel(path, 2L, 5L, &poll->progress_cancel);
+    poll->progress_fetched = !SDL_AtomicGet(&poll->progress_cancel);
+    return 0;
+}
 
 static int resolve_open_thread(void *userdata) {
     ResolvePoll *poll = (ResolvePoll *)userdata;
+    SDL_Thread *progress = poll->want_progress
+        ? SDL_CreateThread(resolve_progress_thread, "resolve-progress", poll) : NULL;
     poll->rc = api_resolve_playback_cancel(poll->item_id, NULL,
                                             &poll->cancel, &poll->source);
     if (poll->rc != 0) {
         poll->access_expired = api_last_error_access_expired();
         snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
+        SDL_AtomicSet(&poll->progress_cancel, 1); // erro aparece sem esperar
     }
+    // Sem a thread auxiliar (falta de memoria), o chamador pede o progresso
+    // depois, como antes. Ela usa o mesmo cancelamento e termina antes de done.
+    if (progress) SDL_WaitThread(progress, NULL);
     SDL_AtomicSet(&poll->done, 1);
     return 0;
 }
@@ -1105,8 +1131,11 @@ static int prompt_sequential_restart(const char *title) {
 
 // A resolucao da API pode incluir uma fonte externa. Renderiza a espera e
 // permite cancelar sem deixar a tela de abertura congelada por ate 20 s.
-static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out) {
-    ResolvePoll poll = { .item_id = itemId };
+static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out,
+                                       cJSON **progress_out, int *progress_fetched) {
+    ResolvePoll poll = { .item_id = itemId, .want_progress = progress_out != NULL };
+    if (progress_out) *progress_out = NULL;
+    if (progress_fetched) *progress_fetched = 0;
     SDL_Thread *thread = SDL_CreateThread(resolve_open_thread, "resolve-play", &poll);
     if (!thread) { toast("Nao foi possivel abrir a fonte"); return -1; }
     int cancelled = 0;
@@ -1122,7 +1151,11 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
             if (event.type == SDL_FINGERDOWN && event.tfinger.x > 0.80f &&
                 event.tfinger.y < 0.15f) { cancelled = 1; break; }
         }
-        if (cancelled) { SDL_AtomicSet(&poll.cancel, 1); break; }
+        if (cancelled) {
+            SDL_AtomicSet(&poll.cancel, 1);
+            SDL_AtomicSet(&poll.progress_cancel, 1);
+            break;
+        }
         SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
         SDL_RenderClear(gRen);
         ui_header("NPLAY", "Abrindo video", "B Cancelar");
@@ -1134,8 +1167,12 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
     }
     SDL_WaitThread(thread, NULL);
     appletSetMediaPlaybackState(false);
-    if (!g_running || cancelled || SDL_AtomicGet(&poll.cancel)) return -2;
+    if (!g_running || cancelled || SDL_AtomicGet(&poll.cancel)) {
+        cJSON_Delete(poll.progress);
+        return -2;
+    }
     if (poll.rc != 0) {
+        cJSON_Delete(poll.progress);
         if (poll.access_expired) {
             access_expired_to_login();
             return -1;
@@ -1144,9 +1181,17 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
         return -1;
     }
     *out = poll.source;
+    if (progress_out) *progress_out = poll.progress;
+    else cJSON_Delete(poll.progress);
+    if (progress_fetched) *progress_fetched = poll.progress_fetched;
     return 0;
 }
 
+#define STABLE_TEXT 256
+static int resolve_and_play_resolved(int itemId, char *stable_title, char *stable_subtitle,
+                                     char *stable_overview, char *stable_next, int has_next,
+                                     PlaybackSource *source, cJSON **prefetched_progress,
+                                     int progress_fetched);
 // Resolve a fonte e reproduz usando a maquina de estados e PlayerRequest.
 int resolve_and_play_details(int itemId, const char *title, const char *subtitle,
                              const char *overview, const char *next_title, int has_next) {
@@ -1157,14 +1202,29 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
     snprintf(stable_overview, sizeof(stable_overview), "%s", overview ? overview : "");
     snprintf(stable_next, sizeof(stable_next), "%s", next_title ? next_title : "");
     PlaybackSource src = {0};
-    int resolved = resolve_open_with_animation(itemId, stable_title, &src);
+    cJSON *prefetched_progress = NULL;
+    int progress_fetched = 0;
+    int resolved = resolve_open_with_animation(itemId, stable_title, &src,
+                                               &prefetched_progress, &progress_fetched);
     if (resolved == -2) return 0;
     if (resolved < 0) return 0;
+    int rc = resolve_and_play_resolved(itemId, stable_title, stable_subtitle,
+                                       stable_overview, stable_next, has_next, &src,
+                                       &prefetched_progress, progress_fetched);
+    cJSON_Delete(prefetched_progress);
+    return rc;
+}
+
+static int resolve_and_play_resolved(int itemId, char *stable_title, char *stable_subtitle,
+                                     char *stable_overview, char *stable_next, int has_next,
+                                     PlaybackSource *source, cJSON **prefetched_progress,
+                                     int progress_fetched) {
+    PlaybackSource src = *source;
     // Itens de episodio abertos pela Home/Historico nem sempre carregam antes o
     // detalhe completo da serie. A resposta de /stream ainda conhece temporada
     // e episodio; use-a como ultimo fallback para o HUD nao ficar vazio.
     if (!stable_subtitle[0] && (src.season > 0 || src.episode > 0))
-        snprintf(stable_subtitle, sizeof(stable_subtitle), "T%d E%d",
+        snprintf(stable_subtitle, STABLE_TEXT, "T%d E%d",
                  src.season > 0 ? src.season : 1, src.episode);
     
     int rc = 0;
@@ -1198,10 +1258,15 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
     } else if (src.play_url[0]) {
         double start = 0;
         int completed = 0;
-        char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
-        int cancelled = 0;
-        cJSON *pr = ui_request_get(gRen, p, &g_running, &cancelled);
-        if (cancelled) return 0;
+        cJSON *pr = *prefetched_progress;
+        *prefetched_progress = NULL;
+        if (!progress_fetched) {
+            // Fallback raro: a thread paralela nao pode ser criada.
+            char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
+            int cancelled = 0;
+            pr = ui_request_get(gRen, p, &g_running, &cancelled);
+            if (cancelled) return 0;
+        }
         if (pr) {
             cJSON *prog = cJSON_GetObjectItem(pr, "progress");
             cJSON *ps = prog ? cJSON_GetObjectItem(prog, "position_seconds") : NULL;
@@ -3910,9 +3975,8 @@ static void play_episodes_clear(void) {
     g_play_episode_current = -1;
 }
 
-static void play_episode_sequence(int item_id, int series_id, const char *title,
-                                  cJSON *episode_hint) {
-    if (item_id <= 0) return;
+static void play_episode_sequence_run(int item_id, int series_id, const char *title,
+                                      cJSON *episode_hint) {
     char series_title[256];
     char fallback_title[256];
     snprintf(fallback_title, sizeof(fallback_title), "%s", title && title[0] ? title : "Serie");
@@ -4015,6 +4079,15 @@ static void play_episode_sequence(int item_id, int series_id, const char *title,
         episode_hint = NULL;
         matching_series = g_ser && ser_obj() && jint(ser_obj(), "id") == series_id;
     }
+}
+static void play_episode_sequence(int item_id, int series_id, const char *title,
+                                  cJSON *episode_hint) {
+    if (item_id <= 0) return;
+    g_playback_chain++;
+    play_episode_sequence_run(item_id, series_id, title, episode_hint);
+    g_playback_chain--;
+    // Fim da sequencia: so agora a aba visivel volta a carregar o catalogo.
+    if (g_playback_chain == 0) playback_memory_leave();
 }
 static void input_series(int b) {
     if (g_dlmenu) { input_dlmenu(b); return; }   // menu "baixar episodios" aberto

@@ -1758,3 +1758,30 @@ O foco e otimizar o homebrew Nplay para Nintendo Switch sem trocar a arquitetura
   e pendencias de hardware em `docs/PLAYER_STABILITY_0_12_45.md`.
 - Pendente no Switch: saltos e Continuar em R2, troca de audio, anime torrent por
   10 min, painel Episodios. Abertura inicial em Wi-Fi ruim ainda ~6 s.
+
+## Abertura paralela, audio unico e legenda assincrona — 0.12.46, 04/10/2026
+
+- Medido com `tools/host_player/` antes de mudar: pausa ja era instantanea; o
+  tempo estava na abertura (requisicoes pequenas em fila, todas as faixas de
+  audio abertas, legenda baixada antes do 1o quadro). Detalhes, A/B e roteiro
+  de hardware em `docs/PLAYER_SPEED_0_12_46.md`.
+- `nplay_curl_avio_hls_prefetch`: playlists (variantes primeiro, todos os
+  audios) e inits em ate 4 conexoes para o cache curto antes do FFmpeg. Resolver
+  como o FFmpeg 7.1: base = URL original (nao a do 302) e SEM herdar query
+  (`hls_manifest_resolve_like_ffmpeg`); conferido no host. Ondas limitadas a 5
+  para caber nos 12 slots do cache.
+- `player_hls_choose_audio` aplica a politica sobre o master e entrega ao
+  demuxer um master com uma unica rendition (`hls_manifest_keep_audio`). O
+  painel usa `naud_ui`/`acur_ui` (lista do master); `acur`/`aidxs` continuam
+  sendo as AVStreams reais. So filtra com 2+ audios com URI no mesmo GROUP-ID.
+- Legenda do master: `SubtitleFetch` em segundo plano na abertura e na troca;
+  a faixa anterior fica ate a nova chegar. Threads auxiliares usam
+  `nplay_curl_avio_set_thread_cancel` (nunca o callback de B da thread de render).
+- `g_playback_chain`: Home recarrega uma vez ao fim da sequencia de episodios.
+  Progresso salvo e pedido em paralelo com `/stream` (`resolve_progress_thread`).
+- A/B (Legendado): 1o quadro rede boa 2,7–3,0 → 1,25–1,5 s; Wi-Fi ruim
+  6,3–7,0 → 2,7–3,6 s; troca de legenda deixa de congelar (~1,1 → ~0,1 s).
+  Suite 18/18 nas duas redes, testes C/Node e 153 assercoes; ARM64 `-Werror`.
+- Atencao: `make clean` apaga `build/` inteiro, inclusive `build/host_player`.
+- Pendente no Switch: abertura Dublado/Legendado, trocas Y/X, maratona 3+
+  episodios; no trace, `meta-prefetch`, `audio-filter`, `async=1`.

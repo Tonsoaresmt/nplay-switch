@@ -6,6 +6,7 @@
 #define NPLAY_CURL_AVIO_H
 
 #include <libavformat/avio.h>
+#include <SDL.h>
 
 // Cria um AVIOContext que le a URL via libcurl. Retorna NULL em falha.
 // Passe o resultado em fmt->pb + AVFMT_FLAG_CUSTOM_IO antes de avformat_open_input.
@@ -21,6 +22,21 @@ AVIOContext *nplay_curl_avio_open_hls(const char *url);
 // Le somente o manifesto que ja foi baixado pelo AVIO sincrono. Nao faz rede.
 // Retorna 1 quando o root anuncia renditions EXT-X-MEDIA e preenche as contagens.
 int nplay_curl_avio_hls_media_counts(AVIOContext *ctx, int *audio, int *subtitles);
+
+// Flag de cancelamento da thread atual (NULL desliga). Recursos abertos nela
+// abortam a transferencia quando a flag vira 1. Para threads auxiliares.
+void nplay_curl_avio_set_thread_cancel(SDL_atomic_t *cancel);
+
+// Troca o manifesto congelado antes de o demuxer le-lo (toma posse de body,
+// alocado com malloc). Usado para abrir so a rendition de audio escolhida.
+int nplay_curl_avio_replace_metadata(AVIOContext *ctx, char *body, size_t len);
+
+// Baixa em paralelo (ate 4 conexoes) as playlists que o master referencia e
+// depois suas secoes init, deixando-as no cache curto que o io_open consulta.
+// poll roda na thread chamadora a cada poucos ms (desenho/B); retornar !=0
+// cancela. Retorna quantos recursos entraram no cache ou -1 se cancelado.
+int nplay_curl_avio_hls_prefetch(const char *master_url, const char *body, size_t len,
+                                 int (*poll)(void *), void *userdata);
 
 // Acesso somente-leitura ao manifesto/arquivo textual congelado pelo perfil
 // sincrono. O ponteiro permanece valido ate nplay_curl_avio_close(ctx).

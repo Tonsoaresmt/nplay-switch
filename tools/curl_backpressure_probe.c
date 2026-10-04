@@ -15,6 +15,7 @@ typedef struct { int value; } SDL_atomic_t;
 static Uint32 SDL_GetTicks(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (Uint32)((uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000); }
 static int startup_deadline_expired(void) { return 0; }
 static int abort_requested(void) { return 0; }
+static int SDL_AtomicGet(SDL_atomic_t *a) { return a->value; }
 #include "curl_avio_progress_function.inc"
 static int first = 1;
 static size_t received;
