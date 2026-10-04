@@ -228,7 +228,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Legenda desejada perdeu retry, cancelamento ou
 if ($LASTEXITCODE -ne 0) { throw 'Episodio concluido tentou retomar no final ou perdeu retomada parcial.' }
 & node tools/test_host_suite_guards.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Suite do player real aceitou crash, timeout ou log vazio como sucesso.' }
-& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_store.c tools/test_subtitle_edges.c -o build/test_subtitle_edges.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c source/subtitle_store.c tools/test_subtitle_edges.c -lm -o build/test_subtitle_edges.exe
 if ($LASTEXITCODE -ne 0) { throw 'Regressoes de legenda falharam ao compilar.' }
 & .\build\test_subtitle_edges.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fala curta ou cue estendido desapareceu.' }
@@ -285,10 +285,20 @@ if ($LASTEXITCODE -ne 0) { throw 'Parser do manifesto HLS falhou ao detectar aud
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou ao compilar.' }
 & .\build\test_subtitle_queue.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fila de legendas falhou nos cenarios de tempo e sobreposicao.' }
-& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_store.c tools/test_subtitle_store.c -o build/test_subtitle_store.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c source/subtitle_store.c tools/test_subtitle_store.c -lm -o build/test_subtitle_store.exe
 if ($LASTEXITCODE -ne 0) { throw 'Armazenamento de legendas falhou ao compilar.' }
 & .\build\test_subtitle_store.exe
 if ($LASTEXITCODE -ne 0) { throw 'Armazenamento de legendas falhou (karaoke, placas, ordem, desenho, reenvio).' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/subtitle_queue.c source/subtitle_store.c tools/test_positioned_subtitles.c -lm -o build/test_positioned_subtitles.exe
+if ($LASTEXITCODE -ne 0) { throw 'Regressao de letreiros posicionados falhou ao compilar.' }
+& .\build\test_positioned_subtitles.exe
+if ($LASTEXITCODE -ne 0) { throw 'Letreiros perderam posicoes, falas ou duracao; fila excedeu sua capacidade.' }
+& node tools/test_extract_sign_geometry.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Extracao do desenho real de letreiros falhou.' }
+& $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude -Ibuild tools/test_sign_geometry.c -o build/test_sign_geometry.exe
+if ($LASTEXITCODE -ne 0) { throw 'Geometria real dos letreiros falhou ao compilar.' }
+& .\build\test_sign_geometry.exe
+if ($LASTEXITCODE -ne 0) { throw 'Geometria dos letreiros perdeu tarjas, ancoras ou limites.' }
 & $hostGcc -std=c11 -Wall -Wextra -Werror -Iinclude source/hot_subtitles.c source/cJSON.c tools/test_hot_subtitles.c -lm -o build/test_hot_subtitles.exe
 Assert-True ($LASTEXITCODE -eq 0) 'Compilacao hot subtitles falhou.'
 & .\build\test_hot_subtitles.exe
@@ -314,6 +324,7 @@ Assert-True ($sources -match 'player_hls_choose_audio' -and $sources -match 'hls
 Assert-True ($sources -match 'subtitle_fetch_start' -and $sources -match 'subtitle_fetch_stop\(&subtitle_fetch\)') 'Legenda do master voltou a bloquear abertura/troca.'
 Assert-True ($sources -match 't_cancel_flag') 'Download de legenda em segundo plano perdeu o cancelamento.'
 Assert-True ($sources -match 'subtitle_store_add' -and $sources -match 'subtitle_session_take' -and $sources -match 'subtitle_retry_failed') 'Legenda externa voltou ao limite de 8192 cues, sem cache de sessao ou sem nova tentativa.'
+Assert-True ($sources -match 'AV_PKT_DATA_WEBVTT_SETTINGS' -and $sources -match 'subtitle_store_signs' -and $sources -match 'subtitle_queue_signs' -and $sources -match 'hud_base.signs') 'Letreiros posicionados (placas/onomatopeias) voltaram a cair no meio das falas.'
 Assert-True ($sources -notmatch 'store->count >= 8192') 'Teto antigo de 8192 cues voltou: a legenda de anime com karaoke parava no meio.'
 Assert-True ($sources -match 'stream-retry') 'Legenda progressiva do torrent perdeu a nova tentativa apos queda.'
 & $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe

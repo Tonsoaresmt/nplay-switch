@@ -70,6 +70,8 @@ function writeSubtitle(folder, language, first, second) {
     'WEBVTT', 'X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000', '',
     '00:00:01.000 --> 00:00:03.500', first, '',
     '00:00:06.000 --> 00:00:09.000', second, '',
+    '00:00:10.000 --> 00:00:11.900 position:25% line:24.6% align:center',
+    'Letreiro posicionado', '',
   ].join('\n'));
   return language;
 }
@@ -142,7 +144,21 @@ assert.match(decodedSubtitles, /00:06\.000 --> 00:09\.000/,
 assert.match(decodedSubtitles, /Legenda em portugues/,
   'texto WebVTT em portugues nao foi decodificado');
 
-console.log(`HLS PLAYER FIXTURE OK: ${streams.length} faixas, 2 cues, inicio+seek decodificados`);
+// The demuxer must deliver cue settings as packet side data, both from an
+// HLS rendition and a direct VTT. The player reads this before decoding ASS.
+// Use the selected subtitle rendition, as load_external_hls_subtitle does:
+// probing packets from the full A/V master may consume the subtitle packets
+// during stream discovery and is not the external-subtitle loading path.
+for (const path of [join(root, 'sub-pt', 'index.m3u8'), join(root, 'sub-pt', 'cues.vtt')]) {
+  const packets = JSON.parse(run(ffprobe, [
+    '-v', 'error', '-select_streams', 's:0', '-show_packets', '-of', 'json', path,
+  ], 'WebVTT settings side data')).packets || [];
+  const positioned = packets.find(packet =>
+    packet.side_data_list?.some(data => data.side_data_type === 'WebVTT Settings'));
+  assert.ok(positioned, 'settings de posicao nao chegaram como side data do packet');
+  assert.equal(Number(positioned.pts_time), 10, 'letreiro perdeu o timestamp');
+}
+console.log(`HLS PLAYER FIXTURE OK: ${streams.length} faixas, 3 cues, inicio+seek e settings em HLS/VTT direto`);
 
 // Direct VTT used by remux: no HLS demuxer, preserve overlapping intervals.
 function directVttPackets(text) {

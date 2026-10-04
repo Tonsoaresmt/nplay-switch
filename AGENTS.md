@@ -1,5 +1,39 @@
 # Continuidade para agentes
 
+## Integracao 0.12.49 — 04/10/2026
+
+- Checkout ativo: `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch
+  `codex/switch-player-hardening`. Integra ba7d46d e 2b8d0d0 sobre ca5a7a8;
+  as duas branches 0.12.48 eram paralelas, nao substituir uma pela outra.
+- Letreiros posicionados mantem coordenadas do video e ficam fora das falas.
+  Dedup exige texto+posicao+ancoras. Placa e fala iguais nao se apagam.
+- Fila continua limitada a 32 cues, com ate oito letreiros; letreiros nunca
+  expulsam falas. Extensao fora de ordem mantem max_short atualizado.
+- Regressoes novas obrigatorias: test_positioned_subtitles (11 casos, rajada
+  de 10 mil), geometria extraida de draw_signs (6 casos) e side data real
+  WebVTT na rendition HLS/VTT direto. Fixtures CLI usam FFmpeg 8.1.1;
+  SDK/NRO usa 7.1. Nao confundir esses testes com GPU/console reais.
+- Build completo ARM64 -Werror e validador completo sem SkipMediaFixtures
+  passaram; NRO 24241999 bytes, SHA-256 registrado no relatorio.
+  Nao publicar/promover como validado
+  no console antes do teste fisico. Sem deploy/reprocessamento do backend.
+- Relatorio e comandos: docs/PLAYER_INTEGRATION_0_12_49.md. Pacotes antigos
+  sem coordenadas nao ganham posicao apenas atualizando o cliente.
+
+## Letreiros posicionados — 0.12.48 (04/10/2026)
+
+- Placas/onomatopeias do fansub caiam embaixo misturadas com as falas: o
+  backend usava `-c:s webvtt`, que perde `\pos/\an`. Backend (branch
+  `claude/nplay-tv-switch-review-n4drzv` do Nplay) converte ASS -> WebVTT com
+  `position:X% line:Y% align:A`; web/TV e Switch desenham no lugar.
+- NAO emitir `line:..%,end` nem `position:..%,center`: o Chromium descarta a
+  configuracao inteira. So `line:` em % marca letreiro (hls.js poe position=50
+  em cue comum).
+- Switch le `AV_PKT_DATA_WEBVTT_SETTINGS`; `SubtitleStoreCue` tem 20 bytes;
+  falas e letreiros saem separados (`subtitle_store_signs`, `draw_signs`).
+- Pacotes R2 antigos so ganham posicao com a legenda refeita; sem lote em
+  massa. Ver `docs/SUBTITLE_SIGNS_0_12_48.md`. Hardware nao testado.
+
 ## Rodada 0.12.14 (25/09/2026)
 
 - Auditoria adicional do ciclo Home/Continuar, Historico, detalhe e Biblioteca.

@@ -4,6 +4,7 @@
 // do console com o mesmo codigo.
 #pragma once
 #include <SDL.h>
+#include "subtitle_queue.h"
 
 #define PUI_W 1280
 #define PUI_H 720
@@ -71,6 +72,10 @@ typedef struct {
 
     // Legenda do video
     const char *subtitle_text;
+    // Letreiros posicionados (placas/onomatopeias do fansub) e o retangulo onde
+    // o video e desenhado (sem as tarjas). NULL/0 = sem letreiros.
+    const SubtitleSigns *signs;
+    int video_x, video_y, video_w, video_h;
 
     // Painel de audio e legendas
     int panel_open;

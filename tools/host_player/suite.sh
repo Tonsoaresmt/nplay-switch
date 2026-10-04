@@ -73,6 +73,10 @@ check subkara "legenda com karaoke pesado: fala depois de 8192 eventos" "SUB pos
 check subkara "legenda carregada sem limite de eventos" "subtitle/loaded cues=[0-9]{5}"
 run subkara2 START=30 AUDIO_PREF=1 SCRIPT="7000:MINUS"
 check subkara2 "karaoke nao vira lixo na tela (so a fala)" "!SUB pos=.*Fala [0-9]+ \\([0-9]+s\\) / "
+run subsign START=148 AUDIO_PREF=1 SCRIPT="9000:MINUS"
+check subsign "letreiro posicionado desenhado no lugar (25%, 24.6%)" "SIGN pos=.*\\[nhac nhac @25\\.0,24\\.6 a1\\]"
+check subsign "letreiro nao se mistura com a fala" "!SUB pos=.*nhac"
+check subsign "camadas repetidas viram um letreiro" "!SIGN pos=.*nhac nhac.*nhac nhac"
 URL=http://127.0.0.1:8766/r2sub/index.m3u8 CT=m3u8
 run subretry START=150 AUDIO_PREF=1 SCRIPT="12000:MINUS"
 check subretry "legenda R2 volta depois de falha de rede" "subtitle/retry choice=1"
@@ -83,6 +87,8 @@ URL=http://127.0.0.1:8765/api/media/hot/$SID/video CT=mp4
 run hotretry EXTRA_CA=$WORK/test.crt BASE_URL=https://127.0.0.1:8444 DELIVERY=hot SEQUENTIAL=1 HOT_SID=$SID AUDIO_PREF=1 SCRIPT="14000:MINUS"
 check hotretry "legenda do torrent volta depois de falha" "subtitle/stream-retry"
 check hotretry "fala do torrent aparece" "SUB pos=.*Fala"
+check hotretry "letreiro do torrent no canto (80%, 10%)" "SIGN pos=.*\\[BLAM @80\\.0,10\\.0 a2\\]"
+check hotretry "letreiro do torrent fora da fala" "!SUB pos=.*BLAM"
 for f in suite_*.log; do echo "$f: $(grep -h SUMMARY "$f" | sed 's/SUMMARY //')"; done
 pkill -f "^python3 .*latency_[s]erver.py --root $F " 2>/dev/null
 exit $FAILS

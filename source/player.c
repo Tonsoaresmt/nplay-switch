@@ -543,7 +543,8 @@ static void draw_hud(SDL_Renderer *ren, const PlayerHud *base,
 
 static void draw_subtitle_overlay(SDL_Renderer *ren, const PlayerHud *base,
                                   const char *subtitle_text) {
-    if ((!subtitle_text || !subtitle_text[0]) && base->next_card_alpha <= 0.01f) return;
+    if ((!subtitle_text || !subtitle_text[0]) && base->next_card_alpha <= 0.01f &&
+        (!base->signs || base->signs->count == 0)) return;
     PlayerHud hud = *base;
     hud.hud_alpha = 0;
     hud.pause_info_alpha = 0;
@@ -748,9 +749,23 @@ static void external_subtitle_clear(ExternalSubtitleStore *store) {
 }
 
 static int external_subtitle_add(ExternalSubtitleStore *store, double start,
-                                 double end, const char *text) {
+                                 double end, const char *text,
+                                 const SubtitlePlacement *at) {
     if (!store) return 0;
-    return subtitle_store_add(&store->cues, start, end, text);
+    return subtitle_store_add_at(&store->cues, start, end, text, at);
+}
+
+// Letreiros do quadro atual (placas/onomatopeias posicionadas). Preenchido por
+// active_subtitle_text junto com a fala e lido pelo HUD no mesmo quadro.
+static SubtitleSigns g_active_signs;
+
+// `position:X% line:Y% align:A` do cue WebVTT, que o demuxer do FFmpeg entrega
+// como side data do pacote (o decoder webvtt->ass descarta a posicao).
+static void packet_subtitle_placement(const AVPacket *packet, SubtitlePlacement *at) {
+    size_t size = 0;
+    const uint8_t *settings = packet
+        ? av_packet_get_side_data(packet, AV_PKT_DATA_WEBVTT_SETTINGS, &size) : NULL;
+    subtitle_settings_parse((const char *)settings, settings ? size : 0, at);
 }
 
 static int external_subtitle_count(const ExternalSubtitleStore *store) {
@@ -761,9 +776,13 @@ static const char *external_subtitle_text(ExternalSubtitleStore *store,
                                           double position) {
     if (!store) return "";
     ProgressiveSubtitle *progressive = store->progressive;
-    if (!progressive) return subtitle_store_text(&store->cues, position);
-    // A thread do torrent acrescenta cues; copie o texto ainda sob o mutex.
+    if (!progressive) {
+        subtitle_store_signs(&store->cues, position, &g_active_signs);
+        return subtitle_store_text(&store->cues, position);
+    }
+    // A thread do torrent acrescenta cues; copie texto e letreiros sob o mutex.
     SDL_LockMutex(progressive->mutex);
+    subtitle_store_signs(&progressive->store.cues, position, &g_active_signs);
     const char *text = subtitle_store_text(&progressive->store.cues, position);
     snprintf(store->cues.composed, sizeof(store->cues.composed), "%s", text);
     SDL_UnlockMutex(progressive->mutex);
@@ -774,7 +793,9 @@ static const char *active_subtitle_text(int selected, int external,
                                         SubtitleQueue *queue,
                                         ExternalSubtitleStore *store,
                                         double position) {
+    g_active_signs.count = 0;
     if (selected < 0) return "";
+    if (!external) subtitle_queue_signs(queue, position, &g_active_signs);
     return external ? external_subtitle_text(store, position)
                     : subtitle_queue_text(queue, position);
 }
@@ -899,7 +920,9 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
                 subtitle_cue_times(decoded, packet_pts, packet_duration,
                                    sub.start_display_time, sub.end_display_time,
                                    0, &start, &end);
-                if (text[0] && !external_subtitle_add(&loaded, start, end, text)) {
+                SubtitlePlacement at;
+                packet_subtitle_placement(packet, &at);
+                if (text[0] && !external_subtitle_add(&loaded, start, end, text, &at)) {
                     diag_player_event("subtitle", "truncated", "cues=%d",
                                       external_subtitle_count(&loaded));
                     rc = AVERROR(ENOMEM);
@@ -991,8 +1014,9 @@ static int progressive_subtitle_block(void *opaque, const char *block, size_t si
     int ok = 1;
     double cue_start = 0, cue_end = 0;
     const char *cue_text = NULL;
-    for (int i = 0; subtitle_store_get(&decoded.cues, i, &cue_start, &cue_end, &cue_text); i++) {
-        if (!external_subtitle_add(&stream->store, cue_start, cue_end, cue_text)) { ok = 0; break; }
+    SubtitlePlacement cue_at;
+    for (int i = 0; subtitle_store_get(&decoded.cues, i, &cue_start, &cue_end, &cue_text, &cue_at); i++) {
+        if (!external_subtitle_add(&stream->store, cue_start, cue_end, cue_text, &cue_at)) { ok = 0; break; }
     }
     SDL_UnlockMutex(stream->mutex);
     external_subtitle_clear(&decoded);
@@ -2479,6 +2503,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_Rect dst;
     if (ar > dar) { dst.w = dw; dst.h = (int)(dw / ar); } else { dst.h = dh; dst.w = (int)(dh * ar); }
     dst.x = (dw - dst.w) / 2; dst.y = (dh - dst.h) / 2;
+    // Letreiros sao posicionados em % do quadro real, nao das tarjas.
+    hud_base.video_x = dst.x; hud_base.video_y = dst.y;
+    hud_base.video_w = dst.w; hud_base.video_h = dst.h;
+    hud_base.signs = &g_active_signs;
+    g_active_signs.count = 0;   // nada da reproducao anterior
 
     pkt = av_packet_alloc();
     frame = av_frame_alloc();
@@ -3566,6 +3595,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             PlayerHud episodes_hud = hud_base;
             episodes_hud.hud_alpha = 0;
             episodes_hud.subtitle_text = NULL;
+            episodes_hud.signs = NULL;
             episodes_hud.episodes_open = 1;
             episodes_hud.episode_count = episode_count;
             episodes_hud.episode_sel = episodes_sel;
@@ -4030,7 +4060,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                    sub.start_display_time, sub.end_display_time,
                                    timeline_origin, &cue_start, &cue_end);
                 if (cue_text[0]) {
-                    subtitle_queue_push(&subtitles, cue_start, cue_end, cue_text);
+                    SubtitlePlacement cue_at;
+                    packet_subtitle_placement(pkt, &cue_at);
+                    subtitle_queue_push_at(&subtitles, cue_start, cue_end, cue_text, &cue_at);
                     subtitle_cues++;
                     if (subtitle_cues == 1)
                         diag_player_event("subtitle", "first-cue",
