@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <stdlib.h>
 
 static int line_contains(const char *line, size_t len, const char *needle) {
     size_t nlen = strlen(needle);
@@ -134,4 +135,138 @@ int hls_manifest_media_counts(const char *body, size_t len,
         line = next < end ? next + 1 : end;
     }
     return found;
+}
+
+static int line_starts(const char *line, size_t len, const char *prefix) {
+    size_t plen = strlen(prefix);
+    return len >= plen && !strncasecmp(line, prefix, plen);
+}
+
+typedef struct {
+    char *data;
+    size_t len, cap;
+    int failed;
+} TrimBuffer;
+
+static void trim_put(TrimBuffer *b, const char *text, size_t len) {
+    if (b->failed) return;
+    if (b->len + len + 2 > b->cap) {
+        size_t cap = b->cap ? b->cap : 1024;
+        while (b->len + len + 2 > cap) cap *= 2;
+        char *grown = realloc(b->data, cap);
+        if (!grown) { b->failed = 1; return; }
+        b->data = grown;
+        b->cap = cap;
+    }
+    memcpy(b->data + b->len, text, len);
+    b->len += len;
+    b->data[b->len++] = '\n';
+    b->data[b->len] = 0;
+}
+
+int hls_media_playlist_trim(const char *body, size_t len, double start,
+                            char **out, size_t *out_len,
+                            double *segment_start, double *total) {
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (segment_start) *segment_start = 0;
+    if (total) *total = 0;
+    if (!body || len == 0 || !out || !out_len) return 0;
+    // So texto HLS: secoes de init e legendas tambem passam pelo AVIO de metadados.
+    size_t bom = len >= 3 && !memcmp(body, "\xef\xbb\xbf", 3) ? 3 : 0;
+    if (len < bom + 7 || strncmp(body + bom, "#EXTM3U", 7)) return 0;
+
+    // Primeira passada: valida o formato e escolhe o segmento de corte.
+    const char *end = body + len;
+    long long media_sequence = 0, discontinuity_sequence = 0;
+    int vod = 0, segments = 0, cut = -1;
+    double elapsed = 0, cut_start = 0, pending_duration = -1;
+    for (const char *line = body; line < end;) {
+        const char *next = memchr(line, '\n', (size_t)(end - line));
+        if (!next) next = end;
+        size_t n = (size_t)(next - line);
+        while (n && (line[n - 1] == '\r' || line[n - 1] == ' ')) n--;
+        if (line_starts(line, n, "#EXT-X-STREAM-INF") ||
+            line_starts(line, n, "#EXT-X-MEDIA:")) return 0;   // master
+        if (line_starts(line, n, "#EXT-X-ENDLIST") ||
+            (line_starts(line, n, "#EXT-X-PLAYLIST-TYPE:") &&
+             n >= 24 && !strncasecmp(line + 21, "VOD", 3))) vod = 1;
+        if (line_starts(line, n, "#EXT-X-BYTERANGE:") &&
+            !memchr(line, '@', n)) return 0;                  // offset implicito
+        if (line_starts(line, n, "#EXT-X-MEDIA-SEQUENCE:"))
+            media_sequence = atoll(line + 22);
+        if (line_starts(line, n, "#EXT-X-DISCONTINUITY-SEQUENCE:"))
+            discontinuity_sequence = atoll(line + 30);
+        if (line_starts(line, n, "#EXTINF:")) pending_duration = atof(line + 8);
+        if (n && line[0] != '#') {                             // URI do segmento
+            if (pending_duration < 0) return 0;
+            if (elapsed <= start + 0.001) { cut = segments; cut_start = elapsed; }
+            elapsed += pending_duration;
+            segments++;
+            pending_duration = -1;
+        }
+        line = next < end ? next + 1 : end;
+    }
+    if (total) *total = elapsed;
+    if (!vod || segments < 2 || cut <= 0 || start >= elapsed) return 0;
+    // A descontinuidade do proprio segmento de corte continua no corpo copiado.
+    // Antes dele, cada uma ja vista avanca DISCONTINUITY-SEQUENCE.
+    int seen = 0;
+
+    // Segunda passada: cabecalho, MAP/KEY ativos no corte e segmentos dali em diante.
+    TrimBuffer b = {0};
+    char header[96];
+    const char *map = NULL, *key = NULL;
+    size_t map_len = 0, key_len = 0;
+    int index = 0, in_body = 0, wrote_state = 0;
+    for (const char *line = body; line < end;) {
+        const char *next = memchr(line, '\n', (size_t)(end - line));
+        if (!next) next = end;
+        size_t n = (size_t)(next - line);
+        while (n && (line[n - 1] == '\r' || line[n - 1] == ' ')) n--;
+        int is_uri = n && line[0] != '#';
+        if (!in_body) {
+            if (line_starts(line, n, "#EXTINF:") || line_starts(line, n, "#EXT-X-MAP:") ||
+                line_starts(line, n, "#EXT-X-KEY:") || line_starts(line, n, "#EXT-X-BYTERANGE:") ||
+                (line_starts(line, n, "#EXT-X-DISCONTINUITY") &&
+                 !line_starts(line, n, "#EXT-X-DISCONTINUITY-SEQUENCE")) ||
+                line_starts(line, n, "#EXT-X-PROGRAM-DATE-TIME:") || is_uri) {
+                in_body = 1;
+            } else {
+                if (!line_starts(line, n, "#EXT-X-MEDIA-SEQUENCE:") &&
+                    !line_starts(line, n, "#EXT-X-DISCONTINUITY-SEQUENCE:") && n)
+                    trim_put(&b, line, n);
+                line = next < end ? next + 1 : end;
+                continue;
+            }
+        }
+        if (index < cut) {
+            if (line_starts(line, n, "#EXT-X-MAP:")) { map = line; map_len = n; }
+            if (line_starts(line, n, "#EXT-X-KEY:")) { key = line; key_len = n; }
+            if (line_starts(line, n, "#EXT-X-DISCONTINUITY") &&
+                !line_starts(line, n, "#EXT-X-DISCONTINUITY-SEQUENCE")) seen++;
+            if (is_uri) index++;
+        } else {
+            if (!wrote_state) {
+                snprintf(header, sizeof(header), "#EXT-X-MEDIA-SEQUENCE:%lld",
+                         media_sequence + cut);
+                trim_put(&b, header, strlen(header));
+                if (discontinuity_sequence || seen) {
+                    snprintf(header, sizeof(header), "#EXT-X-DISCONTINUITY-SEQUENCE:%lld",
+                             discontinuity_sequence + seen);
+                    trim_put(&b, header, strlen(header));
+                }
+                if (key) trim_put(&b, key, key_len);
+                if (map) trim_put(&b, map, map_len);
+                wrote_state = 1;
+            }
+            if (n) trim_put(&b, line, n);
+        }
+        line = next < end ? next + 1 : end;
+    }
+    if (b.failed || !wrote_state) { free(b.data); return 0; }
+    *out = b.data;
+    *out_len = b.len;
+    if (segment_start) *segment_start = cut_start;
+    return 1;
 }

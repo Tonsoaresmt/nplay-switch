@@ -52,7 +52,17 @@ void nplay_curl_avio_quality_get(NplayCurlAvioQuality *out);
 // avformat_close_input (com AVFMT_FLAG_CUSTOM_IO o ffmpeg nao libera o pb).
 void nplay_curl_avio_close(AVIOContext *ctx);
 
-// Liberar as conexoes HLS ociosas antes de curl_global_cleanup.
+// Liberar as conexoes HLS ociosas e o cache de playlists antes de
+// curl_global_cleanup ou ao sair do player.
 void nplay_curl_avio_pool_clear(void);
+
+// Abertura posicionada: enquanto ativa (>0), cada playlist de midia VOD baixada
+// e cortada para comecar no segmento que contem este ponto. Desative (0) logo
+// apos avformat_open_input. A duracao total original fica disponivel para o
+// HUD, pois o FFmpeg so enxerga o trecho cortado.
+void nplay_curl_avio_set_hls_start(double seconds);
+double nplay_curl_avio_hls_full_duration(void);
+// Quantas playlists foram realmente cortadas desde set_hls_start(>0).
+int nplay_curl_avio_hls_positioned_count(void);
 
 #endif

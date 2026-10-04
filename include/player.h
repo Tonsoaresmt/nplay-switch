@@ -29,6 +29,14 @@ typedef int (*PlayerHeartbeatCallback)(int session_id, SDL_atomic_t *cancel, voi
 typedef int (*PlayerStopCallback)(int item_id, int session_id,
                                   SDL_atomic_t *cancel, void *userdata);
 
+// Episodio listado no painel "Episodios" do player (escolha direta, inclusive
+// o anterior). O texto e copiado pelo chamador e vale durante player_run.
+typedef struct {
+    int item_id;
+    char label[96];
+    int watched;
+} PlayerEpisode;
+
 typedef struct {
     // Snapshot completo do contrato da API. Para arquivos locais, fica zerado e
     // os campos legados abaixo continuam sendo usados.
@@ -70,6 +78,10 @@ typedef struct {
     PlayerHeartbeatCallback heartbeat_cb;
     PlayerStopCallback stop_cb;
     void *userdata;
+
+    const PlayerEpisode *episodes; // opcional: lista da serie
+    int episode_count;
+    int episode_current;           // indice do episodio tocando (-1 desconhecido)
 } PlayerRequest;
 
 typedef struct {
@@ -82,6 +94,7 @@ typedef struct {
     int audio_index; // faixa ativa ao sair (1-based; 0 = sem audio)
     char audio_language[8]; // idioma normalizado ou "und"
     int subtitle_index; // 0=desligada; >0=faixa ativa (1-based)
+    int chosen_item_id; // episodio escolhido no painel (EXIT_REASON_NEXT_EPISODE)
 } PlayerResult;
 
 int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, PlayerResult *result);

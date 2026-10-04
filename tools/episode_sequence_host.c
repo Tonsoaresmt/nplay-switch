@@ -27,12 +27,18 @@ static cJSON *ui_request_get(void *ren, const char *path, int *running, int *can
     requests++; *cancelled = cancelled_request;
     return cancelled_request ? NULL : cJSON_Duplicate(api_detail, 1);
 }
+static int g_play_chosen_item, built_for, choose_target, played_ids[8];
+static void play_episodes_build(int id) { built_for = id; }
+static void play_episodes_clear(void) {}
 static void select_series_resume_target(cJSON *detail) { assert(detail); }
 static void rebuild_series_plot(void) {}
 static int resolve_and_play_details(int id, const char *title, const char *subtitle,
                                     const char *overview, const char *next_title, int has_next) {
     (void)overview; assert(id > 0 && title);
+    if (plays < 8) played_ids[plays] = id;
     plays++;
+    // Painel Episodios: o player devolve o episodio escolhido (ex.: o anterior).
+    if (choose_target && plays == 1) { g_play_chosen_item = choose_target; return 2; }
     if (plays == 1) {
         assert(has_next == expected_next);
         if (has_next) assert(next_title && next_title[0]);
@@ -52,7 +58,7 @@ static int choose_next_episode(int sid, int current, int first, int refresh, int
 
 static void reset(void) {
     if (g_ser) cJSON_Delete(g_ser);
-    g_ser = NULL; plays = requests = cancelled_request = jump = 0;
+    g_ser = NULL; plays = requests = cancelled_request = jump = choose_target = built_for = 0;
     g_series_audio_explicit = 0; g_running = 1;
 }
 int main(void) {
@@ -80,6 +86,10 @@ int main(void) {
     group = cJSON_CreateObject(); cJSON_AddNumberToObject(group, "id", 11);
     cJSON_AddItemToArray(groups, group);
     play_episode_sequence(201, 10, "Anime", NULL); assert(plays == 1);
+    // Escolha direta no painel: volta ao episodio anterior sem pedir o "proximo".
+    reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; choose_target = 101;
+    play_episode_sequence(102, 10, "Anime", NULL);
+    assert(plays == 2 && played_ids[0] == 102 && played_ids[1] == 101 && built_for == 101);
     reset(); cJSON_Delete(api_detail);
-    puts("actual episode sequence OK: anime, direct context, cancel, chronological next, season boundary, grouped season, finale, explicit jump");
+    puts("actual episode sequence OK: anime, direct context, cancel, chronological next, season boundary, grouped season, finale, explicit jump, episodes panel choice");
 }

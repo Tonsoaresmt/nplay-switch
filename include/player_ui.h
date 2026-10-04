@@ -80,6 +80,13 @@ typedef struct {
     const char *audio_details[PUI_MAX_TRACKS];
     int sub_count, sub_sel, sub_current;  // indice 0 = desligadas
     const char *sub_names[PUI_MAX_TRACKS];
+
+    // Lista de episodios dentro do player (como o botao Episodios do site).
+    int has_episodes;          // mostra a dica no topo do HUD
+    int episodes_open;
+    int episode_count, episode_sel, episode_current;
+    const char *const *episode_labels;
+    const unsigned char *episode_watched;
 } PlayerHud;
 
 // Desenha legenda + HUD sobre o quadro de video ja copiado no renderer.
@@ -88,6 +95,10 @@ void pui_draw(SDL_Renderer *ren, const PlayerHud *hud, Uint32 now);
 // Tela de preparacao/recuperacao com anel animado (sem quadro de video).
 void pui_draw_loading(SDL_Renderer *ren, const char *title, const char *headline,
                       const char *detail, Uint32 now, int warning);
+
+// Ultimo quadro do video usado como fundo da tela de espera durante seek ou
+// troca de faixa (reabertura). NULL volta a tela cheia de preparacao.
+void pui_set_loading_backdrop(SDL_Texture *frame);
 
 // Formata segundos como 1:02:03 ou 2:03.
 void pui_format_time(double seconds, char *out, int cap);

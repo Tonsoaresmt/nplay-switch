@@ -503,6 +503,11 @@ static void draw_top(SDL_Renderer *r, const PlayerHud *h, float a) {
     vgrad(r, 0, 0, PUI_W, 150, K_BLACK, 0.72f * a, 0.0f);
     icon_back(r, 60, 58, 40, K_WHITE, 0.95f * a);
     text_a(r, "B  Voltar", 88, 45, K_MUTED, ST_SMALL, a, 0);
+    if (h->has_episodes) {
+        int w = text_w(r, "Episodios", ST_SMALL);
+        icon_back(r, PUI_W - 48 - w - 30, 58, 40, K_WHITE, 0.95f * a);
+        text_a(r, "Episodios", PUI_W - 48 - w, 45, K_MUTED, ST_SMALL, a, 0);
+    }
 }
 
 static WrapCache g_overview_wrap;
@@ -599,7 +604,9 @@ static void draw_subtitle(SDL_Renderer *r, const PlayerHud *h) {
         bottom = (int)(bottom + (above_card - bottom) * clamp01(h->next_card_alpha));
         if (bottom > above_card && h->next_card_alpha > 0.5f) bottom = above_card;
     }
-    int lines = wrap(&g_sub_wrap, h->subtitle_text, ST_SUB, PUI_W - 200, 2);
+    // Duas falas simultaneas (dialogo + placa/letreiro, comum em anime) somam
+    // tres ou quatro linhas; com o teto antigo de duas a segunda fala sumia.
+    int lines = wrap(&g_sub_wrap, h->subtitle_text, ST_SUB, PUI_W - 200, 4);
     int lh = 38;
     int y = bottom - lines * lh;
     for (int i = 0; i < lines; i++) {
@@ -675,6 +682,44 @@ static void draw_panel(SDL_Renderer *r, const PlayerHud *h) {
            (int)x + 40, (int)(y + hh - 44), K_DIM, ST_SMALL, 1.0f, (int)w - 80);
 }
 
+static void draw_episodes(SDL_Renderer *r, const PlayerHud *h) {
+    if (!h->episodes_open || h->episode_count <= 0 || !h->episode_labels) return;
+    fill(r, 0, 0, PUI_W, PUI_H, K_BLACK, 0.55f);
+    const int x = PUI_W - 600, w = 600;
+    fill(r, x, 0, w, PUI_H, K_PANEL, 0.97f);
+    text_a(r, "Episodios", x + 40, 40, K_WHITE, ST_TITLE, 1.0f, 0);
+    char counter[32];
+    snprintf(counter, sizeof(counter), "%d de %d", h->episode_sel + 1, h->episode_count);
+    text_right_a(r, counter, x + w - 40, 50, K_DIM, ST_SMALL, 1.0f);
+    fill(r, x + 40, 92, w - 80, 2, K_ACC, 0.9f);
+    const int row_h = 62, visible = 8, list_w = w - 80;
+    int first = h->episode_sel - visible / 2;
+    if (first > h->episode_count - visible) first = h->episode_count - visible;
+    if (first < 0) first = 0;
+    int ry = 110;
+    for (int i = first; i < h->episode_count && i < first + visible; i++, ry += row_h) {
+        int focused = i == h->episode_sel, current = i == h->episode_current;
+        if (focused) {
+            rrect(r, x + 40, ry, list_w, row_h - 8, 8, K_WHITE, 0.12f);
+            fill(r, x + 40, ry + 10, 4, row_h - 28, K_ACC, 1.0f);
+        }
+        const char *label = h->episode_labels[i] ? h->episode_labels[i] : "Episodio";
+        int tag_w = 0;
+        if (current) {
+            tag_w = text_w(r, "Assistindo", ST_SMALL) + 20;
+            rrect(r, x + 40 + list_w - tag_w - 12, ry + 13, tag_w, 28, 6, K_ACC, 0.9f);
+            text_a(r, "Assistindo", x + 40 + list_w - tag_w - 2, ry + 16, K_WHITE, ST_SMALL, 1.0f, 0);
+        } else if (h->episode_watched && h->episode_watched[i]) {
+            tag_w = 40;
+            icon_check(r, x + 40 + list_w - 34, ry + (row_h - 8) / 2.0f, 20, K_DIM, 1.0f);
+        }
+        text_a(r, label, x + 62, ry + 15, focused || current ? K_WHITE : K_MUTED, ST_NORMAL, 1.0f,
+               list_w - 40 - tag_w);
+    }
+    text_a(r, "Cima/baixo  Escolher      A  Assistir      B  Fechar",
+           x + 40, PUI_H - 56, K_DIM, ST_SMALL, 1.0f, w - 80);
+}
+
 void pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
     if (!r || !h) return;
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
@@ -691,11 +736,35 @@ void pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
     draw_buffering(r, h, now);
     draw_notice(r, h);
     draw_panel(r, h);
+    draw_episodes(r, h);
 }
+
+static SDL_Texture *g_loading_backdrop = NULL;
+
+void pui_set_loading_backdrop(SDL_Texture *frame) { g_loading_backdrop = frame; }
 
 void pui_draw_loading(SDL_Renderer *r, const char *title, const char *headline,
                       const char *detail, Uint32 now, int warning) {
     if (!r) return;
+    if (g_loading_backdrop) {
+        // Seek/troca de faixa: mantem a imagem na tela, como o player do site,
+        // em vez de trocar tudo por uma tela de preparacao.
+        SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
+        SDL_RenderClear(r);
+        SDL_RenderCopy(r, g_loading_backdrop, NULL, NULL);
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(r, 0, 0, 0, 110);
+        SDL_RenderFillRect(r, NULL);
+        float bx = PUI_W / 2.0f, by = PUI_H / 2.0f - 20;
+        float turn = (now % 1100) / 1100.0f * 2 * PI_F;
+        arc(r, bx, by, 34, 5, 0, 2 * PI_F, K_WHITE, 0.18f);
+        arc(r, bx, by, 34, 5, turn, 2.2f, warning ? K_ROSE : K_ACC, 1.0f);
+        text_center_a(r, headline && headline[0] ? headline : "Carregando", (int)bx, (int)by + 54,
+                      K_WHITE, ST_NORMAL, 1.0f);
+        (void)title; (void)detail;
+        text_center_a(r, "B  Cancelar", (int)bx, 652, K_DIM, ST_SMALL, 1.0f);
+        return;
+    }
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(r, 8, 10, 15, 255);
     SDL_RenderClear(r);

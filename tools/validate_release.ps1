@@ -68,6 +68,12 @@ Assert-True ($sources -match 'avformat_seek_file' -and $sources -match 'window-f
 Assert-True ($sources -match 'demux_worker_thread' -and $sources -match 'DEMUX_QUEUE_BYTES') 'Rede/demux voltou a bloquear a thread dos controles.'
 Assert-True ($sources -match 'pause_request' -and $sources -match 'demux_worker_wait_paused') 'Seek/troca de faixa perdeu a barreira da thread de demux.'
 Assert-True ($sources -match 'demux_worker_clear' -and $sources -match 'player_seek_with_barrier') 'Seek pode misturar pacotes anteriores com a nova geracao.'
+Assert-True ($sources -match 'hls_media_playlist_trim' -and $sources -match 'positioned-reopen' -and $sources -match 'nplay_curl_avio_set_hls_start\(start_sec\)') 'Seek/retomada HLS voltou ao seek interno do FFmpeg 7.1, que corrompe renditions fMP4.'
+Assert-True ($sources -match 'meta_cache_get' -and $sources -match 'hls_is_init_section_url') 'Reabertura posicionada voltou a baixar playlists e init a cada salto.'
+Assert-True ($sources -match 'quick_seek_deadline' -and $sources -notmatch 'A confirma  \|  B cancela  \|  L/R ajusta') 'L/R/ZL/ZR voltaram a congelar o video esperando A.'
+Assert-True ($sources -match 'DEMUX_QUEUE_BYTES_SEQUENTIAL' -and $sources -match 'demux_worker_take_stream') 'Remux sequencial voltou a engasgar o audio atras de blocos de video.'
+Assert-True ($sources -match 'sequential-duration' -and $sources -match 'hot_probe_duration') 'Remux sequencial voltou a usar a duracao do primeiro fragmento (episodio marcado como visto).'
+Assert-True ($sources -match 'track_title_is_technical') 'Painel de audio voltou a mostrar nomes tecnicos como audio_0.'
 Assert-True ($sources -match 'if \(!on_render_thread\) return 0') 'Callback do FFmpeg voltou a ler estado nao atomico na thread de demux.'
 Assert-True ($sources -match 'loading_owner = PLAYER_LOADING_PLAYBACK' -and $sources -match 'player_loading_interrupt_can_draw') 'Loader de abertura pode voltar a disputar a tela com buffering/video.'
 Assert-True ($sources -match 'audio-inplace-applied' -and $sources -match 'subtitle-inplace-applied') 'Troca de faixa voltou a reabrir toda a sessao HLS.'
@@ -138,9 +144,13 @@ Assert-True ($storeSource -match 'pref_audio_%d\.txt' -and $storeSource -match '
 $playerUiSource = Get-Content source/player_ui.c -Raw
 Assert-True ($playerUiSource -match 'draw_pause_info' -and $playerUiSource -match 'draw_panel') 'HUD modular perdeu pausa detalhada ou painel de faixas.'
 Assert-True ($playerUiSource -match 'ui_popcorn_draw') 'Tela de preparacao perdeu a animacao de pipoca do Nplay.'
+Assert-True ($playerUiSource -match 'draw_episodes' -and $playerUiSource -match 'pui_set_loading_backdrop') 'Player perdeu o painel Episodios ou o ultimo quadro durante seek.'
+Assert-True ($playerUiSource -match 'h->subtitle_text, ST_SUB, PUI_W - 200, 4\)') 'Duas falas simultaneas voltaram a ser cortadas em duas linhas.'
 Assert-True ($playerUiSource -match 'draw_track_column.+AUDIO' -or ($playerUiSource -match '"AUDIO"' -and $playerUiSource -match '"LEGENDAS"')) 'Painel nao mostra audio e legendas em duas colunas.'
 Assert-True ($playerUiSource -match 'draw_next_card' -and $playerUiSource -match 'PUI_FOCUS_TIMELINE') 'HUD modular perdeu proximo episodio ou timeline.'
 Assert-True ($playerUiSource -match 'ui_popcorn_draw') 'Tela de preparacao perdeu a animacao de pipoca do Nplay.'
+Assert-True ($playerUiSource -match 'draw_episodes' -and $playerUiSource -match 'pui_set_loading_backdrop') 'Player perdeu o painel Episodios ou o ultimo quadro durante seek.'
+Assert-True ($playerUiSource -match 'h->subtitle_text, ST_SUB, PUI_W - 200, 4\)') 'Duas falas simultaneas voltaram a ser cortadas em duas linhas.'
 Assert-True ($sources -match 'PlayerHud hud_base' -and $sources -match 'draw_hud\(ren, &hud_base') 'HUD voltou a enumerar faixas ou montar rotulos a cada quadro.'
 
 $audioPolicySource = Get-Content source/audio_policy.c -Raw
@@ -273,6 +283,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Sequencia real de episodios perdeu contexto ou proximo episodio.' }
 Assert-True ($sources -match 'next_selected \|\| paused \|\| hud_pinned') 'Proximo episodio voltou a ficar escondido durante a pausa.'
 Assert-True ($mainSource -match 'play_with_progress_details' -and $mainSource -match 'presentation->has_next' -and $mainSource -match 'g_episode_pending\.explicit_next') 'Preparacao ou virada de temporada perdeu a acao explicita de proximo episodio.'
+Assert-True ($mainSource -match 'play_episodes_build' -and $mainSource -match 'chosen_item > 0 \? chosen_item') 'Painel Episodios do player nao toca mais o episodio escolhido.'
 & $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
 if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 falhou ao compilar.' }
 & .\build\test_playback_source.exe
