@@ -1,6 +1,7 @@
 // store.c - token + historico de leitura no SD (sdmc:/switch/Meruem).
 // progress.json: { "<bookId>": { p, sid, st, cl, pb, cv, pg, ts }, ... }
 #include "store.h"
+#include "media_list_sync.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,6 +324,33 @@ int store_media_list_add(int list_index, int id, int is_series, const char *titl
     cJSON_AddItemToArray(items, item);
     save_media_lists();
     return 0;
+}
+
+int store_watchlater_reconcile(int list_index, const cJSON *remote) {
+    cJSON *list = media_list_at(list_index);
+    cJSON *merged = media_list_sync_merge(media_items(list_index), remote);
+    if (!merged) return -1;
+    if (!cJSON_ReplaceItemInObjectCaseSensitive(list, "items", merged)) {
+        cJSON_Delete(merged); return -1;
+    }
+    save_media_lists(); return 0;
+}
+
+int store_watchlater_confirm(int list_index, int id, int is_series) {
+    cJSON *item;
+    cJSON_ArrayForEach(item, media_items(list_index)) {
+        cJSON *jid = cJSON_GetObjectItemCaseSensitive(item, "id");
+        cJSON *kind = cJSON_GetObjectItemCaseSensitive(item, "series");
+        int series = cJSON_IsTrue(kind) || (cJSON_IsNumber(kind) && kind->valueint != 0);
+        if (!cJSON_IsNumber(jid) || jid->valueint != id || series != !!is_series) continue;
+        cJSON *confirmed = cJSON_CreateBool(1);
+        if (!confirmed) return -1;
+        if (cJSON_HasObjectItem(item, "synced")) {
+            if (!cJSON_ReplaceItemInObjectCaseSensitive(item, "synced", confirmed)) { cJSON_Delete(confirmed); return -1; }
+        } else if (!cJSON_AddItemToObject(item, "synced", confirmed)) { cJSON_Delete(confirmed); return -1; }
+        save_media_lists(); return 0;
+    }
+    return -1;
 }
 
 int store_media_list_remove(int list_index, int item_index) {

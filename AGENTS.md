@@ -1,5 +1,37 @@
 # Continuidade para agentes
 
+## Implementacao dos fluxos — 05/10/2026 (candidato .50, ainda local)
+
+- Base e6e183f, checkout switch-access-expiry / codex/switch-player-hardening.
+  Pedido agora autorizou implementar. docs/PLAYER_FLOW_FIXES_0_12_50.md explica
+  nove pontos, evidencias e limites; nao confundir com a auditoria sem app abaixo.
+- Historico acompanha item_id (inclusive menu), conserva JSON antigo em schema
+  invalido. EOF drena codecs e exige posicao/duracao compativel, sem falha HLS;
+  incompleto retorna -5, finalizador nao marca visto. Trace terminal foi ampliado.
+- start_paused conserva intencao entre tentativas da MESMA reproducao. Preroll
+  pausado ainda pode carregar quadro; audio permanece pausado. Nova obra nao herda.
+- Touch direto: Episodios abre/fecha, seleciona e rola com gesto; timeline tem
+  preview/arrasto e botoes Confirmar/Cancelar. Soltar nunca executa seek. Toque
+  +/-10s usa debounce L/R. Helpers de geometria compartilhados em player_touch.h.
+- Abas mantem foco/ID/scroll; Historico mantem subvista. Cache elimina pedido
+  obsoleto na fila. Snapshots bounded, sem guardar pointers JSON entre reaberturas.
+- Fetch R2 tem 1 worker + 1 pendente latest-wins; substituir/desligar nao faz
+  join bloqueante. Somente depois de done/join reutiliza memoria. Hot/progressivo
+  e teardown ainda possuem waits: correcao PARCIAL desse ponto, nao prometer zero.
+- Watchlater remove apenas itens confirmados ausentes remotamente; offline/legado
+  de origem incerta preservados. Geracao descarta snapshot anterior a mutacao.
+  Merge transacional em memoria, teto64; save SD continua mecanismo preexistente.
+- Novos test_player_flow_guards/test_player_navigation/test_media_list_sync e
+  fetch/supervisor ampliados entram no validate_release. Audit negativo somente
+  --baseline e6e183f; exit0 ali significa defeitos reproduzidos, nao aprovacao.
+- Build ARM64 completo -Werror passou, seguido de rebuild de main.c. Tres suites
+  completas passaram, incluindo a ultima no artefato FINAL (sem SkipMediaFixtures).
+  NRO 24258383 bytes, SHA256 8bee05c3ebb5b4bd45ad2dec8f9a55ca75354e8ac79299df3d08d83d0a3bb5f3.
+- Nenhum Switch fisico, Linux integrado, producao/conta/R2, push ou release nesta
+  rodada. .50 continua candidata. Pendentes: teste 60+min, NVTEGRA/drain real,
+  toque720p, hot/progressivo sem join UI, EOF com metadados incorretos/erro antigo.
+  Nao atribuir T3->T5 ou buffering50min a estas causas sem traces do incidente.
+
 ## Auditoria adicional de fluxos — 05/10/2026 (sem mudanca no app)
 
 - Base ef5f6e5, checkout switch-access-expiry / codex/switch-player-hardening.

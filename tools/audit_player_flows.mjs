@@ -1,9 +1,16 @@
 // Diagnostic only: success means the documented defects were reproduced.
-// Extracts current C functions; API, SDL and catalog fixtures are simulated.
+// Historical negative assertions, never a release approval criterion.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
-const read=p=>readFileSync(p,'utf8').replace(/\r\n/g,'\n');
+if (!process.argv.includes('--baseline')) throw Error('Use --baseline to reproduce e6e183f defects; current fixes use test_player_flow_guards/test_player_navigation.');
+const baseline='e6e183f';
+const read=p=>{
+  const r=spawnSync(process.env.GIT_EXE||'C:/Program Files/Git/cmd/git.exe',['show',`${baseline}:${p}`],{encoding:'utf8',windowsHide:true});
+  if(r.status!==0)throw Error(r.stderr||r.error?.message);
+  return r.stdout.replace(/\r\n/g,'\n');
+};
+console.log('HISTORICAL DEFECT REPRODUCTION ONLY:',baseline);
 const main=read('source/main.c'),player=read('source/player.c');
 function section(s,a,b) {
   const start=s.indexOf(a),end=s.indexOf(b,start);

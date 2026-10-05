@@ -8,10 +8,13 @@
 #include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
+#include <time.h>
 #define HLS_MANIFEST_URI_MAX 1024
 typedef struct { int *text; } ExternalSubtitleStore;
 struct SDL_Thread { pthread_t thread; int (*run)(void *); void *data; };
 static SDL_atomic_t ready, video_abort;
+static SDL_atomic_t entered;
+static unsigned injected_delay;
 static int create_fail, joins, load_result;
 static _Thread_local SDL_atomic_t *own_cancel;
 int SDL_AtomicGet(SDL_atomic_t *v) { return __atomic_load_n(&v->value, __ATOMIC_SEQ_CST); }
@@ -33,6 +36,8 @@ static void nplay_curl_avio_set_thread_cancel(SDL_atomic_t *cancel) {
 static void external_subtitle_clear(ExternalSubtitleStore *store) { free(store->text); store->text = NULL; }
 static int load_external_subtitle(const char *url, ExternalSubtitleStore *store, int direct, SDL_atomic_t *cancel) {
     (void)url; assert(!direct && own_cancel == cancel);
+    SDL_AtomicSet(&entered, 1);
+    if (injected_delay) usleep(injected_delay);
     while (!SDL_AtomicGet(&ready) && !SDL_AtomicGet(cancel)) usleep(1000);
     if (SDL_AtomicGet(cancel)) return -1;
     store->text = malloc(sizeof(int)); assert(store->text); *store->text = 70;
@@ -44,7 +49,8 @@ static void finish(SubtitleFetch *fetch) {
     for (int i = 0; i < 1000 && !SDL_AtomicGet(&fetch->done); i++) usleep(1000);
     assert(SDL_AtomicGet(&fetch->done));
 }
-static void reset_load(void) { SDL_AtomicSet(&ready, 0); load_result = 0; }
+static void reset_load(void) { SDL_AtomicSet(&ready, 0); SDL_AtomicSet(&entered, 0); load_result = 0; }
+static double millis(void) { struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec*1000.0+t.tv_nsec/1000000.0; }
 int main(void) {
     char first[1024], second[1024];
     subtitle_session_key("https://test/sub.vtt?track=pt", first, sizeof(first));
@@ -92,8 +98,30 @@ int main(void) {
     assert(!SDL_AtomicGet(&video_abort));
     create_fail = 1; assert(subtitle_fetch_start(&fetch, "https://test/sub.vtt", 3) < 0);
     assert(!fetch.thread && *applied.text == 80);
+    create_fail = 0;reset_load();injected_delay=300000;
+    assert(!subtitle_fetch_start(&fetch,"https://test/old.vtt",1));
+    while(!SDL_AtomicGet(&entered))usleep(1000);
+    double before=millis();
+    assert(!subtitle_fetch_start(&fetch,"https://test/new.vtt",2));
+    assert(!subtitle_fetch_start(&fetch,"https://test/latest.vtt",3));
+    assert(millis()-before<100&&fetch.thread&&fetch.pending&&fetch.pending_choice==3);
+    finish(&fetch);assert(!subtitle_fetch_poll(&fetch,&applied,3));
+    assert(fetch.thread&&!fetch.pending&&fetch.choice==3&&*applied.text==80);
+    finish(&fetch);assert(subtitle_fetch_poll(&fetch,&applied,3)==1&&*applied.text==70);
+    reset_load();assert(!subtitle_fetch_start(&fetch,"https://test/slow.vtt",4));
+    while(!SDL_AtomicGet(&entered))usleep(1000);
+    before=millis();subtitle_fetch_cancel(&fetch);
+    assert(millis()-before<100&&fetch.thread&&!fetch.pending);
+    finish(&fetch);assert(!subtitle_fetch_poll(&fetch,&applied,-1)&&*applied.text==70);
+    injected_delay=0;
+    reset_load();assert(!subtitle_fetch_start(&fetch,"https://test/old.vtt",1));
+    assert(!subtitle_fetch_start(&fetch,"https://test/new.vtt",2));
+    finish(&fetch);create_fail=1;
+    assert(subtitle_fetch_poll(&fetch,&applied,2)==-1&&!fetch.thread&&fetch.choice==2);
+    create_fail=0;
     external_subtitle_clear(&applied);
-    assert(joins == 4);
+    assert(joins == 8);
+    puts("PASS replacement/off: caller returns under 100ms despite injected 300ms worker, bounded latest-wins, canceled completion ignored, pending-create failure retryable; teardown joins owned workers.");
     puts("SUBTITLE FETCH OK: query-safe cache key, actual pthread worker/join, failure preserves applied track, stale completion discarded, independent cancel, thread creation failure; desired-track retry 2/5/10/20s, replacement/off/success/tick wrap");
     return 0;
 }

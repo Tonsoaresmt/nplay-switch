@@ -1,6 +1,7 @@
 // store.h - token de login + progresso/historico de leitura no SD.
 #pragma once
 #include <stddef.h>
+#include "cJSON.h"
 
 void store_init(void);
 
@@ -59,6 +60,8 @@ int  store_media_list_get(int list_index, int item_index, int *id, int *is_serie
 int  store_media_list_add(int list_index, int id, int is_series,
                           const char *title, const char *logo);
 int  store_media_list_remove(int list_index, int item_index);
+int  store_watchlater_reconcile(int list_index, const cJSON *remote);
+int  store_watchlater_confirm(int list_index, int id, int is_series);
 
 int  store_load_server(char *out, size_t cap);
 void store_save_server(const char *url);

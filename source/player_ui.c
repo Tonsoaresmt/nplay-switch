@@ -416,7 +416,7 @@ static void draw_timeline(SDL_Renderer *r, const PlayerHud *h, float a) {
     if (h->dur > 0) snprintf(timebuf, sizeof(timebuf), "%s / %s", cur, total);
     else snprintf(timebuf, sizeof(timebuf), "%s", cur);
     int tw = text_w(r, timebuf, ST_TIME);
-    int x1 = PUI_W - 48 - tw - 24;
+    int x1 = h->scrubbing ? PLAYER_TOUCH_BAR_RIGHT : PUI_W - 48 - tw - 24;
     int w = x1 - BAR_X0;
     int focused = h->focus == PUI_FOCUS_TIMELINE || h->scrubbing;
     float bh = focused ? 10.0f : 6.0f;
@@ -480,6 +480,17 @@ static void draw_timeline(SDL_Renderer *r, const PlayerHud *h, float a) {
 static void draw_bottom(SDL_Renderer *r, const PlayerHud *h, float a) {
     vgrad(r, 0, 420, PUI_W, 300, K_BLACK, 0.0f, 0.93f * a);
     draw_timeline(r, h, a);
+    if (h->scrubbing) {
+        rrect(r, PLAYER_TOUCH_CONFIRM_X, PLAYER_TOUCH_BUTTON_Y,
+              PLAYER_TOUCH_BUTTON_W, PLAYER_TOUCH_BUTTON_H, 10, K_ACC, a);
+        rrect(r, PLAYER_TOUCH_CANCEL_X, PLAYER_TOUCH_BUTTON_Y,
+              PLAYER_TOUCH_BUTTON_W, PLAYER_TOUCH_BUTTON_H, 10, K_PANEL, a);
+        text_center_a(r, "A  Confirmar", PLAYER_TOUCH_CONFIRM_X + PLAYER_TOUCH_BUTTON_W / 2,
+                      PLAYER_TOUCH_BUTTON_Y + 14, K_WHITE, ST_SMALL, a);
+        text_center_a(r, "B  Cancelar", PLAYER_TOUCH_CANCEL_X + PLAYER_TOUCH_BUTTON_W / 2,
+                      PLAYER_TOUCH_BUTTON_Y + 14, K_WHITE, ST_SMALL, a);
+        return; // Do not draw inactive transport buttons under the modal.
+    }
     draw_control(r, h, PUI_FOCUS_PLAY, a);
     draw_control(r, h, PUI_FOCUS_REW, a);
     draw_control(r, h, PUI_FOCUS_FWD, a);
@@ -512,7 +523,7 @@ static void draw_top(SDL_Renderer *r, const PlayerHud *h, float a) {
     (void)h;
     vgrad(r, 0, 0, PUI_W, 150, K_BLACK, 0.72f * a, 0.0f);
     icon_back(r, 60, 58, 40, K_WHITE, 0.95f * a);
-    text_a(r, "B  Voltar", 88, 45, K_MUTED, ST_SMALL, a, 0);
+    text_a(r, h->scrubbing ? "B  Cancelar" : "B  Voltar", 88, 45, K_MUTED, ST_SMALL, a, 0);
     if (h->has_episodes) {
         int w = text_w(r, "Episodios", ST_SMALL);
         icon_back(r, PUI_W - 48 - w - 30, 58, 40, K_WHITE, 0.95f * a);
@@ -750,15 +761,15 @@ static void draw_episodes(SDL_Renderer *r, const PlayerHud *h) {
     fill(r, 0, 0, PUI_W, PUI_H, K_BLACK, 0.55f);
     const int x = PUI_W - 600, w = 600;
     fill(r, x, 0, w, PUI_H, K_PANEL, 0.97f);
+    icon_back(r, 60, 58, 40, K_WHITE, 1.0f);
+    text_a(r, "B  Fechar", 88, 45, K_WHITE, ST_SMALL, 1.0f, 0);
     text_a(r, "Episodios", x + 40, 40, K_WHITE, ST_TITLE, 1.0f, 0);
     char counter[32];
     snprintf(counter, sizeof(counter), "%d de %d", h->episode_sel + 1, h->episode_count);
     text_right_a(r, counter, x + w - 40, 50, K_DIM, ST_SMALL, 1.0f);
     fill(r, x + 40, 92, w - 80, 2, K_ACC, 0.9f);
     const int row_h = 62, visible = 8, list_w = w - 80;
-    int first = h->episode_sel - visible / 2;
-    if (first > h->episode_count - visible) first = h->episode_count - visible;
-    if (first < 0) first = 0;
+    int first = player_episode_first(h->episode_sel, h->episode_count);
     int ry = 110;
     for (int i = first; i < h->episode_count && i < first + visible; i++, ry += row_h) {
         int focused = i == h->episode_sel, current = i == h->episode_current;

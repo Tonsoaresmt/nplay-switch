@@ -19,6 +19,7 @@ typedef struct { int type; struct { int button; } jbutton; } SDL_Event;
 #define PLAYER_REQUEST_NEXT 4
 #include "player_supervisor_types.inc"
 static int g_player_last_access_expired, g_player_audio_index, g_player_subtitle_index;
+static int g_player_pause_intent;
 static SubtitleChoice g_player_subtitle_choice;
 static double g_hls_timeline_origin;
 static int g_hls_timeline_origin_valid, g_player_chosen_item;
@@ -49,6 +50,7 @@ static void player_error_message(const char *msg) { snprintf(g_player_last_error
 typedef struct { double expected_start, out; int rc, presented, seeked; } Step;
 static Step steps[8];
 static int count, index_step, cancel_renew;
+static int scripted_pause = -1, pause_seen[8];
 static int renew(const PlaybackSource *a, PlaybackSource *b, SDL_atomic_t *c, void *u) { (void)c; (void)u; *b = *a; return 0; }
 static int player_recovery_call(SDL_Renderer *r, SDL_Joystick *j, const char *t, const char *h, const char *d,
                                 PlayerRenewCallback cb, const PlaybackSource *a, PlaybackSource *b, void *u) {
@@ -60,13 +62,15 @@ static int player_play_internal(SDL_Renderer *r, SDL_Joystick *j, PlayerRequest 
                                  double start, double *pos, double *dur, int *seeked, int *presented) {
     (void)r; (void)j; (void)req; (void)hb;
     assert(index_step < count);
+    pause_seen[index_step] = req->start_paused;
+    if (index_step == 0 && scripted_pause >= 0) g_player_pause_intent = scripted_pause;
     Step *s = &steps[index_step++];
     assert(start == s->expected_start);
     *pos = s->out; *dur = 7200; *seeked = s->seeked; *presented = s->presented;
     return s->rc;
 }
 #include "player_supervisor_function.inc"
-static void setup(void) { memset(steps, 0, sizeof(steps)); count = index_step = cancel_renew = 0; tick = 0; }
+static void setup(void) { memset(steps, 0, sizeof(steps)); count = index_step = cancel_renew = 0; tick = 0; scripted_pause=-1; memset(pause_seen,0,sizeof(pause_seen)); }
 int main(void) {
     PlayerRequest r = {0}; PlayerResult out; r.start_sec = 3000; r.title = "Fixture";
     r.playback.delivery = DELIVERY_R2; strcpy(r.playback.container, "m3u8");
@@ -95,6 +99,18 @@ int main(void) {
     setup(); count = 1; cancel_renew = 1;
     steps[0] = (Step){3000, 0, -5, 0, 1};
     assert(player_run(NULL, NULL, &r, &out) == 0 && out.position == 3000 && out.reason == EXIT_REASON_USER);
+    setup(); count=2; r.start_paused=1;
+    steps[0]=(Step){3000,3060,PLAYER_RESTART_SEEK,1,0};steps[1]=(Step){3060,3061,0,1,1};
+    assert(player_run(NULL,NULL,&r,&out)==0&&pause_seen[0]==1&&pause_seen[1]==1);
+    setup();count=2;r.start_paused=0;scripted_pause=1;
+    steps[0]=(Step){3000,3002,PLAYER_RESTART_TRACK,1,0};steps[1]=(Step){3002,3003,0,1,1};
+    assert(player_run(NULL,NULL,&r,&out)==0&&!pause_seen[0]&&pause_seen[1]);
+    setup();count=2;scripted_pause=1;
+    steps[0]=(Step){3000,3002,-5,1,0};steps[1]=(Step){3002,3003,0,1,1};
+    assert(player_run(NULL,NULL,&r,&out)==0&&pause_seen[1]);
+    setup();count=1;steps[0]=(Step){3000,3001,0,1,0};
+    assert(player_run(NULL,NULL,&r,&out)==0&&!pause_seen[0]);
+    puts("PASS actual supervisor: paused seek/track/recovery preserves intent; new playback does not inherit pause.");
     puts("PLAYER SUPERVISOR OK: actual player_run, seek/renew failure preserves position, pause recovery, explicit zero, cancel");
     return 0;
 }

@@ -81,6 +81,7 @@ static int g_login_sel = 0;
 #include "ui.h"
 #include "screen_movie.h"
 #include "ui_request.h"
+#include "player_completion.h"
 
 static long ui_send(const char *path, const char *method, const char *body) {
     return ui_request_send(gRen, path, method, body, &g_running);
@@ -341,6 +342,13 @@ static Rail g_rails[48]; static int g_railsN = 0;
 static int g_railSel = 0, g_railItem = 0, g_homeScroll = 0;
 static int g_rail_scroll[48];
 static int g_heroIdx = 0; static Uint32 g_hero_next = 0;
+typedef struct {
+    int valid, rail, item, item_id, hero, hero_id, scroll, discovery;
+    char label[48], row_labels[48][48];
+    int row_scroll[48];
+} LandingFocus;
+static LandingFocus g_landing_focus[5];
+static int g_land_applied_tab = -1;
 static int hero_count(void) { int n = arr_len(g_heroesArr); return n > 8 ? 8 : n; }
 static int g_saga_sel = 0, g_saga_variant_sel = 0, g_saga_scroll = 0;
 static cJSON *g_saga_detail = NULL;
@@ -399,9 +407,12 @@ static cJSON *g_dl_pending = NULL;
 static cJSON *g_history = NULL, *g_history_pending = NULL, *g_watchlater_pending = NULL;
 static SDL_Thread *g_history_thread = NULL, *g_watchlater_thread = NULL;
 static SDL_atomic_t g_history_done, g_watchlater_done;
+static Uint32 g_watchlater_revision, g_watchlater_fetch_revision;
 static int g_history_refresh_requested = 0;
 static int g_history_sel = 0, g_history_zone = 0; // 0=continuar, 1=biblioteca
 static int g_history_menu = 0, g_history_menu_sel = 0;
+static int g_history_menu_item_id = 0;
+static int g_history_context_initialized = 0;
 // vista do Historico: 0=inicio, 1=episodios preparados, 2=biblioteca, 3=lista pessoal
 static int g_dlView = 0, g_dlGroup = 0, g_dlDetSel = 0, g_dlDetScroll = 0;
 static int g_list_sel = 0, g_open_list = 0, g_list_item_sel = 0;
@@ -600,8 +611,55 @@ static void hero_pool_add_ready(cJSON *pool, cJSON *items) {
     }
 }
 // Carrega a landing da aba (0..4). Cada aba vira hero + rails, como no app de PC.
+static void landing_capture_focus(void) {
+    int tab = g_land_applied_tab;
+    if (tab < 0 || tab > TAB_SAGAS || !g_land || g_land != g_land_cache[tab]) return;
+    LandingFocus *f = &g_landing_focus[tab];
+    memset(f, 0, sizeof(*f));
+    f->valid = 1; f->rail = g_railSel; f->item = g_railItem;
+    f->discovery = g_railSel == g_railsN;
+    f->hero = g_heroIdx; f->scroll = g_homeScroll;
+    f->hero_id = jint(cJSON_GetArrayItem(g_heroesArr, g_heroIdx), "id");
+    if (g_railSel >= 0 && g_railSel < g_railsN) {
+        snprintf(f->label, sizeof(f->label), "%s", g_rails[g_railSel].label);
+        f->item_id = jint(cJSON_GetArrayItem(g_rails[g_railSel].arr, g_railItem), "id");
+    }
+    for (int i = 0; i < g_railsN && i < 48; i++) {
+        memcpy(f->row_labels[i], g_rails[i].label, sizeof(f->row_labels[i]));
+        f->row_labels[i][47] = 0;
+        f->row_scroll[i] = g_rail_scroll[i];
+    }
+}
+
+static void landing_restore_focus(int tab) {
+    LandingFocus *f = &g_landing_focus[tab];
+    if (!f->valid) return;
+    g_homeScroll = f->scroll;
+    int heroes = arr_len(g_heroesArr);
+    if (heroes > 8) heroes = 8;
+    g_heroIdx = f->hero < heroes ? f->hero : 0;
+    for (int i = 0; i < heroes; i++)
+        if (f->hero_id > 0 && jint(cJSON_GetArrayItem(g_heroesArr, i), "id") == f->hero_id) g_heroIdx = i;
+    for (int i = 0; i < g_railsN; i++)
+        for (int j = 0; j < 48; j++)
+            if (!strcmp(g_rails[i].label, f->row_labels[j])) { g_rail_scroll[i] = f->row_scroll[j]; break; }
+    if (f->rail < 0) { g_railSel = heroes ? -1 : 0; return; }
+    if (f->discovery || g_railsN == 0) { g_railSel = g_railsN; return; }
+    g_railSel = f->rail < g_railsN ? f->rail : g_railsN - 1;
+    for (int i = 0; i < g_railsN; i++)
+        if (!strcmp(g_rails[i].label, f->label)) { g_railSel = i; break; }
+    int count = g_rails[g_railSel].count;
+    g_railItem = f->item < count ? f->item : count - 1;
+    if (g_railItem < 0) g_railItem = 0;
+    for (int i = 0; i < count; i++)
+        if (f->item_id > 0 && jint(cJSON_GetArrayItem(g_rails[g_railSel].arr, i), "id") == f->item_id) g_railItem = i;
+    g_homeScroll = f->scroll;
+}
+
 static void landing_apply(int tab, cJSON *land) {
+    if (g_land == land) landing_capture_focus();
     g_land = land;
+    g_land_applied_tab = tab;
     g_railsN = 0; g_railItem = 0; g_homeScroll = 0;
     memset(g_rail_scroll, 0, sizeof(g_rail_scroll));
     g_heroIdx = 0; g_hero_next = SDL_GetTicks() + 6000; g_heroesArr = NULL;
@@ -679,6 +737,7 @@ static void landing_apply(int tab, cJSON *land) {
         cJSON_ArrayForEach(e, sh) add_rail(jstr(e, "title"), cJSON_GetObjectItem(e, "items"), is_series);
     }
     g_railSel = (arr_len(g_heroesArr) > 0) ? -1 : 0;
+    landing_restore_focus(tab);
 }
 static const char *landing_path(int tab) {
     switch (tab) {
@@ -757,6 +816,7 @@ static void landing_start(int tab) {
 static void load_landing(int tab) {
     if (tab < 0 || tab > TAB_SAGAS) return;
     if (g_land_cache[tab]) {
+        g_land_queued_tab = -1; // Latest intent is already satisfied by cache.
         landing_apply(tab, g_land_cache[tab]);
         return;
     }
@@ -771,6 +831,7 @@ static void load_landing(int tab) {
 
 static void landing_invalidate(int tab) {
     if (tab < 0 || tab > TAB_SAGAS) return;
+    if (tab == g_land_applied_tab) landing_capture_focus();
     if (g_land == g_land_cache[tab]) g_land = NULL;
     if (g_land_cache[tab]) { cJSON_Delete(g_land_cache[tab]); g_land_cache[tab] = NULL; }
     load_landing(tab);
@@ -785,6 +846,8 @@ static void pump_landing(void) {
     cJSON *received = g_land_pending;
     g_land_pending = NULL;
     if (received && tab >= 0 && tab <= TAB_SAGAS) {
+        if (tab == g_land_applied_tab) landing_capture_focus();
+        if (g_land == g_land_cache[tab]) { g_land = NULL; g_heroesArr = NULL; }
         if (g_land_cache[tab]) cJSON_Delete(g_land_cache[tab]);
         g_land_cache[tab] = received;
         if (g_screen == SC_MAIN && g_tab == tab) landing_apply(tab, received);
@@ -805,6 +868,7 @@ static void pump_landing(void) {
 // detalhe e historico para manter o retorno contextual; somente landings grandes
 // e recursos visuais reconstruiveis sao descartados.
 static void playback_memory_enter(void) {
+    landing_capture_focus();
     cover_suspend_and_release();
     g_land = NULL; g_heroesArr = NULL; g_railsN = 0;
     for (int i = 0; i <= TAB_SAGAS; i++) {
@@ -848,6 +912,7 @@ static int on_player_progress(int item_id, int pos, int dur,
 static int finalize_natural_playback(int item_id, const PlayerResult *result,
                                      PlaybackSyncStatus *sync) {
     if (!result || result->reason != EXIT_REASON_NATURAL || !result->presented_frame) return 0;
+    if (!player_eof_complete(result->position, result->duration, 0)) return 0;
     if (sync && sync->completed && sync->item_id == item_id) return 1;
     if (item_id <= 0 || result->position <= 5) return 0;
     int saved = api_mark_watched(item_id) == 0;
@@ -2167,8 +2232,43 @@ static void load_history(void) {
     if (g_watchlater_pending) { cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL; }
     SDL_AtomicSet(&g_history_done, 0);
     SDL_AtomicSet(&g_watchlater_done, 0);
+    g_watchlater_fetch_revision = g_watchlater_revision;
     g_history_thread = SDL_CreateThread(history_fetch_thread, "history-fetch", NULL);
     g_watchlater_thread = SDL_CreateThread(watchlater_fetch_thread, "watchlater-fetch", NULL);
+}
+
+static int history_index_for_id(cJSON *items, int item_id) {
+    if (item_id <= 0) return -1;
+    for (int i = 0; i < arr_len(items); i++)
+        if (jint(cJSON_GetArrayItem(items, i), "item_id") == item_id) return i;
+    return -1;
+}
+
+static void apply_history(cJSON *fresh) {
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(fresh, "items");
+    if (!cJSON_IsArray(items)) {
+        cJSON_Delete(fresh);
+        toast("Nao foi possivel atualizar o Historico");
+        return;
+    }
+    int old_n = arr_len(history_items());
+    int selected_id = g_history_menu ? g_history_menu_item_id :
+        jint(cJSON_GetArrayItem(history_items(), g_history_sel), "item_id");
+    int matching = history_index_for_id(items, selected_id);
+    if (g_history) cJSON_Delete(g_history);
+    g_history = fresh;
+    int n = arr_len(items);
+    if (matching >= 0) g_history_sel = matching;
+    else {
+        if (g_history_sel >= n) g_history_sel = n > 0 ? n - 1 : 0;
+        if (g_history_menu) {
+            g_history_menu = 0;
+            g_history_menu_item_id = 0;
+            toast("Esta obra nao esta mais no Historico");
+        }
+    }
+    if (n == 0) g_history_zone = 1;
+    else if (old_n == 0) g_history_zone = 0;
 }
 
 static void pump_history(void) {
@@ -2176,26 +2276,31 @@ static void pump_history(void) {
         SDL_WaitThread(g_history_thread, NULL); g_history_thread = NULL;
     }
     if (!g_history_thread && g_history_pending) {
-        int old_n = arr_len(history_items());
-        if (g_history) cJSON_Delete(g_history);
-        g_history = g_history_pending; g_history_pending = NULL;
-        int n = arr_len(cJSON_GetObjectItemCaseSensitive(g_history, "items"));
-        if (g_history_sel >= n) g_history_sel = n > 0 ? n - 1 : 0;
-        if (n == 0) g_history_zone = 1;
-        else if (old_n == 0) g_history_zone = 0;
+        cJSON *fresh = g_history_pending; g_history_pending = NULL;
+        apply_history(fresh);
     }
     if (g_watchlater_thread && SDL_AtomicGet(&g_watchlater_done)) {
         SDL_WaitThread(g_watchlater_thread, NULL); g_watchlater_thread = NULL;
     }
     if (!g_watchlater_thread && g_watchlater_pending) {
-        int list = store_media_list_create("Assistir mais tarde");
         cJSON *items = cJSON_GetObjectItemCaseSensitive(g_watchlater_pending, "items");
-        cJSON *item;
-        cJSON_ArrayForEach(item, items) {
-            int series_id = jint(item, "series_id"), item_id = jint(item, "item_id");
-            int is_series = series_id > 0;
-            store_media_list_add(list, is_series ? series_id : item_id, is_series,
-                                 jstr(item, "title"), jstr(item, "logo"));
+        if (g_watchlater_fetch_revision != g_watchlater_revision) g_history_refresh_requested = 1;
+        else if (!cJSON_IsArray(items)) toast("Lista indisponivel; sua lista foi preservada");
+        else {
+            int list = store_media_list_create("Assistir mais tarde");
+            int selected_id = 0, selected_kind = 0;
+            if (g_open_list == list)
+                store_media_list_get(list, g_list_item_sel, &selected_id, &selected_kind, NULL, 0, NULL, 0);
+            if (store_watchlater_reconcile(list, items) < 0) toast("Nao consegui sincronizar; sua lista foi preservada");
+            else if (g_open_list == list) {
+                int count = store_media_list_item_count(list);
+                if (g_list_item_sel >= count) g_list_item_sel = count > 0 ? count - 1 : 0;
+                for (int i = 0; i < count; i++) {
+                    int id = 0, kind = 0;
+                    store_media_list_get(list, i, &id, &kind, NULL, 0, NULL, 0);
+                    if (selected_id == id && selected_kind == kind) { g_list_item_sel = i; break; }
+                }
+            }
         }
         cJSON_Delete(g_watchlater_pending); g_watchlater_pending = NULL;
     }
@@ -2494,6 +2599,8 @@ static void draw_landing(void) {
     SDL_Rect content_clip = { 0, 95, WIN_W, WIN_H - 95 - 52 };
     SDL_RenderSetClipRect(gRen, &content_clip);
     int nh = hero_count();
+    int max_scroll = (nh > 0 ? RAILS_TOP : 125) + g_railsN * RAIL_STEP + 144 - (WIN_H - 52);
+    g_homeScroll = clamp_scroll(g_homeScroll, max_scroll > 0 ? max_scroll : 0);
     int hy = 110 - g_homeScroll;
     if (nh > 0 && hy + HERO_H >= 95 && hy < WIN_H) {
         cJSON *h = cJSON_GetArrayItem(g_heroesArr, g_heroIdx % nh);
@@ -3090,6 +3197,7 @@ static int is_account_watchlater(const char *name) {
 }
 
 static long sync_watchlater_item(const char *method, int id, int is_series) {
+    g_watchlater_revision++; // Invalidate snapshots started before this mutation, including ambiguous failures.
     char body[96];
     snprintf(body, sizeof(body), is_series ? "{\"series_id\":%d}" : "{\"item_id\":%d}", id);
     return ui_send("/api/sync/watchlater", method, body);
@@ -3102,9 +3210,11 @@ int media_list_add_named(const char *name, int id, int is_series, const char *ti
     if (r == 1) toast("Este titulo ja esta nessa lista");
     else if (r == 0) { char msg[96]; snprintf(msg, sizeof(msg), "Adicionado a %s", store_media_list_name(list)); toast(msg); }
     else toast(r == -2 ? "A lista chegou ao limite de itens" : "Nao foi possivel adicionar");
-    if (r >= 0 && is_account_watchlater(store_media_list_name(list)) &&
-        sync_watchlater_item("POST", id, is_series) != 200)
-        toast("Salvo apenas neste Switch; tente novamente quando houver internet");
+    if (r >= 0 && is_account_watchlater(store_media_list_name(list))) {
+        if (sync_watchlater_item("POST", id, is_series) == 200)
+            store_watchlater_confirm(list, id, is_series);
+        else toast("Salvo apenas neste Switch; tente novamente quando houver internet");
+    }
     return r;
 }
 
@@ -3712,13 +3822,18 @@ static void draw_login(void) {
 
 // ------------------------------------------------------------- input
 static void enter_tab(int tab) {
+    landing_capture_focus();
     g_tab = tab;
     g_status[0] = '\0';
     if (tab == TAB_DOWNLOADS) {
-        g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; g_history_sel = 0;
-        g_history_zone = arr_len(history_items()) > 0 ? 0 : 1; g_list_sel = 0;
-        g_history_scroll = g_media_list_scroll = g_list_grid_scroll = 0;
+        if (!g_history_context_initialized) {
+            g_history_context_initialized = 1;
+            g_dlSel = 0; g_dlScroll = 0; g_dlView = 0; g_history_sel = 0;
+            g_history_zone = arr_len(history_items()) > 0 ? 0 : 1; g_list_sel = 0;
+            g_history_scroll = g_media_list_scroll = g_list_grid_scroll = 0;
+        }
         g_history_menu = 0; g_history_menu_sel = 0;
+        g_history_menu_item_id = 0;
         local_dl_refresh(); load_downloads(); load_history();
         g_dl_next = SDL_GetTicks() + 2000; return;
     }
@@ -4155,6 +4270,13 @@ static void input_downloads(int b) {
             else if (b == JOY_UP && g_history_menu_sel > 0) g_history_menu_sel--;
             else if (b == JOY_DOWN && g_history_menu_sel < 3) g_history_menu_sel++;
             else if (b == JOY_A && g_history_sel < nh) {
+                int target = history_index_for_id(history_items(), g_history_menu_item_id);
+                if (target < 0) {
+                    g_history_menu = 0;
+                    toast("Esta obra nao esta mais no Historico");
+                    return;
+                }
+                g_history_sel = target;
                 cJSON *item = cJSON_GetArrayItem(history_items(), g_history_sel);
                 int duration = jint(item, "duration_seconds");
                 int action = g_history_menu_sel;
@@ -4210,6 +4332,7 @@ static void input_downloads(int b) {
             }
         } else if (g_history_zone == 0 && nh > 0 && b == JOY_X) {
             g_history_menu = 1; g_history_menu_sel = 0;
+            g_history_menu_item_id = jint(cJSON_GetArrayItem(history_items(), g_history_sel), "item_id");
         } else if (g_history_zone == 1 && g_list_sel > 0 && g_list_sel < total - 1 && b == JOY_Y) {
             if (is_account_watchlater(store_media_list_name(g_list_sel - 1))) {
                 toast("Assistir mais tarde acompanha sua conta e mantem este nome"); return;

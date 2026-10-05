@@ -5,6 +5,7 @@
 #pragma once
 #include <SDL.h>
 #include "subtitle_queue.h"
+#include "player_touch.h"
 
 #define PUI_W 1280
 #define PUI_H 720

@@ -61,6 +61,7 @@ typedef struct {
     int episode;
 
     double start_sec;
+    int start_paused; // same-playback reopen intent; a new episode defaults to playing
     // Preferencia da conta e continuidade entre episodios. audio_hint e 1-based.
     int audio_pref; // 0=dublado, 1=legendado, 2=tanto faz
     // Uma versao Dublado/Legendado escolhida explicitamente no detalhe da serie

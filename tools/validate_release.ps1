@@ -214,6 +214,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Concorrencia do worker demux falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'AVIO de rede falhou.' }
 & node tools/test_player_supervisor.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Supervisor perdeu ponto salvo.' }
+& node tools/test_player_flow_guards.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Historico/EOF/pausa perderam os guards de fluxo.' }
+& node tools/test_player_navigation.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
+& node tools/test_media_list_sync.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Reconciliacao segura de Assistir mais tarde falhou.' }
 & node tools/test_seek_barrier.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Barreira de seek reabriu fonte ocupada.' }
 & node tools/test_curl_backpressure_probe.mjs
