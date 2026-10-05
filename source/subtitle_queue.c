@@ -1,4 +1,5 @@
 #include "subtitle_queue.h"
+#include "subtitle_utf8.h"
 #include <math.h>
 
 #include <stdio.h>
@@ -128,7 +129,7 @@ void subtitle_queue_push_at(SubtitleQueue *queue, double start, double end,
 
     // Share the same fixed 32 slots. Signs may use at most eight, and can
     // never evict dialogue. Dialogue can use all slots when there are no
-    // signs; on pressure it reclaims a sign before replacing old dialogue.
+    // signs; on pressure it reclaims a sign before the farthest future dialogue.
     int first_sign = -1, sign_count = 0, remove = -1;
     for (int i = 0; i < queue->count; i++) {
         if (!queue->cues[i].at.positioned) continue;
@@ -139,7 +140,13 @@ void subtitle_queue_push_at(SubtitleQueue *queue, double start, double end,
     if (incoming_sign && sign_count >= SUBTITLE_SIGNS_MAX) remove = first_sign;
     else if (queue->count == SUBTITLE_QUEUE_CAP) {
         if (incoming_sign && first_sign < 0) return;
-        remove = first_sign >= 0 ? first_sign : 0;
+        if (first_sign >= 0) remove = first_sign;
+        else {
+            // Keep the nearest not-yet-expired speech, not the farthest future
+            // cue. The frame path prunes expired entries as the clock advances.
+            remove = queue->count - 1;
+            if (start >= queue->cues[remove].start) return;
+        }
     }
     if (remove >= 0) {
         memmove(&queue->cues[remove], &queue->cues[remove + 1],
@@ -151,13 +158,12 @@ void subtitle_queue_push_at(SubtitleQueue *queue, double start, double end,
     cue->start = start;
     cue->end = end;
     if (at && at->positioned) cue->at = *at; else memset(&cue->at, 0, sizeof(cue->at));
-    snprintf(cue->text, sizeof(cue->text), "%s", text);
+    subtitle_utf8_copy(cue->text, sizeof(cue->text), text);
     subtitle_queue_sort(queue);
 }
 
-const char *subtitle_queue_text(SubtitleQueue *queue, double position) {
-    if (!queue) return "";
-
+void subtitle_queue_advance(SubtitleQueue *queue, double position) {
+    if (!queue) return;
     int keep = 0;
     for (int i = 0; i < queue->count; i++) {
         if (queue->cues[i].end > position - 0.25) {
@@ -166,6 +172,11 @@ const char *subtitle_queue_text(SubtitleQueue *queue, double position) {
         }
     }
     queue->count = keep;
+}
+
+const char *subtitle_queue_text(SubtitleQueue *queue, double position) {
+    if (!queue) return "";
+    subtitle_queue_advance(queue, position);
     queue->composed[0] = 0;
 
     for (int i = 0; i < queue->count; i++) {
@@ -180,7 +191,7 @@ const char *subtitle_queue_text(SubtitleQueue *queue, double position) {
             used++;
             remaining = sizeof(queue->composed) - used;
         }
-        strncat(queue->composed, cue->text, remaining - 1);
+        subtitle_utf8_copy(queue->composed + used, remaining, cue->text);
     }
     return queue->composed;
 }

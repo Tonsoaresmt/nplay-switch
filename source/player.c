@@ -34,6 +34,8 @@
 #include "subtitle_queue.h"
 #include "subtitle_store.h"
 #include "subtitle_retry.h"
+#include "subtitle_choice.h"
+#include "subtitle_utf8.h"
 #include "subtitle_limits.h"
 #include "hls_manifest.h"
 #include "hot_subtitles.h"
@@ -76,6 +78,7 @@ static int g_player_last_access_expired = 0;
 static int g_player_audio_index = 0;
 static char g_player_audio_language[8] = "";
 static int g_player_subtitle_index = 0;
+static SubtitleChoice g_player_subtitle_choice;
 // Cues da legenda do master guardados entre as reaberturas da MESMA
 // reproducao (salto, troca de audio, recuperacao de rede). Antes cada
 // reabertura baixava o VTT de novo; uma falha momentanea desligava a legenda
@@ -720,6 +723,10 @@ static void ass_to_text(const char *ass, char *out, int cap) {
         out[k++] = *p++;
     }
     out[k] = 0;
+    if (*p && k == cap - 1) {
+        while (k && ((unsigned char)*p & 0xc0) == 0x80) { p--; k--; }
+        out[k] = 0;
+    }
 }
 
 typedef struct ProgressiveSubtitle ProgressiveSubtitle;
@@ -738,6 +745,7 @@ struct ProgressiveSubtitle {
     VttStream parser;
     char url[2048];
     int result;
+    int reported; // render-thread only: one exhaustion notification per worker
 };
 static void progressive_subtitle_stop(ProgressiveSubtitle *stream);
 
@@ -769,7 +777,13 @@ static void packet_subtitle_placement(const AVPacket *packet, SubtitlePlacement 
 }
 
 static int external_subtitle_count(const ExternalSubtitleStore *store) {
-    return store ? subtitle_store_count(&store->cues) : 0;
+    if (!store) return 0;
+    if (!store->progressive) return subtitle_store_count(&store->cues);
+    ProgressiveSubtitle *p = store->progressive;
+    SDL_LockMutex(p->mutex);
+    int count = subtitle_store_count(&p->store.cues);
+    SDL_UnlockMutex(p->mutex);
+    return count;
 }
 
 static const char *external_subtitle_text(ExternalSubtitleStore *store,
@@ -921,6 +935,7 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
         goto fail;
     }
     AVStream *st = subfmt->streams[stream];
+    int decoded_packets = 0;
     while ((rc = av_read_frame(subfmt, packet)) >= 0) {
         if (subtitle_cancelled(cancel)) { rc = AVERROR_EXIT; av_packet_unref(packet); break; }
         if (packet->stream_index == stream) {
@@ -939,11 +954,11 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
                     if (rect->type == SUBTITLE_ASS && rect->ass)
                         ass_to_text(rect->ass, part, sizeof(part));
                     else if (rect->type == SUBTITLE_TEXT && rect->text)
-                        snprintf(part, sizeof(part), "%s", rect->text);
+                        subtitle_utf8_copy(part, sizeof(part), rect->text);
                     if (part[0]) {
                         size_t left = sizeof(text) - strlen(text) - 1;
                         if (text[0] && left > 1) { strncat(text, "\n", left); left--; }
-                        strncat(text, part, left);
+                        subtitle_utf8_copy(text + strlen(text), left + 1, part);
                     }
                 }
                 double decoded = sub.pts != AV_NOPTS_VALUE
@@ -968,6 +983,7 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
                 }
                 avsubtitle_free(&sub);
             }
+            decoded_packets++;
         }
         av_packet_unref(packet);
     }
@@ -976,7 +992,9 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
     avformat_close_input(&subfmt);
     subtitle_root_close(root, direct);
     membuf_free(&body);
-    if (external_subtitle_count(&loaded) <= 0 || rc != AVERROR_EOF ||
+    // Provided progressive blocks may decode to intentionally ignored graphics.
+    // Whole tracks still require text, and all EOF/error guards remain intact.
+    if ((external_subtitle_count(&loaded) <= 0 && (!provided || !decoded_packets)) || rc != AVERROR_EOF ||
         subtitle_cancelled(cancel) || (!direct && subtitle_hls_io_failed)) {
         diag_player_event("subtitle", "incomplete", "cues=%d rc=%d io=%d cancel=%d",
                           external_subtitle_count(&loaded), rc,
@@ -1040,7 +1058,16 @@ static int progressive_subtitle_block(void *opaque, const char *block, size_t si
     ProgressiveSubtitle *stream = opaque;
     if (SDL_AtomicGet(&stream->cancel)) return 0;
     // WebVTT NOTE/STYLE/REGION blocks and keepalive whitespace have no cue.
-    if (!strstr(block, "-->")) return 1;
+    const char *ignore[] = { "NOTE", "STYLE", "REGION" };
+    for (unsigned i = 0; i < sizeof(ignore) / sizeof(ignore[0]); i++) {
+        size_t n = strlen(ignore[i]);
+        if (!strncmp(block, ignore[i], n) &&
+            (!block[n] || block[n] == ' ' || block[n] == '\t' || block[n] == '\n')) return 1;
+    }
+    const char *arrow = strstr(block, "-->");
+    if (!arrow) return 1;
+    const char *payload = strchr(arrow, '\n');
+    if (!payload || !payload[1]) return 1; // empty cue, no visible text to decode
     char *file = malloc(size + 11);
     if (!file) return 0;
     memcpy(file, "WEBVTT\n\n", 8); memcpy(file + 8, block, size);
@@ -1087,6 +1114,11 @@ static int progressive_subtitle_worker(void *opaque) {
     }
     SDL_AtomicSet(&stream->done, 1);
     return 0;
+}
+static int progressive_subtitle_failed_once(ProgressiveSubtitle *stream) {
+    if (!stream || !SDL_AtomicGet(&stream->done) || stream->reported) return 0;
+    stream->reported = 1;
+    return stream->result != 0 && !SDL_AtomicGet(&stream->cancel);
 }
 static void progressive_subtitle_stop(ProgressiveSubtitle *stream) {
     if (!stream) return;
@@ -1256,6 +1288,16 @@ static void subtitle_session_clear(void) {
 
 // Mesmo padrao de modern_track_labels: nome publicado, idioma quando o nome e
 // tecnico (subtitle_0) e numeracao quando ha mais de uma faixa.
+static void external_subtitle_keys(SubtitleTrackKey *keys, const HlsManifestTrack *tracks, int count) {
+    for (int i = 0; i < count && i < HLS_MANIFEST_TRACK_CAP; i++) {
+        memset(&keys[i], 0, sizeof(keys[i]));
+        subtitle_utf8_copy(keys[i].language, sizeof(keys[i].language),
+            audio_language_normalize(tracks[i].language, tracks[i].name));
+        subtitle_utf8_copy(keys[i].name, sizeof(keys[i].name), tracks[i].name);
+        keys[i].forced = tracks[i].forced;
+        keys[i].rendition = subtitle_rendition_key(tracks[i].uri);
+    }
+}
 static void external_subtitle_labels(PlayerHud *hud, char names[17][96],
                                      const HlsManifestTrack *tracks, int count) {
     hud->sub_count = count + 1;
@@ -2289,7 +2331,24 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 best_audio) == unknown)
             inferred_dub = unknown;
     }
-    if (req->subtitle_hint_priority) {
+    SubtitleTrackKey subtitle_keys[HLS_MANIFEST_TRACK_CAP] = {0};
+    if (manifest_subtitle_fallback) external_subtitle_keys(subtitle_keys, manifest_subtitles, nsub);
+    else for (int i = 0; i < nsub; i++) {
+        const char *language = stream_norm(fmt, sidxs[i]);
+        AVDictionaryEntry *name = av_dict_get(fmt->streams[sidxs[i]]->metadata, "title", NULL, 0);
+        subtitle_utf8_copy(subtitle_keys[i].language, sizeof(subtitle_keys[i].language), language);
+        subtitle_utf8_copy(subtitle_keys[i].name, sizeof(subtitle_keys[i].name),
+            name ? name->value : "");
+        subtitle_keys[i].forced = !!(fmt->streams[sidxs[i]]->disposition & AV_DISPOSITION_FORCED);
+        subtitle_keys[i].rendition = ((uint64_t)(uint32_t)fmt->streams[sidxs[i]]->id << 32) |
+               (uint32_t)fmt->streams[sidxs[i]]->codecpar->codec_id;
+    }
+    int restored_sub = subtitle_choice_resolve(req->subtitle_choice, subtitle_keys,
+                                               nsub, req->source_id);
+    if (restored_sub >= -1) {
+        sub_chosen = 1;
+        scur = restored_sub;
+    } else if (req->subtitle_hint_priority && !req->subtitle_choice) {
         sub_chosen = 1;
         scur = req->subtitle_hint > 0 && req->subtitle_hint <= nsub
             ? req->subtitle_hint - 1 : -1;
@@ -2321,6 +2380,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
 
     int aidx = naud ? aidxs[acur] : -1;
+    // Desired selection survives an early decoder/network failure. No streams
+    // in a fallback source must not silently overwrite it with deliberate OFF.
+    if (scur >= 0 || (sub_chosen && scur < 0))
+        subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                scur, req->source_id);
     g_player_audio_index = naud ? acur_ui + 1 : 0;
     snprintf(g_player_audio_language, sizeof(g_player_audio_language), "%s",
              naud ? (stream_norm(fmt, aidx)[0] ? stream_norm(fmt, aidx) : "und") : "");
@@ -2580,6 +2644,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     Uint32 buffering_audio_ms = 0, longest_buffer_ms = 0;
     Uint32 notice_until = 0;
     char notice[96] = "";
+    if (req->subtitle_choice && req->subtitle_choice->valid &&
+        req->subtitle_choice->index >= 0 && restored_sub == -2 && nsub > 0) {
+        snprintf(notice, sizeof(notice), "Fonte mudou: confira a faixa de legenda em X");
+        notice_until = SDL_GetTicks() + 5000;
+        diag_player_event("subtitle", "identity-missing", "tracks=%d", nsub);
+    }
     if (req->subtitle_hint > 0 && nsub == 0 && !hot_subtitle_session_valid(req->playback.hot_session_id)) {
         // Recuperacao trocou para uma fonte sem legendas (ex.: MP4 do provedor
         // depois de o R2 falhar). Avise em vez de a legenda sumir sem motivo.
@@ -2751,6 +2821,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     while (running) {
         Uint32 now_ticks = SDL_GetTicks();
+        ProgressiveSubtitle *progressive = external_subtitles.progressive;
+        if (progressive_subtitle_failed_once(progressive)) {
+            snprintf(notice, sizeof(notice), "Legenda interrompida  |  X: selecione a faixa para recarregar");
+            notice_until = now_ticks + 5000;
+            diag_player_event("subtitle", "stream-exhausted", "choice=%d cues=%d",
+                              scur + 1, external_subtitle_count(&external_subtitles));
+        }
         int fetched = subtitle_fetch_poll(&subtitle_fetch, &external_subtitles, subtitle_retry.desired);
         if (fetched) {
             int choice = subtitle_fetch.choice;
@@ -2758,6 +2835,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 int was_switch = scur != choice;
                 scur = choice;
                 g_player_subtitle_index = scur + 1;
+                subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                        scur, req->source_id);
                 const char *norm = audio_language_normalize(
                     manifest_subtitles[scur].language, manifest_subtitles[scur].name);
                 if (was_switch) {
@@ -3181,6 +3260,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             int next = track_sel - 1;
                             if (manifest_subtitle_fallback && !hot_external_subtitles) {
                                 subtitle_retry_select(&subtitle_retry, next);
+                                subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                                        next, req->source_id);
                                 if (next == scur) subtitle_fetch_stop(&subtitle_fetch);
                             }
                             if (next == scur && (next < 0 || !manifest_subtitle_fallback)) {
@@ -3230,6 +3311,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 }
                                 if (changed) {
                                     g_player_subtitle_index = scur + 1;
+                                    subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                                            scur, req->source_id);
                                     if (scur < 0)
                                         snprintf(notice, sizeof(notice),
                                                  "Legendas desativadas");
@@ -3285,6 +3368,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                             next_sctx = NULL;
                                             scur = next;
                                             g_player_subtitle_index = scur + 1;
+                                            subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                                                    scur, req->source_id);
                                             if (scur < 0) store_save_pref_sub("off");
                                             else {
                                                 const char *norm = stream_norm(fmt, sidxs[scur]);
@@ -3545,6 +3630,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             if (count > 0) {
                 nsub = manifest_subtitle_count = count;
                 hot_external_subtitles = manifest_subtitle_fallback = 1;
+                external_subtitle_keys(subtitle_keys, manifest_subtitles, nsub);
                 external_subtitle_labels(&hud_base, hud_sub_names, manifest_subtitles, nsub);
                 track_menu = TRACK_MENU_SUB; track_sel = 0;
             } else {
@@ -4071,14 +4157,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 for (unsigned r = 0; r < sub.num_rects; r++) {
                     AVSubtitleRect *rc = sub.rects[r]; char tmp[400] = "";
                     if (rc->type == SUBTITLE_ASS && rc->ass) ass_to_text(rc->ass, tmp, sizeof(tmp));
-                    else if (rc->type == SUBTITLE_TEXT && rc->text) snprintf(tmp, sizeof(tmp), "%s", rc->text);
+                    else if (rc->type == SUBTITLE_TEXT && rc->text) subtitle_utf8_copy(tmp, sizeof(tmp), rc->text);
                     if (tmp[0]) {
                         size_t rem = sizeof(cue_text) - strlen(cue_text) - 1;
                         if (cue_text[0] && rem > 1) {
                             strncat(cue_text, "\n", rem);
                             rem--;
                         }
-                        strncat(cue_text, tmp, rem);
+                        subtitle_utf8_copy(cue_text + strlen(cue_text), rem + 1, tmp);
                     }
                 }
                 AVRational stb = fmt->streams[sidxs[scur]]->time_base;
@@ -4095,6 +4181,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 if (cue_text[0]) {
                     SubtitlePlacement cue_at;
                     packet_subtitle_placement(pkt, &cue_at);
+                    subtitle_queue_advance(&subtitles, cur_pos);
                     subtitle_queue_push_at(&subtitles, cue_start, cue_end, cue_text, &cue_at);
                     subtitle_cues++;
                     if (subtitle_cues == 1)
@@ -4287,6 +4374,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     int last_audio_priority = 0;
     int last_subtitle = 0;
     int last_subtitle_priority = 0;
+    SubtitleChoice last_subtitle_choice = {0};
     int controlled_restarts = 0;
     char last_audio_language[8] = "";
     PlaybackSource active = request->playback;
@@ -4321,6 +4409,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         attempt.section = active.section;
         attempt.container = active.container;
         attempt.url = active.play_url;
+        if (last_subtitle_choice.valid) attempt.subtitle_choice = &last_subtitle_choice;
         if (last_audio > 0) attempt.audio_hint = last_audio;
         if (last_audio_language[0]) attempt.audio_hint_language = last_audio_language;
         if (last_audio > 0 || last_audio_language[0])
@@ -4334,6 +4423,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         g_player_audio_index = 0;
         g_player_audio_language[0] = '\0';
         g_player_subtitle_index = 0;
+        memset(&g_player_subtitle_choice, 0, sizeof(g_player_subtitle_choice));
         g_player_chosen_item = 0;
         diag_player_event("player", "attempt-begin", "attempt=%d pos=%.1f session=%d source=%d",
                           retry_count + 1, attempt_start, active.session_id, active.source_id);
@@ -4352,7 +4442,11 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
         if (g_player_audio_index > 0) last_audio = g_player_audio_index;
         if (g_player_audio_language[0])
             snprintf(last_audio_language, sizeof(last_audio_language), "%s", g_player_audio_language);
-        last_subtitle = g_player_subtitle_index;
+        if (g_player_subtitle_choice.valid) {
+            last_subtitle_choice = g_player_subtitle_choice;
+            last_subtitle = last_subtitle_choice.index + 1;
+            last_subtitle_priority = 1;
+        }
 
         if (rc == PLAYER_RESTART_SEEK || rc == PLAYER_RESTART_TRACK) {
             current_pos = player_recovery_position(current_pos, out_pos,
@@ -4365,7 +4459,6 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             retry_count = 0;
             if (rc == PLAYER_RESTART_TRACK) {
                 last_audio_priority = 2;
-                last_subtitle_priority = 1;
             }
             diag_player_event("player", "controlled-restart",
                               "kind=%s generation=%d pos=%.2f audio=%d sub=%d",

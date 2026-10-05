@@ -56,6 +56,7 @@ typedef struct {
 } SubtitleQueue;
 
 void subtitle_queue_reset(SubtitleQueue *queue);
+void subtitle_queue_advance(SubtitleQueue *queue, double position);
 void subtitle_queue_push(SubtitleQueue *queue, double start, double end,
                          const char *text);
 void subtitle_queue_push_at(SubtitleQueue *queue, double start, double end,

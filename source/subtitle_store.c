@@ -121,6 +121,28 @@ int subtitle_store_add_at(SubtitleStore *store, double start, double end, const 
     if (!(end > start)) end = start + 4.0;
     float s = (float)start, e = (float)end;
     int is_long = end - start > SUBTITLE_STORE_LONG_SECONDS;
+    int long_at = store->long_count;
+    if (is_long) {
+        // Long cues are sorted too: retries from the beginning must find old
+        // signs beyond the recent 12-cue window, without a full-list scan.
+        int lo = 0, hi = store->long_count;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (store->longs[mid].start < s - 0.002f) lo = mid + 1; else hi = mid;
+        }
+        for (int i = lo; i < store->long_count && store->longs[i].start <= s + 0.002f; i++) {
+            SubtitleStoreCue *old = &store->longs[i];
+            if (!same_cue(store, old, text, len, place)) continue;
+            if (e > old->end) old->end = e;
+            store->merged++; return 1;
+        }
+        lo = 0; hi = store->long_count;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (store->longs[mid].start <= s) lo = mid + 1; else hi = mid;
+        }
+        long_at = lo;
+    }
     if (is_long ? merge_recent(store, store->longs, store->long_count, s, e, text, len, 1, place)
                 : merge_recent(store, store->cues, store->count, s, e, text, len, 0, place)) return 1;
     if (store->count + store->long_count >= SUBTITLE_STORE_MAX_CUES ||
@@ -142,7 +164,10 @@ int subtitle_store_add_at(SubtitleStore *store, double start, double end, const 
     if (is_long) {
         if (!grow((void **)&store->longs, &store->long_capacity, sizeof(cue),
                   store->long_count + 1)) return 0;
-        store->longs[store->long_count++] = cue;
+        memmove(&store->longs[long_at + 1], &store->longs[long_at],
+                (size_t)(store->long_count - long_at) * sizeof(cue));
+        store->longs[long_at] = cue;
+        store->long_count++;
     } else {
         if (!grow((void **)&store->cues, &store->capacity, sizeof(cue), store->count + 1))
             return 0;
@@ -249,13 +274,6 @@ const char *subtitle_store_text(SubtitleStore *store, double position) {
     Candidate chosen[MAX_CANDIDATES];
     int chosen_n = 0;
     int used_lines = 0;
-    if (frag_n <= 3) {
-        for (int i = 0; i < frag_n; i++) {
-            if (used_lines + frags[i].lines > MAX_LINES) continue;
-            chosen[chosen_n++] = frags[i];
-            used_lines += frags[i].lines;
-        }
-    }
     if (talk_n > 0) {
         // Prioridade para o cue mais curto (fala) dentro do limite de linhas;
         // placas longas ficam de fora quando nao cabe tudo.
@@ -273,6 +291,16 @@ const char *subtitle_store_text(SubtitleStore *store, double position) {
                 used += talk[best].lines;
             }
             talk[best].cue = NULL;
+        }
+        used_lines = used;
+    }
+    // Speech reserves its space first; small real utterances remain visible
+    // when they fit, but karaoke fragments cannot displace a two-line dialogue.
+    if (frag_n <= 3) {
+        for (int i = 0; i < frag_n && chosen_n < MAX_CANDIDATES; i++) {
+            if (used_lines + frags[i].lines > MAX_LINES) continue;
+            chosen[chosen_n++] = frags[i];
+            used_lines += frags[i].lines;
         }
     }
     // Exibicao: placas longas em cima, falas por ordem de inicio embaixo.

@@ -3,6 +3,7 @@
 #include <string.h>
 #include "player_recovery.h"
 #include "player_sync.h"
+#include "subtitle_choice.h"
 typedef unsigned Uint32;
 typedef int SDL_Renderer;
 typedef int SDL_Joystick;
@@ -18,6 +19,7 @@ typedef struct { int type; struct { int button; } jbutton; } SDL_Event;
 #define PLAYER_REQUEST_NEXT 4
 #include "player_supervisor_types.inc"
 static int g_player_last_access_expired, g_player_audio_index, g_player_subtitle_index;
+static SubtitleChoice g_player_subtitle_choice;
 static double g_hls_timeline_origin;
 static int g_hls_timeline_origin_valid, g_player_chosen_item;
 static char g_reopen_headline[64];

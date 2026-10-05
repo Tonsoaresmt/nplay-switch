@@ -2,6 +2,7 @@
 #pragma once
 #include <SDL.h>
 #include "api.h"
+#include "subtitle_choice.h"
 
 typedef enum {
     PLAYER_RESOLVING,
@@ -71,6 +72,7 @@ typedef struct {
     int audio_hint_priority; // 1=mesma reproducao/idioma; 2=faixa manual exata
     int subtitle_hint; // 0=desligada; >0=faixa exata (1-based)
     int subtitle_hint_priority; // 1 quando subtitle_hint deve vencer a preferencia salva
+    const SubtitleChoice *subtitle_choice; // semantic identity, same playback only
 
     PlayerProgressCallback progress_cb;
     PlayerRenewCallback renew_cb;

@@ -226,6 +226,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Transporte de legendas rejeitou 8 MiB ou perde
 if ($LASTEXITCODE -ne 0) { throw 'Legenda desejada perdeu retry, cancelamento ou ownership.' }
 & node tools/test_subtitle_completion.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Legenda parcial foi aceita como completa ou apagou a faixa anterior.' }
+& node tools/test_subtitle_usage.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Regressoes de uso de legendas falharam.' }
 & node tools/test_completed_resume.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Episodio concluido tentou retomar no final ou perdeu retomada parcial.' }
 & node tools/test_host_suite_guards.mjs

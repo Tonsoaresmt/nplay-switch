@@ -1,5 +1,51 @@
 # Continuidade para agentes
 
+## Correcoes de uso de legendas — candidato 0.12.50, 05/10/2026
+
+- Checkout/branch permanecem switch-access-expiry / codex/switch-player-hardening.
+  Correcao sobre c8ef79f; nao confundir com a auditoria historica abaixo.
+- SubtitleChoice separa UNSET/OFF e acompanha idioma/nome/forced/rendition na
+  MESMA reproducao. Reopen precoce nao apaga a escolha; seek conserva a faixa;
+  remapeamento ambiguo avisa. Ausencia automatica nao vira OFF deliberado.
+- Hash de identidade ignora SOMENTE auth allowlisted; queries semanticas ficam.
+  NAO usar esse hash no cache: cache/download continuam com query completa.
+- Blocos graficos ignoraveis, NOTE/STYLE/REGION e cue vazio nao abortam extracao;
+  guards de EOF/rede/decoder/cancel/teto e pacote completo sem texto mantidos.
+- Exaustao progressiva avisa uma vez sem reiniciar video. Contagem real sob
+  mutex, metadados de probe tardio atualizados, fala antes de karaoke, dedup
+  longa ordenada e UTF-8 inteiro. Fila nativa prioriza ativo/proximo, mas ainda
+  tem 32 slots: nao prometer ausencia de perda em toda rajada arbitraria.
+- test_subtitle_usage e obrigatorio; audit_subtitle_usage --baseline reproduz
+  defeitos de c8ef79f (exit 0 ali NAO e player aprovado). FFmpeg/rede/fontes/
+  pipeline simulados, controles/store C reais. Sem hardware/Linux integrado.
+- Evidencias, limites, publicacao e roteiro em docs/SUBTITLE_FIXES_0_12_50.md.
+  Nenhum backend/R2/conta/release alterado; .50 ainda e candidato local.
+- Build ARM64 completo -Werror e validador completo no binario final (sem
+  SkipMediaFixtures) passaram. 24250191 bytes; SHA-256
+  909f166fd66f1068b46292d45f6b804d877a7c529db3b134f5c6453724474bbb.
+  NRO ignorado; nao incluir no commit. Teste fisico ainda obrigatorio.
+
+## Auditoria adicional de legendas — 05/10/2026 (sem correcao nesta rodada)
+
+- HEAD auditado c8ef79f, checkout/branch do candidato abaixo. Usuario pediu
+  analise: nenhuma mudanca no codigo do app, NRO, servidor ou release.
+- Oito categorias reproduzidas/inspecionadas em
+  docs/SUBTITLE_USAGE_AUDIT_2026_10_05.md. Criticos: falha precoce de reopen
+  transforma faixa escolhida em OFF; bloco grafico ignorado aborta extracao
+  progressiva inteira. Tambem identidade perdida no seek/fallback, worker
+  progressivo sem aviso ao esgotar, karaoke escondendo fala, replay duplicando
+  cues longas, overflow nativo e cortes UTF-8.
+- Reproducao: HOST_CC=gcc; node tools/audit_subtitle_usage.mjs. Exit 0 indica
+  DEFEITOS REPRODUZIDOS, nao aprovacao. FFmpeg/rede/fontes/pipeline simulados,
+  modulos C reais. Nao adicionar esse comando como teste verde do validador;
+  converter assertions ao comportamento correto ao implementar cada correcao.
+- Recomenda-se segurar publicacao da 0.12.50 ate corrigir os criticos. Os guards
+  de EOF/recurso pulado da rodada anterior devem continuar passando. Nao retirar
+  limites/TLS nem usar demux_abort do video para cancelar so legenda.
+- Detalhes/prioridades/regressoes/hardware pendente no relatorio. Nenhuma prova
+  de qual defeito atingiu o anime especifico; nao confundir simulacao com teste
+  fisico. Binario/hash do candidato permaneceram inalterados.
+
 ## Candidato 0.12.50 — legenda parcial / rewatch (05/10/2026)
 
 - Checkout ativo segue `.codex-tmp/switch-access-expiry`, branch

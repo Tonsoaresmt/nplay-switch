@@ -2,6 +2,7 @@
 #include "net.h"
 #include "subtitle_store.h"
 #include "subtitle_limits.h"
+#include "subtitle_utf8.h"
 #include <assert.h>
 #include <errno.h>
 #include <math.h>

@@ -5,6 +5,7 @@
 #include "player_ui.h"
 #include "text.h"
 #include "ui.h"
+#include "subtitle_utf8.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -236,16 +237,25 @@ static int wrap(WrapCache *cache, const char *text, int style, int width, int ma
             if (n >= (int)sizeof(candidate)) break;
             int w = 0, h = 0;
             if (text_measure(candidate, style, &w, &h) != 0) w = n * 11;
-            if (used && w > width) break;
+            if (w > width) break;
             snprintf(line, sizeof(line), "%s", candidate);
             used = strlen(line);
             line_end = end;
             if (*end == '\n' || *end == '\r') break;
         }
-        if (!used) {  // palavra maior que a linha: corta por bytes para garantir progresso
+        if (!used) { // long word: measure whole UTF-8 code points, never bytes
             size_t k = 0;
-            while (p[k] && p[k] != ' ' && k < 60) k++;
-            snprintf(line, sizeof(line), "%.*s", (int)k, p);
+            while (p[k] && p[k] != ' ' && p[k] != '\n' && p[k] != '\r') {
+                size_t next = k + 1;
+                while (p[next] && ((unsigned char)p[next] & 0xc0) == 0x80) next++;
+                if (next >= sizeof(line)) break;
+                memcpy(line + k, p + k, next - k); line[next] = 0;
+                int w = 0, h = 0;
+                if (text_measure(line, style, &w, &h) != 0) w = (int)next * 11;
+                if (k && w > width) { line[k] = 0; break; }
+                k = next;
+                if (w > width) break; // one wide glyph still makes progress
+            }
             line_end = p + k;
         }
         snprintf(cache->lines[cache->count++], sizeof(cache->lines[0]), "%s", line);
