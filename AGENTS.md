@@ -1,5 +1,28 @@
 # Continuidade para agentes
 
+## Auditoria adicional de fluxos — 05/10/2026 (sem mudanca no app)
+
+- Base ef5f6e5, checkout switch-access-expiry / codex/switch-player-hardening.
+  Pedido foi procurar falhas; somente documentos e ferramenta diagnostica novos.
+  docs/PLAYER_FLOWS_AUDIT_2026_10_05.md tem causas, limites e plano de correcao.
+- C real reproduziu: Historico perde identidade no reorder; JSON sem items
+  apaga estado; watchlater nao remove exclusao remota; retorno ao cache zera
+  foco/scroll; intent de aba antiga permanece; EOF antecipado marca como visto.
+- Inspecao: pausa nao e transportada nos reopens; touch ignora timeline e nao
+  possui hit-test de Episodios. Cancel/join de legenda bloqueou ~490 ms com
+  atraso ARTIFICIAL de 500 ms no worker. Nao e medida do Switch/Wi-Fi.
+- node tools/audit_player_flows.mjs: exit 0 indica defeitos REPRODUZIDOS,
+  nunca aprovado. Nao incorporar esse audit como criterio positivo de release.
+- Oito comandos de regressao separados passaram, incluindo 8 cenarios de
+  rewatch e 19 de completion; ler report para diferenciar mocks de pthread real.
+  Nenhum teste fisico, producao, Linux integrado ou playback longo executado.
+- App/NRO inalterados: candidato .50 local, SHA256 909f166fd66f1068b46292d45f6b804d877a7c529db3b134f5c6453724474bbb.
+  Sem build/validador completo novos nesta rodada; os anteriores permanecem
+  registrados abaixo. Nenhum push/deploy/reprocessamento/release nesta auditoria.
+- Proxima implementacao: identidade no Historico e EOF seguro, pausa/preroll,
+  modais touch/contexto por aba, replacement async de legenda, schema/reconciliacao.
+  Nao atribuir T3->T5/50min/crash a estas causas sem traces do incidente.
+
 ## Correcoes de uso de legendas — candidato 0.12.50, 05/10/2026
 
 - Checkout/branch permanecem switch-access-expiry / codex/switch-player-hardening.
