@@ -1,5 +1,53 @@
 # Continuidade para agentes
 
+## Publicacao .50 solicitada — 05/10/2026
+
+- Usuario autorizou explicitamente publicar apos informar que o atualizador nao
+  via as mudancas locais. Servico de aprovacao voltou a funcionar.
+- Confirmado remoto latest v0.12.49; branch remota hardening e ancestral do local
+  (0 atras,4 a frente), sem necessidade de force/rebase ou substituir main.
+- Reexecutando validador completo no NRO bfa8e19...; notas em RELEASE_0_12_50.md.
+  Publicar primeiro draft com Nplay.nro e checksum; conferir digest/tamanho;
+  so depois promover latest. Atualizador exige digest SHA256 do asset.
+- Nao anunciar homologacao fisica: publicacao e para teste autorizado no console.
+  Atualizar esta secao com commit/tag/URL/resultados quando confirmado.
+
+## Navegacao/visual/performance — 05/10/2026 (candidato .50 local)
+
+- Base 70613b3, checkout .codex-tmp/switch-access-expiry, branch
+  codex/switch-player-hardening; nao trabalhar no main antigo da raiz.
+- Direcional aceita edge curto; polling nao duplica; repeticao 380/55ms bounded,
+  wrap-safe, neutralizacao apos troca de tela/aba/menu do perfil.
+- Barra compartilha targets de desenho/touch; Buscar recebe toda area visivel.
+  Foco dos posters mais discreto, nomes fitted UTF8, headers reservam Voltar e
+  restauram clip. Avatar70/184, pipoca, arquitetura e player preservados.
+- Busca cacheia apenas32 pointers visiveis (sem truncar total); troca de JSON
+  invalida ANTES de delete. Font fitting cache64, ~129KiB, fallback >1023bytes.
+- Capas: URL integral <=2047, metadados<=3MiB/3000; retry 2/5/15/60s (404/410
+  5min), fila offscreen>1.5s descartada. In-flight antigo ainda pode esperar15s.
+  Corpo<=4MiB; resize proporcional no worker; ready<=16/16MiB; texturas<=160 e
+  pixels estimados64MiB, eviction ANTES de allocate. Pin do quadro protege recycle.
+- tools/test_app_navigation.mjs roda C extraido com SDL/HTTP/font simulados:
+  falhas/ownership/budgets, 3000capas, 5000resultados/4filtros, 240k warm windows,
+  Unicode, targets/repeat. Nao sao teste fisico, pixels nem scheduler das capas.
+- docs/APP_NAVIGATION_VISUAL_PERFORMANCE_0_12_50.md tem detalhes, fontes SDL,
+  limites e checklist hardware. Nao confundir budgets de pixels com heap total:
+  decoder de imagem original ainda pode gerar pico; falta medicao no console.
+- Build completo -Werror passou e main foi recompilado depois. Duas suites
+  completas passaram, inclusive a FINAL abaixo (sem SkipMediaFixtures).
+  git diff --check passou; novos testes estao integrados ao validate_release.
+  FINAL NRO 24262479 bytes; SHA256
+  bfa8e19e8592c6d0616b98e8e6e09b2e0c5a453b66f13598824dd3e8527cc96a.
+- Nenhum Switch fisico/producao/push/release nesta rodada. .50 segue candidata.
+  As pendencias de PLAYER_FLOW_FIXES_0_12_50.md continuam validas.
+- Commit desta rodada NAO executado: servico de aprovacao automatica recusou
+  iniciar o comando por limite de uso (nao foi decisao sobre seguranca).
+  HEAD segue70613b3; todos os16 arquivos desta rodada estao locais, sem stage.
+  NRO/hash reconferidos apos pedido de continuar. Nao contornar a aprovacao:
+  finalizar commit somente quando o servico estiver liberado/autorizado.
+  Depois, eventual publicacao exige processo normal de release e teste fisico;
+  nao anunciar disponibilidade no atualizador enquanto nao houver release.
+
 ## Implementacao dos fluxos — 05/10/2026 (candidato .50, ainda local)
 
 - Base e6e183f, checkout switch-access-expiry / codex/switch-player-hardening.

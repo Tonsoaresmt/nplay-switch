@@ -241,22 +241,18 @@ void ui_header(const char *section, const char *title, const char *action) {
     g_header_action_width = 0;
     fill_rect(0, 0, WIN_W, UI_HEADER_HEIGHT, C_BAR);
     fill_rect(0, 0, WIN_W, 3, C_ACC);
-    if (section && section[0]) text_draw(gRen, section, 50, 31, C_ACC, 0);
-    if (title && title[0]) {
-        int w = 0, h = 0;
-        SDL_Texture *t = text_cached(gRen, title, C_TEXT, 1, &w, &h);
-        int maxw = 680;
-        if (t) {
-            SDL_Rect clip = { 300, 22, maxw, 48 };
-            SDL_RenderSetClipRect(gRen, &clip);
-            SDL_Rect d = { 300 + (maxw - (w > maxw ? maxw : w)) / 2, 27, w, h };
-            SDL_RenderCopy(gRen, t, NULL, &d);
-            SDL_RenderSetClipRect(gRen, NULL);
-        }
-    }
+    int section_width = 0;
+    if (section && section[0]) section_width = text_draw(gRen, section, 50, 31, C_ACC, 0);
     if (action && action[0])
         g_header_action_width = text_right(action,
             WIN_W - UI_HEADER_ACTION_RIGHT_MARGIN, 31, C_MUT, 0);
+    if (title && title[0]) {
+        int left = 50 + section_width + 30;
+        if (left < 300) left = 300;
+        int right = WIN_W - UI_HEADER_ACTION_RIGHT_MARGIN - g_header_action_width - 30;
+        if (right > left) text_center_at(text_fitted(title, 1, right - left),
+                                         left, right - left, 27, C_TEXT, 1);
+    }
     fill_rect(0, 94, WIN_W, 1, (SDL_Color){41, 46, 64, 255});
 }
 

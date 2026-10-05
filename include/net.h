@@ -8,6 +8,7 @@ struct membuf {
     char  *data;   // sempre terminado em '\0' (ou NULL se vazio)
     size_t len;
     size_t cap;    // capacidade alocada; evita realloc a cada callback do curl
+    size_t limit;  // optional body cap (0 retains the existing API behaviour)
 };
 
 void membuf_free(struct membuf *m);

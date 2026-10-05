@@ -42,6 +42,7 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     if (size != 0 && nmemb > SIZE_MAX / size) return 0;
     size_t add = size * nmemb;
     struct membuf *m = (struct membuf *)userdata;
+    if (m->limit && (m->len > m->limit || add > m->limit - m->len)) return 0;
     if (m->len == SIZE_MAX || add > SIZE_MAX - m->len - 1) return 0;
     size_t need = m->len + add + 1;
     if (need > m->cap) {
@@ -50,6 +51,7 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
             if (cap > SIZE_MAX / 2) { cap = need; break; }
             cap *= 2;
         }
+        if (m->limit && m->limit < SIZE_MAX && cap > m->limit + 1) cap = m->limit + 1;
         char *np = realloc(m->data, cap);
         if (!np) return 0;             // sem memoria -> aborta o download
         m->data = np;

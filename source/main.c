@@ -31,6 +31,8 @@
 #include "touch_input.h"
 #include "device_pairing.h"
 #include "playback_resume.h"
+#include "navigation_input.h"
+#include "cover_policy.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -94,20 +96,25 @@ static long ui_send(const char *path, const char *method, const char *body) {
 #define COVER_HASH_SIZE 8192             // potencia de 2; carga < 37% com MAX_COV
 #define MAX_COVER_TEXTURES 160           // limita memoria de GPU/heap usada pelas capas
 typedef struct {
-    char url[720];
+    char *url;
     SDL_Texture *tex;
     SDL_Surface *surf;
     int state;
     Uint32 last_used;
+    Uint32 last_frame, retry_at;
+    unsigned failures;
+    size_t texture_bytes;
 } Cover;
 static Cover g_cov[MAX_COV];
 static int g_covN = 0;
 static int g_cov_hash[COVER_HASH_SIZE];   // indice+1; zero=vazio; -1=tumulo
 static int g_cov_texN = 0;
+static size_t g_cov_url_bytes, g_cov_ready_bytes, g_cov_texture_bytes;
+static Uint32 g_cover_frame;
 static SDL_mutex *g_cov_mtx;
 static int g_q[MAX_COV]; static int g_qh = 0, g_qt = 0, g_qn = 0;
 static SDL_mutex *g_q_mtx; static SDL_sem *g_q_sem;
-static int g_ready[MAX_COV]; static int g_rh = 0, g_rt = 0, g_rn = 0;
+static int g_ready[COVER_READY_MAX]; static int g_rh = 0, g_rt = 0, g_rn = 0;
 static SDL_mutex *g_ready_mtx;
 static volatile int g_run = 1;
 // O player e o catalogo disputam a mesma heap do processo. Durante a abertura
@@ -123,6 +130,8 @@ static unsigned cover_hash(const char *s) {
 
 // Chamado com g_cov_mtx travado. O hash evita comparar ate 3000 URLs por card/frame.
 static int cover_find_locked(const char *url, int create) {
+    size_t url_bytes = strlen(url) + 1;
+    if (url_bytes > COVER_URL_MAX) return -1; // never truncate signed/proxy URLs
     unsigned slot = cover_hash(url) & (COVER_HASH_SIZE - 1);
     int insert_slot = -1;
     for (int probe = 0; probe < COVER_HASH_SIZE; probe++) {
@@ -138,27 +147,39 @@ static int cover_find_locked(const char *url, int create) {
     if (!create || insert_slot < 0) return -1;
 
     int idx;
-    if (g_covN < MAX_COV) idx = g_covN++;
+    if (g_covN < MAX_COV && url_bytes <= COVER_URL_BYTES_MAX - g_cov_url_bytes) idx = g_covN;
     else {
         // Recicla apenas uma entrada ociosa. Workers nunca perdem o indice que
         // estao usando e o teto de memoria continua fixo mesmo apos navegar por
         // catalogos com mais de MAX_COV capas diferentes.
         idx = -1;
         for (int i = 0; i < g_covN; i++) {
-            if (g_cov[i].state == 3 && !g_cov[i].surf &&
+            if (g_cov[i].state == 3 && !g_cov[i].surf && g_cov[i].last_frame != g_cover_frame &&
                 (idx < 0 || g_cov[i].last_used < g_cov[idx].last_used)) idx = i;
         }
         if (idx < 0) return -1;
+    }
+    size_t old_bytes = idx < g_covN ? strlen(g_cov[idx].url) + 1 : 0;
+    if (url_bytes > COVER_URL_BYTES_MAX - (g_cov_url_bytes - old_bytes)) return -1;
+    char *copy = malloc(url_bytes);
+    if (!copy) return -1;
+    memcpy(copy, url, url_bytes);
+    if (idx < g_covN) {
         unsigned old = cover_hash(g_cov[idx].url) & (COVER_HASH_SIZE - 1);
         for (int probe = 0; probe < COVER_HASH_SIZE; probe++) {
             if (g_cov_hash[old] == idx + 1) { g_cov_hash[old] = -1; break; }
             if (g_cov_hash[old] == 0) break;
             old = (old + 1) & (COVER_HASH_SIZE - 1);
         }
-        if (g_cov[idx].tex) { SDL_DestroyTexture(g_cov[idx].tex); g_cov_texN--; }
+        if (g_cov[idx].tex) {
+            SDL_DestroyTexture(g_cov[idx].tex); g_cov_texN--;
+            g_cov_texture_bytes -= g_cov[idx].texture_bytes;
+        }
+        free(g_cov[idx].url);
         memset(&g_cov[idx], 0, sizeof(g_cov[idx]));
-    }
-    snprintf(g_cov[idx].url, sizeof(g_cov[idx].url), "%s", url);
+    } else g_covN++;
+    g_cov_url_bytes = g_cov_url_bytes - old_bytes + url_bytes;
+    g_cov[idx].url = copy;
     g_cov_hash[insert_slot] = idx + 1;
     return idx;
 }
@@ -168,7 +189,12 @@ SDL_Texture *cover_get(const char *url) {   // chamado no main (render)
     SDL_LockMutex(g_cov_mtx);
     int f = cover_find_locked(url, 1);
     SDL_Texture *tex = (f >= 0) ? g_cov[f].tex : NULL;
-    if (tex) g_cov[f].last_used = SDL_GetTicks();
+    Uint32 now = SDL_GetTicks();
+    if (f >= 0) {
+        g_cov[f].last_used = now; g_cov[f].last_frame = g_cover_frame;
+        if (!tex && g_cov[f].state == 3 &&
+            (int32_t)(now - g_cov[f].retry_at) >= 0) g_cov[f].state = 0;
+    }
     if (f >= 0 && g_cov[f].state == 0 && !SDL_AtomicGet(&g_cover_suspended)) {
         int queued = 0;
         SDL_LockMutex(g_q_mtx);
@@ -195,65 +221,88 @@ static int cover_worker(void *arg) {
             SDL_UnlockMutex(g_cov_mtx);
             continue;
         }
-        char url[900];
+        char url[COVER_URL_MAX + 256];
         SDL_LockMutex(g_cov_mtx);
+        // Fast scrolls must not download every off-screen poster first.
+        if ((Uint32)(SDL_GetTicks() - g_cov[idx].last_used) > 1500) {
+            g_cov[idx].state = 0;
+            SDL_UnlockMutex(g_cov_mtx);
+            continue;
+        }
         if (strncmp(g_cov[idx].url, "http", 4) == 0) snprintf(url, sizeof(url), "%s", g_cov[idx].url);
         else snprintf(url, sizeof(url), "%s%s", BASE, g_cov[idx].url);
         SDL_UnlockMutex(g_cov_mtx);
-        struct membuf out = { 0 };
+        struct membuf out = { .limit = COVER_DOWNLOAD_MAX };
         const char *err = NULL;
         // Capa morta nao pode prender um dos tres workers por 45 segundos.
-        long code = net_request_timeout(url, "GET", NULL, NULL, &out, &err, 6L, 15L);
+        long code = net_request_timeout_cancel(url, "GET", NULL, NULL, &out, &err, 6L, 15L,
+                                               &g_cover_suspended);
         SDL_Surface *s = NULL;
         if (code == 200 && out.data && out.len > 32) {
             SDL_RWops *rw = SDL_RWFromMem(out.data, (int)out.len);
             s = IMG_Load_RW(rw, 1);
         }
         membuf_free(&out);
-        int discard = 0;
-        SDL_LockMutex(g_cov_mtx);
-        if (SDL_AtomicGet(&g_cover_suspended)) {
-            g_cov[idx].state = 0; discard = 1;
-        } else if (s) {
-            g_cov[idx].surf = s; g_cov[idx].state = 2;
-        } else g_cov[idx].state = 3;
-        SDL_UnlockMutex(g_cov_mtx);
-        if (discard) {
-            if (s) SDL_FreeSurface(s);
-            continue;
-        }
         if (s) {
-            int queued = 0;
-            SDL_LockMutex(g_ready_mtx);
-            if (g_rn < MAX_COV) { g_ready[g_rt] = idx; g_rt = (g_rt + 1) % MAX_COV; g_rn++; queued = 1; }
-            SDL_UnlockMutex(g_ready_mtx);
-            if (!queued) {
-                SDL_LockMutex(g_cov_mtx);
-                if (g_cov[idx].surf == s) { g_cov[idx].surf = NULL; g_cov[idx].state = 0; }
-                SDL_UnlockMutex(g_cov_mtx);
-                SDL_FreeSurface(s);
+            int w = 0, h = 0;
+            if (!cover_surface_size(s->w, s->h, &w, &h)) { SDL_FreeSurface(s); s = NULL; }
+            else if (w != s->w || h != s->h) {
+                SDL_Surface *small = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
+                if (small) {
+                    SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_NONE);
+                    if (SDL_BlitScaled(s, NULL, small, NULL) != 0) { SDL_FreeSurface(small); small = NULL; }
+                }
+                SDL_FreeSurface(s); s = small;
             }
         }
+        // Publish surface + ready index atomically with respect to suspension.
+        // No waiting for main-thread uploads while holding a worker's surface.
+        SDL_LockMutex(g_cov_mtx);
+        if (SDL_AtomicGet(&g_cover_suspended)) {
+            g_cov[idx].state = 0;
+        } else if (s) {
+            size_t bytes = (size_t)s->pitch * s->h;
+            SDL_LockMutex(g_ready_mtx);
+            if (g_rn < COVER_READY_MAX && bytes <= COVER_READY_BYTES_MAX - g_cov_ready_bytes) {
+                g_cov[idx].surf = s; g_cov[idx].state = 2; g_cov[idx].failures = 0;
+                g_cov_ready_bytes += bytes;
+                g_ready[g_rt] = idx; g_rt = (g_rt + 1) % COVER_READY_MAX; g_rn++;
+                s = NULL; // ownership transferred to main
+            } else { g_cov[idx].state = 3; g_cov[idx].retry_at = SDL_GetTicks() + 2000; }
+            SDL_UnlockMutex(g_ready_mtx);
+        } else {
+            g_cov[idx].state = 3;
+            if (g_cov[idx].failures < 4) g_cov[idx].failures++;
+            g_cov[idx].retry_at = SDL_GetTicks() + cover_retry_delay(g_cov[idx].failures, code);
+        }
+        SDL_UnlockMutex(g_cov_mtx);
+        if (s) SDL_FreeSurface(s);
     }
     return 0;
 }
 static void cover_pump(void) {   // main: converte surfaces prontas em texturas
+    g_cover_frame++;
     // Criar textura e eventualmente expulsar uma LRU custa CPU/GPU. Limitar a
     // duas por frame evita os picos visiveis quando varias capas chegam juntas.
     for (int done = 0; done < 2; done++) {
         int idx = -1; SDL_Surface *s = NULL;
         SDL_LockMutex(g_ready_mtx);
-        if (g_rn > 0) { idx = g_ready[g_rh]; g_rh = (g_rh + 1) % MAX_COV; g_rn--; }
+        if (g_rn > 0) { idx = g_ready[g_rh]; g_rh = (g_rh + 1) % COVER_READY_MAX; g_rn--; }
         SDL_UnlockMutex(g_ready_mtx);
         if (idx < 0) break;
         SDL_LockMutex(g_cov_mtx);
-        if (g_cov[idx].state == 2) { s = g_cov[idx].surf; g_cov[idx].surf = NULL; g_cov[idx].state = 3; }
+        if (g_cov[idx].state == 2) {
+            s = g_cov[idx].surf; g_cov[idx].surf = NULL; g_cov[idx].state = 3;
+            g_cov_ready_bytes -= (size_t)s->pitch * s->h;
+        }
         SDL_UnlockMutex(g_cov_mtx);
         if (!s) continue;
-        SDL_Texture *tex = SDL_CreateTextureFromSurface(gRen, s);
-        SDL_FreeSurface(s);
+        size_t bytes = (size_t)s->w * s->h * 4;
         SDL_LockMutex(g_cov_mtx);
-        if (tex && g_cov_texN >= MAX_COVER_TEXTURES) {
+        // Make room BEFORE allocating: creating first could fail precisely when
+        // the old cache was full, leaving every new poster in a retry loop.
+        while (g_cov_texN >= MAX_COVER_TEXTURES ||
+               bytes > COVER_TEXTURE_BYTES_MAX - g_cov_texture_bytes) {
             int victim = -1;
             for (int i = 0; i < g_covN; i++) {
                 if (i != idx && g_cov[i].tex && (victim < 0 || g_cov[i].last_used < g_cov[victim].last_used)) victim = i;
@@ -262,12 +311,18 @@ static void cover_pump(void) {   // main: converte surfaces prontas em texturas
                 SDL_DestroyTexture(g_cov[victim].tex);
                 g_cov[victim].tex = NULL;
                 g_cov[victim].state = 0; // recarrega sob demanda se voltar a tela
+                g_cov_texture_bytes -= g_cov[victim].texture_bytes;
+                g_cov[victim].texture_bytes = 0;
                 g_cov_texN--;
-            }
+            } else break;
         }
+        SDL_Texture *tex = bytes <= COVER_TEXTURE_BYTES_MAX - g_cov_texture_bytes ?
+            SDL_CreateTextureFromSurface(gRen, s) : NULL;
+        SDL_FreeSurface(s);
         g_cov[idx].tex = tex;
         g_cov[idx].last_used = SDL_GetTicks();
-        if (tex) g_cov_texN++;
+        if (tex) { g_cov_texN++; g_cov[idx].texture_bytes = bytes; g_cov_texture_bytes += bytes; }
+        else g_cov[idx].retry_at = SDL_GetTicks() + 2000;
         SDL_UnlockMutex(g_cov_mtx);
     }
 }
@@ -278,14 +333,16 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
     const char *logo = jstr(item, "logo");
     SDL_Texture *tex = cover_get(logo);
     fill_rect(x, y, cw, coverH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
-    if (selected) ui_focus(x - 4, y - 4, cw + 8, coverH + 60);
+    if (selected) {
+        border_rect(x - 3, y - 3, cw + 6, coverH + 6, 3, C_ACC2);
+        fill_rect(x + 8, y + coverH, cw - 16, 2, C_ACC);
+    }
     SDL_Rect cr = { x, y, cw, coverH };
     // Poster vertical precisa permanecer inteiro, inclusive o texto da arte.
     if (tex) ui_contain(tex, &cr);
     else {
         fill_rect(x, y, cw, coverH, C_CARD);
-        char ini[2] = { title[0] ? title[0] : '?', 0 };
-        text_center_at(ini, x, cw, y + coverH / 2 - 18, C_MUT, 1);
+        text_center_at("NPLAY", x, cw, y + coverH / 2 - 18, C_MUT, 2);
     }
     const char *kind = jstr(item, "kind");
     int ready = cJSON_IsTrue(cJSON_GetObjectItem(item, "r2_ready")) || jint(item, "r2_ready") != 0;
@@ -306,11 +363,12 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
             ui_card_badge("Na lista", x + cw - bw - 7, y + 7, C_ROSE);
         } else fill_rect(x + cw - 5, y + 8, 3, 18, C_ROSE);
     }
-    // O recorte e feito pelo renderer; nao corte por bytes, pois isso quebrava
-    // acentos/UTF-8 e abreviava titulos antes de ocupar a largura disponivel.
-    text_clip(title, x + 8, y + coverH + 7, C_TEXT, 0, cw - 16);
-    const char *kind_label = kind && !strcmp(kind, "movie") ? "Filme" : "Serie";
-    text_clip(kind_label, x + 8, y + coverH + 32, C_MUT, 2, cw - 16);
+    // Separate the 23px title and 17px metadata within the existing 52px area.
+    text_clip(text_fitted(title, 0, cw - 16), x + 8, y + coverH + 3, C_TEXT, 0, cw - 16);
+    const char *kind_label = kind && !strcmp(kind, "movie") ? "Filme" :
+                            kind && !strcmp(kind, "live") ? "Ao vivo" :
+                            kind && !strcmp(kind, "episode") ? "Episodio" : "Serie";
+    text_clip(kind_label, x + 8, y + coverH + 31, C_MUT, 2, cw - 16);
 }
 
 // ============================================================= estado / telas
@@ -359,6 +417,13 @@ static int g_saga_detail_scroll_x = 0;
 static cJSON *g_search = NULL;
 static int g_search_counts[SEARCH_FILTERS] = {0};
 static int g_search_counts_valid = 0;
+#define SEARCH_WINDOW_MAX 32
+typedef struct {
+    cJSON *items[SEARCH_WINDOW_MAX];
+    unsigned char series[SEARCH_WINDOW_MAX];
+    int valid, filter, first, requested, count;
+} SearchWindow;
+static SearchWindow g_search_window;
 static char g_srchQuery[128] = {0};
 static int g_srchSel = 0, g_srchScroll = 0, g_srchFilter = 0;
 typedef enum { FETCH_NONE, FETCH_MOVIE, FETCH_RELATED, FETCH_SERIES, FETCH_SEARCH, FETCH_PROFILES, FETCH_SAGA, FETCH_AVATARS } FetchKind;
@@ -779,6 +844,7 @@ static void cover_suspend_and_release(void) {
         if (g_cov[i].state == 2 || g_cov[i].state == 3) g_cov[i].state = 0;
     }
     g_cov_texN = 0;
+    g_cov_texture_bytes = g_cov_ready_bytes = 0;
     SDL_UnlockMutex(g_cov_mtx);
 
     SDL_LockMutex(g_ready_mtx);
@@ -1610,6 +1676,7 @@ static void pump_catalog_fetch(void) {
         g_screen = SC_SERIES;
         applied = 1;
     } else if (result && g_fetch_current.kind == FETCH_SEARCH && cJSON_IsObject(result)) {
+        memset(&g_search_window, 0, sizeof(g_search_window));
         if (g_search) cJSON_Delete(g_search);
         g_search = result;
         g_search_counts_valid = 0;
@@ -2400,6 +2467,12 @@ static int srch_count_for(int filter) {
     return g_search_counts[filter];
 }
 static cJSON *srch_at(int wanted, int *is_series) {
+    if (g_search_window.valid && g_search_window.filter == g_srchFilter &&
+        wanted >= g_search_window.first && wanted - g_search_window.first < g_search_window.count) {
+        int i = wanted - g_search_window.first;
+        *is_series = g_search_window.series[i];
+        return g_search_window.items[i];
+    }
     cJSON *it;
     cJSON_ArrayForEach(it, cJSON_GetObjectItem(g_search, "series")) {
         if (!srch_matches(it, 1, g_srchFilter)) continue;
@@ -2410,6 +2483,28 @@ static cJSON *srch_at(int wanted, int *is_series) {
         if (wanted-- == 0) { *is_series = 0; return it; }
     }
     *is_series = 0; return NULL;
+}
+static void srch_window(int first, int requested) {
+    if (first < 0) first = 0;
+    if (requested > SEARCH_WINDOW_MAX) requested = SEARCH_WINDOW_MAX;
+    if (requested < 0) requested = 0;
+    if (g_search_window.valid && g_search_window.filter == g_srchFilter &&
+        g_search_window.first == first && g_search_window.requested == requested) return;
+    g_search_window = (SearchWindow){ .filter = g_srchFilter, .first = first, .requested = requested };
+    int index = 0;
+    for (int group = 0; group < 2 && g_search_window.count < requested; group++) {
+        int series = group == 0;
+        cJSON *array = cJSON_GetObjectItem(g_search, series ? "series" : "items"), *it;
+        cJSON_ArrayForEach(it, array) {
+            if (!srch_matches(it, series, g_srchFilter)) continue;
+            if (index++ < first) continue;
+            int slot = g_search_window.count++;
+            g_search_window.items[slot] = it;
+            g_search_window.series[slot] = (unsigned char)series;
+            if (g_search_window.count >= requested) break;
+        }
+    }
+    g_search_window.valid = 1;
 }
 static void url_encode_utf8(const char *input, char *output, size_t capacity) {
     static const char hex[] = "0123456789ABCDEF";
@@ -2511,21 +2606,43 @@ static void draw_profile_avatar(cJSON *profile, int x, int y, int size) {
                               (SDL_Color){230, 234, 248, 220},
                               size >= 60 ? 4 : 2);
 }
+static SDL_Rect g_topbar_tabs[NTABS];
+static const SDL_Rect TOPBAR_SEARCH = { 1014, 19, 146, 58 };
+static const SDL_Rect TOPBAR_PROFILE = { 1172, 7, 96, 82 };
+static int topbar_contains(const SDL_Rect *r, int x, int y) {
+    return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h;
+}
+static void topbar_layout(void) {
+    int tx = 255;
+    for (int t = 0; t < NTABS; t++) {
+        int w = 0, h = 0;
+        // Reuse the raster cache's measurement instead of TTF_Size every tap.
+        text_cached(gRen, TAB_NAME[t], C_TEXT, 0, &w, &h);
+        g_topbar_tabs[t] = (SDL_Rect){ tx, 19, w + 22, 62 };
+        tx += w + 33;
+    }
+}
 static void draw_topbar(void) {
+    topbar_layout();
     fill_rect(0, 0, WIN_W, 95, C_BAR);
     fill_rect(0, 0, WIN_W, 3, C_ACC);
     if (g_brand) { SDL_Rect mark = {48, 23, 46, 46}; SDL_RenderCopy(gRen, g_brand, NULL, &mark); }
     else { fill_rect(50, 27, 39, 39, C_ACC); text_center_at("N", 50, 39, 30, C_BG, 1); }
     text_draw(gRen, "NPLAY", 96, 30, C_TEXT, 1);
-    int tx = 255;
     for (int t = 0; t < NTABS; t++) {
-        int w = text_draw(gRen, TAB_NAME[t], tx + 11, 33, (t == g_tab) ? C_ACC : C_TEXT, 0);
-        if (t == g_tab) {
-            fill_rect(tx, 76, w + 22, 3, C_ACC);
+        SDL_Rect tab = g_topbar_tabs[t];
+        int selected = g_screen == SC_MAIN && t == g_tab;
+        if (selected) {
+            fill_rect(tab.x, 19, tab.w, 52, (SDL_Color){32, 29, 49, 255});
+            fill_rect(tab.x, 76, tab.w, 3, C_ACC);
         }
-        tx += w + 33;
+        text_draw(gRen, TAB_NAME[t], tab.x + 11, 33, selected ? C_ACC : C_TEXT, 0);
     }
-    text_draw(gRen, "Y Buscar", 1026, 33, C_TEXT, 0);
+    fill_rect(TOPBAR_SEARCH.x, TOPBAR_SEARCH.y, TOPBAR_SEARCH.w, TOPBAR_SEARCH.h,
+              g_screen == SC_SEARCH ? (SDL_Color){32, 29, 49, 255} : C_CARD);
+    border_rect(TOPBAR_SEARCH.x, TOPBAR_SEARCH.y, TOPBAR_SEARCH.w, TOPBAR_SEARCH.h, 1,
+                g_screen == SC_SEARCH ? C_ACC : (SDL_Color){55, 62, 82, 255});
+    text_center_at("Y Buscar", TOPBAR_SEARCH.x, TOPBAR_SEARCH.w, 33, C_TEXT, 0);
     cJSON *active = profile_by_id(g_profile_id);
     // O perfil precisa continuar reconhecivel a distancia sem aumentar o
     // cabecalho. O retrato ocupa quase toda a altura util e ganha um pequeno
@@ -2718,22 +2835,19 @@ static void draw_search(void) {
         return;
     }
     int top = 221;
-    int index = 0;
-    for (int group = 0; group < 2; group++) {
-        int is_series = group == 0;
-        cJSON *array = cJSON_GetObjectItem(g_search, is_series ? "series" : "items");
-        cJSON *it;
-        cJSON_ArrayForEach(it, array) {
-            if (!srch_matches(it, is_series, g_srchFilter)) continue;
-            int col = index % GCOLS, row = index / GCOLS;
-            int yy = top + row * (GCH + GGAP) - g_srchScroll;
-            if (yy + GCH >= 95 && yy <= WIN_H) {
-                int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
-                int fav = is_series ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
-                draw_card(x, yy, GCOVERW, GCOVERH, it, index == g_srchSel, fav);
-            }
-            index++;
-        }
+    int first_row = (g_srchScroll + 95 - top) / (GCH + GGAP);
+    if (first_row < 0) first_row = 0;
+    int last_row = (g_srchScroll + WIN_H - 52 - top) / (GCH + GGAP);
+    srch_window(first_row * GCOLS, (last_row - first_row + 1) * GCOLS);
+    for (int slot = 0; slot < g_search_window.count; slot++) {
+        int index = g_search_window.first + slot;
+        int col = index % GCOLS, row = index / GCOLS;
+        int yy = top + row * (GCH + GGAP) - g_srchScroll;
+        int x = GMX + col * (GCW + GGAP) + (GCW - GCOVERW) / 2;
+        cJSON *it = g_search_window.items[slot];
+        int is_series = g_search_window.series[slot];
+        int fav = is_series ? is_fav_series(jint(it, "id")) : is_fav_item(jint(it, "id"));
+        draw_card(x, yy, GCOVERW, GCOVERH, it, index == g_srchSel, fav);
     }
     SDL_RenderSetClipRect(gRen, NULL);
     ui_footer("A Abrir    X Minha lista    ZL/ZR Filtrar    Y Nova busca    B Voltar");
@@ -3232,14 +3346,14 @@ int media_list_prompt_add(int id, int is_series, const char *title, const char *
 static void draw_history_card(int x, int y, cJSON *item, int selected) {
     const char *title = jstr(item, "title"); if (!title) title = "Titulo";
     fill_rect(x, y, HIST_CW, HIST_CH + 52, selected ? (SDL_Color){38, 34, 61, 255} : C_CARD);
-    if (selected) ui_focus(x - 4, y - 4, HIST_CW + 8, HIST_CH + 60);
+    if (selected) border_rect(x - 3, y - 3, HIST_CW + 6, HIST_CH + 6, 3, C_ACC2);
     SDL_Texture *cover = cover_get(jstr(item, "logo"));
     if (cover) { SDL_Rect r = {x, y, HIST_CW, HIST_CH}; ui_contain(cover, &r); }
     else fill_rect(x, y, HIST_CW, HIST_CH, C_CARD);
     int pos = jint(item, "position_seconds"), dur = jint(item, "duration_seconds");
     int pct = dur > 0 ? pos * 100 / dur : 0;
     ui_progress(x, y + HIST_CH - 4, HIST_CW, pct, C_ROSE);
-    text_clip(title, x + 8, y + HIST_CH + 8, C_TEXT, 0, HIST_CW - 16);
+    text_clip(text_fitted(title, 0, HIST_CW - 16), x + 8, y + HIST_CH + 8, C_TEXT, 0, HIST_CW - 16);
     if (!strcmp(jstr(item, "kind") ? jstr(item, "kind") : "", "episode")) {
         char ep[32]; snprintf(ep, sizeof(ep), "T%d  E%d", jint(item, "season") > 0 ? jint(item, "season") : 1, jint(item, "episode"));
         ui_card_badge(ep, x + 7, y + 7, C_ACC2);
@@ -3378,7 +3492,7 @@ static void draw_dl_grid(void) {
         int bw = tw + 14; if (bw < 28) bw = 28;
         ui_card_badge(badge, x + GCOVERW - bw - 7, yy + GCOVERH - 29, baixando ? C_ACC : C_GREEN);
         const char *title = jstr(j0, "title"); if (!title) title = "";
-        text_clip(title, x, yy + GCOVERH + 8, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
+        text_clip(text_fitted(title, 0, GCOVERW), x, yy + GCOVERH + 8, i == g_dlSel ? C_TEXT : C_MUT, 0, GCOVERW);
         if (i == g_dlSel) fill_rect(x, yy + GCOVERH + 37, GCOVERW, 2, C_ACC2);
     }
     ui_footer("A Abrir    X Remover    B Historico");
@@ -3461,7 +3575,7 @@ static void draw_custom_list(void) {
         SDL_Texture *cover = cover_get(logo);
         if (cover) { SDL_Rect r = {x, y, GCOVERW, GCOVERH}; ui_contain(cover, &r); }
         else fill_rect(x, y, GCOVERW, GCOVERH, C_CARD);
-        text_clip(title, x, y + GCOVERH + 8, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
+        text_clip(text_fitted(title, 0, GCOVERW), x, y + GCOVERH + 8, i == g_list_item_sel ? C_TEXT : C_MUT, 0, GCOVERW);
         if (i == g_list_item_sel) fill_rect(x, y + GCOVERH + 37, GCOVERW, 2, C_ACC2);
     }
     ui_footer("A Abrir    X Remover da lista    Y Renomear lista    ZR Excluir lista    B Voltar");
@@ -5138,11 +5252,19 @@ static void input_profiles(int b) {
 }
 
 // Roteia um botao para a tela atual. Usado pelos eventos E pela navegacao
-// continua (segurar D-pad OU empurrar o analogico). g_running/g_dir/g_dir_next
+// continua (segurar D-pad OU empurrar o analogico).
 // controlam o loop e a repeticao.
 static int g_running = 1;
-static int g_dir = -1;            // direcao ativa (D-pad ou analogico), -1 = nenhuma
-static Uint32 g_dir_next = 0;
+static NavigationRepeat g_nav_repeat = { .direction = -1 };
+static int g_nav_context = -1;
+static int navigation_context(void) {
+    return (int)g_screen * 256 + g_tab * 16 + g_profile_menu * 8;
+}
+static void navigation_sync_context(void) {
+    int context = navigation_context();
+    if (g_nav_context >= 0 && context != g_nav_context) navigation_repeat_block(&g_nav_repeat);
+    g_nav_context = context;
+}
 
 // D-pad fisicamente segurado (-1 = nenhum).
 static int dpad_held(SDL_Joystick *j) {
@@ -5346,15 +5468,12 @@ static void handle_touch_tap(int x, int y) {
     }
     if (g_screen == SC_MAIN || g_screen == SC_SEARCH) {
         if (y < 95) {
-            int tx = 255;
+            topbar_layout();
+            if (topbar_contains(&TOPBAR_PROFILE, x, y)) { g_profile_menu_sel = 0; g_profile_menu = 1; return; }
+            if (topbar_contains(&TOPBAR_SEARCH, x, y)) { do_search(); return; }
             for (int t = 0; t < NTABS; t++) {
-                int w = 0, h = 0;
-                text_cached(gRen, TAB_NAME[t], t == g_tab ? C_ACC : C_TEXT, 0, &w, &h);
-                if (x >= tx && x <= tx + w + 22) { g_screen = SC_MAIN; enter_tab(t); return; }
-                tx += w + 33;
+                if (topbar_contains(&g_topbar_tabs[t], x, y)) { g_screen = SC_MAIN; enter_tab(t); return; }
             }
-            if (x >= 1160) { g_profile_menu_sel = 0; g_profile_menu = 1; }
-            else if (x >= 1050) do_search();
             return;
         }
         if (g_screen == SC_SEARCH) {
@@ -5850,10 +5969,11 @@ int main(int argc, char **argv) {
             if (e.type != SDL_JOYBUTTONDOWN) continue;
             memset(&g_touch_momentum, 0, sizeof(g_touch_momentum));
             int b = e.jbutton.button;
-            // direcoes (D-pad) sao tratadas no bloco de navegacao abaixo (junto
-            // com o analogico); aqui so os demais botoes.
-            if (b == JOY_UP || b == JOY_DOWN || b == JOY_DLEFT || b == JOY_DRIGHT) continue;
+            navigation_sync_context();
+            if (b == JOY_UP || b == JOY_DOWN || b == JOY_DLEFT || b == JOY_DRIGHT)
+                navigation_repeat_press(&g_nav_repeat, b, SDL_GetTicks());
             handle_button(b);
+            navigation_sync_context();
         }
         touch_momentum_update();
         // Navegacao continua: D-pad segurado OU analogico empurrado. 1a ativacao
@@ -5862,9 +5982,9 @@ int main(int argc, char **argv) {
             int dir = dpad_held(g_joy);
             if (dir < 0) dir = stick_dir(g_joy);
             Uint32 now = SDL_GetTicks();
-            if (dir < 0) g_dir = -1;
-            else if (dir != g_dir) { handle_button(dir); g_dir = dir; g_dir_next = now + 380; }
-            else if (now >= g_dir_next) { handle_button(dir); g_dir_next = now + 55; }
+            navigation_sync_context();
+            int repeat = navigation_repeat_poll(&g_nav_repeat, dir, now);
+            if (repeat >= 0) { handle_button(repeat); navigation_sync_context(); }
         }
         // Mede apenas trabalho da UI: a reproducao e seus waits ocorrem no
         // tratamento de entrada acima e nao contaminam a contagem de quadros.
@@ -5972,6 +6092,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < g_covN; i++) {
         if (g_cov[i].tex) SDL_DestroyTexture(g_cov[i].tex);
         if (g_cov[i].surf) SDL_FreeSurface(g_cov[i].surf);
+        free(g_cov[i].url);
     }
     SDL_DestroySemaphore(g_q_sem);
     SDL_DestroyMutex(g_ready_mtx);

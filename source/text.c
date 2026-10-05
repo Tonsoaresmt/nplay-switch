@@ -4,6 +4,7 @@
 #include <SDL_ttf.h>
 #include <stdlib.h>
 #include <string.h>
+#include "text_fit.h"
 
 static TTF_Font *g_font     = NULL;   // texto normal (listas)
 static TTF_Font *g_font_big = NULL;   // titulos
@@ -36,6 +37,21 @@ int text_measure(const char *utf8, int style, int *outW, int *outH) {
     if (outW) *outW = w;
     if (outH) *outH = h;
     return 0;
+}
+
+typedef struct { char input[1024], output[1024]; int style, width, valid; } FitCache;
+static FitCache g_fit_cache[64];
+const char *text_fitted(const char *s, int style, int maxw) {
+    if (!s || strlen(s) >= sizeof(g_fit_cache[0].input)) return s;
+    unsigned hash = 2166136261u ^ (unsigned)style ^ (unsigned)maxw;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) hash = (hash ^ *p) * 16777619u;
+    FitCache *entry = &g_fit_cache[hash % 64];
+    if (entry->valid && entry->style == style && entry->width == maxw && !strcmp(entry->input, s))
+        return entry->output;
+    entry->valid = 0;
+    if (!text_fit_build(s, entry->output, sizeof(entry->output), style, maxw, text_measure)) return s;
+    strcpy(entry->input, s); entry->style = style; entry->width = maxw; entry->valid = 1;
+    return entry->output;
 }
 
 // ---- cache de texturas de texto: evita rasterizar a mesma string todo frame ----
@@ -90,6 +106,7 @@ int text_init(void) {
 }
 
 void text_exit(void) {
+    memset(g_fit_cache, 0, sizeof(g_fit_cache));
     tcache_free_all();
     if (g_font)     { TTF_CloseFont(g_font);     g_font = NULL; }
     if (g_font_big) { TTF_CloseFont(g_font_big); g_font_big = NULL; }
