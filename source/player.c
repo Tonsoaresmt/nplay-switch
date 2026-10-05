@@ -723,7 +723,7 @@ static void ass_to_text(const char *ass, char *out, int cap) {
 }
 
 typedef struct ProgressiveSubtitle ProgressiveSubtitle;
-// Cues em subtitle_store (16 bytes cada, sem teto de 8192). Ver o cabecalho:
+// Cues em subtitle_store (20 bytes cada, sem teto de 8192). Ver o cabecalho:
 // o limite antigo cortava a legenda de animes com karaoke no meio do episodio.
 typedef struct {
     SubtitleStore cues;
@@ -827,6 +827,34 @@ static int64_t subtitle_memory_seek(void *opaque, int64_t offset, int whence) {
 static int subtitle_cancelled(void *opaque) {
     return opaque && SDL_AtomicGet((SDL_atomic_t *)opaque);
 }
+// HLS may skip a failed resource and eventually return EOF. Keep a sticky,
+// thread-local failure for this subtitle attempt, not the video callbacks or
+// global player state. A partial rendition must never enter the session cache.
+static _Thread_local int subtitle_hls_io_failed;
+static int subtitle_hls_io_open(AVFormatContext *fmt, AVIOContext **pb,
+                               const char *url, int flags, AVDictionary **options) {
+    (void)options;
+    if (!pb) { subtitle_hls_io_failed = 1; return AVERROR(EINVAL); }
+    *pb = NULL;
+    if (fmt && fmt->interrupt_callback.callback &&
+        fmt->interrupt_callback.callback(fmt->interrupt_callback.opaque))
+        return AVERROR_EXIT;
+    if (!url || (flags & AVIO_FLAG_WRITE) ||
+        (strncmp(url, "http://", 7) && strncmp(url, "https://", 8))) {
+        subtitle_hls_io_failed = 1;
+        return AVERROR(EINVAL);
+    }
+    *pb = nplay_curl_avio_open_hls(url);
+    if (!*pb) subtitle_hls_io_failed = 1;
+    return *pb ? 0 : AVERROR(EIO);
+}
+static int subtitle_hls_io_close(AVFormatContext *fmt, AVIOContext *pb) {
+    (void)fmt;
+    if (pb && pb->error < 0 && pb->error != AVERROR_EOF)
+        subtitle_hls_io_failed = 1;
+    nplay_curl_avio_close(pb);
+    return 0;
+}
 static void subtitle_root_close(AVIOContext *root, int direct) {
     if (!direct) { nplay_curl_avio_close(root); return; }
     if (root) { av_freep(&root->buffer); avio_context_free(&root); }
@@ -835,6 +863,7 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
                                   int direct, SDL_atomic_t *cancel,
                                   const char *provided, size_t provided_size) {
     if ((!provided && (!url || !url[0])) || !store) return -1;
+    subtitle_hls_io_failed = 0;
     ExternalSubtitleStore loaded = {0};
     struct membuf body = {0};
     SubtitleMemory memory = {0};
@@ -864,8 +893,8 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
     subfmt->pb = root;
     subfmt->flags |= AVFMT_FLAG_CUSTOM_IO;
     if (!direct) {
-        subfmt->io_open = player_hls_io_open;
-        subfmt->io_close2 = player_hls_io_close;
+        subfmt->io_open = subtitle_hls_io_open;
+        subfmt->io_close2 = subtitle_hls_io_close;
     }
     subfmt->interrupt_callback.callback = subtitle_cancelled;
     subfmt->interrupt_callback.opaque = cancel;
@@ -896,7 +925,14 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
         if (subtitle_cancelled(cancel)) { rc = AVERROR_EXIT; av_packet_unref(packet); break; }
         if (packet->stream_index == stream) {
             AVSubtitle sub = {0}; int got = 0;
-            if (avcodec_decode_subtitle2(ctx, &sub, &got, packet) >= 0 && got) {
+            int decoded_rc = avcodec_decode_subtitle2(ctx, &sub, &got, packet);
+            if (decoded_rc < 0) {
+                rc = decoded_rc;
+                avsubtitle_free(&sub);
+                av_packet_unref(packet);
+                break;
+            }
+            if (got) {
                 char text[SUBTITLE_TEXT_CAP] = "";
                 for (unsigned i = 0; i < sub.num_rects; i++) {
                     AVSubtitleRect *rect = sub.rects[i]; char part[400] = "";
@@ -940,8 +976,11 @@ static int load_external_subtitle_data(const char *url, ExternalSubtitleStore *s
     avformat_close_input(&subfmt);
     subtitle_root_close(root, direct);
     membuf_free(&body);
-    if (external_subtitle_count(&loaded) <= 0 ||
-        (direct && (rc != AVERROR_EOF || subtitle_cancelled(cancel)))) {
+    if (external_subtitle_count(&loaded) <= 0 || rc != AVERROR_EOF ||
+        subtitle_cancelled(cancel) || (!direct && subtitle_hls_io_failed)) {
+        diag_player_event("subtitle", "incomplete", "cues=%d rc=%d io=%d cancel=%d",
+                          external_subtitle_count(&loaded), rc,
+                          !direct && subtitle_hls_io_failed, subtitle_cancelled(cancel));
         external_subtitle_clear(&loaded); return -1;
     }
     if (!direct)
@@ -3144,18 +3183,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 subtitle_retry_select(&subtitle_retry, next);
                                 if (next == scur) subtitle_fetch_stop(&subtitle_fetch);
                             }
-                            if (next == scur && next >= 0 && manifest_subtitle_fallback &&
-                                !hot_external_subtitles && !subtitle_fetch.thread &&
-                                external_subtitle_count(&external_subtitles) <= 0) {
-                                // Faixa escolhida mas sem texto (download falhou):
-                                // escolher de novo tenta outra vez na hora.
-                                if (subtitle_fetch_start(&subtitle_fetch,
-                                        manifest_subtitles[next].uri, next) == 0)
-                                    snprintf(notice, sizeof(notice), "Carregando legenda...");
-                                else subtitle_retry_failed(&subtitle_retry, next, SDL_GetTicks());
-                            } else if (next == scur) {
+                            if (next == scur && (next < 0 || !manifest_subtitle_fallback)) {
                                 snprintf(notice, sizeof(notice), "Legenda atual mantida");
                             } else if (manifest_subtitle_fallback) {
+                                // Selecting the current external track explicitly
+                                // reloads it too, even if it still has early cues.
+                                // Keep the applied text until the new load succeeds.
                                 Uint32 switch_started = SDL_GetTicks();
                                 int changed = 0;
                                 if (next < 0) {

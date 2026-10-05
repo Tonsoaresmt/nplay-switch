@@ -3910,6 +3910,11 @@ static int choose_next_episode(int series_id, int finished_item_id, int first_in
     g_screen = SC_SERIES;
     EpisodeNext next = first_in_group ? episode_first(g_ser) :
                                        episode_after(g_ser, finished_item_id);
+    // Record the explicit episode anchor, never titles, session IDs or URLs.
+    // This distinguishes an ordering error from a stale resume selection.
+    diag_player_event("episodes", "next", "series=%d current=%d next=%d group=%d found=%d autoplay=%d explicit=%d",
+                      series_id, finished_item_id, next.item_id, first_in_group,
+                      next.found_current, g_pref_autoplay, explicit_next);
     if (!first_in_group && !next.found_current) {
         if (allow_refresh) fetch_episode_context(series_id, finished_item_id, 0, explicit_next);
         else toast("Episodio nao encontrado nesta serie");

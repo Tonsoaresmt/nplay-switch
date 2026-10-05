@@ -224,6 +224,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Transporte de legendas rejeitou 8 MiB ou perdeu limite/cancelamento.' }
 & node tools/test_subtitle_fetch.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Legenda desejada perdeu retry, cancelamento ou ownership.' }
+& node tools/test_subtitle_completion.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Legenda parcial foi aceita como completa ou apagou a faixa anterior.' }
 & node tools/test_completed_resume.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Episodio concluido tentou retomar no final ou perdeu retomada parcial.' }
 & node tools/test_host_suite_guards.mjs
@@ -313,6 +315,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
 & node tools/test_episode_sequence.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Sequencia real de episodios perdeu contexto ou proximo episodio.' }
+& node tools/test_episode_rewatch.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Reassistir uma temporada antiga perdeu a escolha explicita ou a ordem.' }
 Assert-True ($sources -match 'next_selected \|\| paused \|\| hud_pinned') 'Proximo episodio voltou a ficar escondido durante a pausa.'
 Assert-True ($mainSource -match 'play_with_progress_details' -and $mainSource -match 'presentation->has_next' -and $mainSource -match 'g_episode_pending\.explicit_next') 'Preparacao ou virada de temporada perdeu a acao explicita de proximo episodio.'
 Assert-True ($mainSource -match 'play_episodes_build' -and $mainSource -match 'chosen_item > 0 \? chosen_item') 'Painel Episodios do player nao toca mais o episodio escolhido.'

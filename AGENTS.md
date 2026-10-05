@@ -1,5 +1,26 @@
 # Continuidade para agentes
 
+## Candidato 0.12.50 — legenda parcial / rewatch (05/10/2026)
+
+- Checkout ativo segue `.codex-tmp/switch-access-expiry`, branch
+  `codex/switch-player-hardening`, base c494463. Nao trabalhar no main antigo.
+- Defeito reproduzido na 0.12.49: HLS externo aceitava texto parcial apos
+  erro/cancelamento/teto/decoder. Retry era encerrado e cache podia conserva-lo.
+- Loader agora exige EOF sem erro; callbacks proprios de legenda registram
+  recurso pulado/erro de AVIO por thread, sem tocar o estado do video. Falha
+  preserva faixa antiga e usa retry existente. X/A na mesma faixa externa
+  recarrega mesmo quando ainda existem cues antigos. Tetos nao aumentaram.
+- Teste obrigatorio novo: test_subtitle_completion (19 casos; base publicada
+  falha em 9, corrigido passa todos). Teste real de controle/store, demux fake.
+- Autoplay T3 -> T5 relatado pela lista NAO reproduzido nem considerado
+  resolvido. test_episode_rewatch usa input/seletores/loop reais e 8 casos
+  passaram. main.c adiciona trace episodes/next com IDs de catalogo, sem URLs.
+- Candidato local 0.12.50; build completo e validador completo passaram duas
+  vezes, incluindo binario final. Hash/limites em docs/SUBTITLE_COMPLETION_0_12_50.md.
+  Nenhuma release/deploy/reprocessamento nesta rodada. Hardware pendente.
+- Precisamos de titulo/T/E e logs recentes; antigos de 02/10 nao servem como
+  comprovacao da 0.12.49. Nao alterar autoplay ou ampliar memoria por palpite.
+
 ## Integracao 0.12.49 — 04/10/2026
 
 - Checkout ativo: `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch
