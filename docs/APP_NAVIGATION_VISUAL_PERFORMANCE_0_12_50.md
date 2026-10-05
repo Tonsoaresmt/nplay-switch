@@ -1,5 +1,10 @@
 # Navegação, visual e desempenho — candidato 0.12.50
 
+Atualização de status: **v0.12.50 publicada para teste**, latest e disponível no
+atualizador. [Release](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.50),
+05/10/2026, 20:33:19 de São Paulo. Commit do build/tag:
+`3d93711fe4d09356dc54d96b495e5b351ed34b82`. Aprovação local não substitui teste físico.
+
 Rodada de 05/10/2026, sobre `70613b3`, no checkout
 `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch
 `codex/switch-player-hardening`. Não usar o `main` antigo da raiz como base.
@@ -106,13 +111,16 @@ ou sessão de produção foi criada pelos testes.
 
 Artefato local: `Nplay.nro`, 24262479 bytes.
 SHA-256: `bfa8e19e8592c6d0616b98e8e6e09b2e0c5a453b66f13598824dd3e8527cc96a`.
-Versão continua candidata **0.12.50**, sem release/deploy/reprocessamento.
+Na conclusão da implementação a versão era candidata **0.12.50**, ainda local.
+Depois, o usuário autorizou a publicação. O validador completo foi executado de
+novo e passou no mesmo NRO. Release latest confirmada; sem deploy/reprocessamento.
 
-O commit desta rodada não executou: o serviço de aprovação automática atingiu
+O primeiro commit desta rodada não executou: o serviço de aprovação automática atingiu
 seu limite de uso antes de iniciar o comando. HEAD permanece `70613b3`; as
-alterações estão salvas localmente, sem stage. O arquivo NRO e o hash acima foram
-reconferidos. Retomar o commit pelo fluxo normal quando a aprovação estiver
-disponível, sem contorná-la. Não existe atualização nova publicada no GitHub.
+alterações ficaram salvas localmente, sem stage. O serviço voltou a funcionar;
+commit e push foram concluídos pelo fluxo normal, sem contornar a aprovação.
+Digest/tamanho do asset GitHub, API latest sem autenticação e download público
+do NRO foram conferidos e coincidem com o artefato validado acima.
 
 ## Próximos testes no Switch (obrigatórios para homologação física)
 

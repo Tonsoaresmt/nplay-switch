@@ -1,16 +1,26 @@
 # Continuidade para agentes
 
-## Publicacao .50 solicitada — 05/10/2026
+## Publicacao .50 CONFIRMADA — 05/10/2026
 
 - Usuario autorizou explicitamente publicar apos informar que o atualizador nao
   via as mudancas locais. Servico de aprovacao voltou a funcionar.
 - Confirmado remoto latest v0.12.49; branch remota hardening e ancestral do local
   (0 atras,4 a frente), sem necessidade de force/rebase ou substituir main.
-- Reexecutando validador completo no NRO bfa8e19...; notas em RELEASE_0_12_50.md.
-  Publicar primeiro draft com Nplay.nro e checksum; conferir digest/tamanho;
-  so depois promover latest. Atualizador exige digest SHA256 do asset.
+- Validador completo reexecutado e aprovado novamente, sem SkipMediaFixtures,
+  no NRO FINAL bfa8e19... (24262479 bytes). Nao houve rebuild depois dessa prova.
+- Codigo enviado na branch hardening, commit do build/tag:
+  3d93711fe4d09356dc54d96b495e5b351ed34b82. NRO nao foi commitado no repositorio.
+- Release v0.12.50 publicada latest, nao draft/prerelease, em 05/10/2026
+  23:33:19 UTC (20:33:19 Sao Paulo). URL:
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.50
+- Nplay.nro + Nplay.nro.sha256 enviados. Digest do asset conferido antes de
+  promover e depois. API latest SEM autenticacao e download publico conferidos:
+  tamanho24262479; SHA256
+  bfa8e19e8592c6d0616b98e8e6e09b2e0c5a453b66f13598824dd3e8527cc96a.
+  Tag remota confirma o commit do build. Atualizador agora pode detectar .50.
 - Nao anunciar homologacao fisica: publicacao e para teste autorizado no console.
-  Atualizar esta secao com commit/tag/URL/resultados quando confirmado.
+  Sem backend/deploy/reprocessamento. Notas: docs/RELEASE_0_12_50.md.
+  Secoes abaixo descrevem fases anteriores, nao o estado de publicacao atual.
 
 ## Navegacao/visual/performance — 05/10/2026 (candidato .50 local)
 
