@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #ifndef APP_VERSION_STR
-#define APP_VERSION_STR "0.12.50"
+#define APP_VERSION_STR "0.12.51"
 #endif
 
 #ifndef UPDATE_REPO_OWNER

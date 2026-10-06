@@ -8,6 +8,9 @@
 #include <curl/curl.h>
 #include <SDL.h>
 #include "cacert_bin.h"
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 // User-Agent de navegador: o Cloudflare do servidor bloqueia UAs "de bot".
 // TODO: trocar por "Meruem-Switch/x" + regra de allowlist no Cloudflare.
@@ -82,6 +85,42 @@ static int file_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow
 // com locks; pools de conexao concorrentes nao sao suportados pelo libcurl.
 static CURLSH *g_share = NULL;
 static SDL_mutex *g_share_mtx[CURL_LOCK_DATA_LAST];
+#ifdef __SWITCH__
+// devkitPro curl 7.69/libnx supports SSL_CTX_FUNCTION, not CAINFO_BLOB.
+// Import the SAME Mozilla bundle without depending on a writable/readable SD.
+// Published once before workers start, freed only after they have joined.
+static unsigned char *g_ca_pem;
+static _Thread_local unsigned int g_tls_import_error;
+
+static int prepare_ca_memory(void) {
+    if (g_ca_pem) return 0;
+    if (!cacert_bin_size || cacert_bin_size >= UINT32_MAX) return -1;
+    g_ca_pem = malloc((size_t)cacert_bin_size + 1);
+    if (!g_ca_pem) return -1;
+    memcpy(g_ca_pem, cacert_bin, cacert_bin_size);
+    g_ca_pem[cacert_bin_size] = 0;
+    return 0;
+}
+
+static CURLcode switch_ca_context(CURL *curl, void *ssl_ctx, void *userdata) {
+    (void)curl; (void)userdata;
+    g_tls_import_error = 0;
+    const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
+    if (!version || !version->ssl_version || strcmp(version->ssl_version, "libnx"))
+        return CURLE_SSL_CACERT_BADFILE; // never cast another backend's context
+    if (!g_ca_pem) return CURLE_OUT_OF_MEMORY;
+    if (!ssl_ctx) return CURLE_SSL_CACERT_BADFILE;
+    // One import supports multiple PEM certificates; do not import each root as
+    // an object (Horizon limits those objects). Keep date/peer/hostname checks.
+    Result rc = sslContextImportServerPki((SslContext *)ssl_ctx, g_ca_pem,
+                    (u32)cacert_bin_size + 1, SslCertificateFormat_Pem, NULL);
+    if (R_FAILED(rc)) {
+        g_tls_import_error = rc;
+        return CURLE_SSL_CACERT_BADFILE;
+    }
+    return CURLE_OK;
+}
+#else
 static int g_ca_ready = 0;
 static const char *g_ca_path = "sdmc:/switch/.nplay-ca.pem";
 
@@ -116,6 +155,23 @@ static int provision_ca_bundle(void) {
     if (rename(tmp_path, g_ca_path) != 0) { remove(tmp_path); return -1; }
     return ca_file_matches() ? 0 : -1;
 }
+#endif
+
+static const char *net_transport_error(CURLcode code) {
+#ifdef __SWITCH__
+    static _Thread_local char message[128];
+    if (code == CURLE_SSL_CACERT_BADFILE && g_tls_import_error) {
+        snprintf(message, sizeof(message), "Certificados HTTPS: importacao falhou (77 / %08X)",
+                 g_tls_import_error);
+        return message; // numeric native result only; never URL, token or path
+    }
+#endif
+    if (code == CURLE_SSL_CACERT_BADFILE)
+        return "Certificados HTTPS indisponiveis (77). Reinstale o Nplay atualizado.";
+    if (code == CURLE_PEER_FAILED_VERIFICATION)
+        return "Certificado HTTPS nao validado (60). Confira data e hora do console.";
+    return curl_easy_strerror(code);
+}
 
 static void share_lock(CURL *h, curl_lock_data data, curl_lock_access acc, void *u) {
     (void)h; (void)acc; (void)u;
@@ -128,7 +184,11 @@ static void share_unlock(CURL *h, curl_lock_data data, void *u) {
 
 int net_init(void) {
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) return -1;
+#ifdef __SWITCH__
+    prepare_ca_memory(); // callback fails closed with OUT_OF_MEMORY on failure
+#else
     g_ca_ready = provision_ca_bundle() == 0;
+#endif
     int locks_ready = 1;
     for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) {
         g_share_mtx[i] = SDL_CreateMutex();
@@ -152,14 +212,29 @@ void net_exit(void) {
         if (g_share_mtx[i]) { SDL_DestroyMutex(g_share_mtx[i]); g_share_mtx[i] = NULL; }
     }
     curl_global_cleanup();
+#ifdef __SWITCH__
+    free(g_ca_pem);
+    g_ca_pem = NULL;
+#else
     g_ca_ready = 0;
+#endif
 }
 
 void net_configure_curl_isolated(CURL *curl) {
     if (!curl) return;
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);   // mantem a conexao viva
+#ifdef __SWITCH__
+    g_tls_import_error = 0;
+    // Fail closed even if the linked backend unexpectedly lacks the callback.
+    curl_easy_setopt(curl, CURLOPT_CAINFO, "nplay-embedded-ca-only");
+    curl_easy_setopt(curl, CURLOPT_CAPATH, NULL);
+    curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, switch_ca_context);
+#else
     if (g_ca_ready) curl_easy_setopt(curl, CURLOPT_CAINFO, g_ca_path);
+#endif
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 }
 
 void net_configure_curl(CURL *curl) {
@@ -226,7 +301,7 @@ long net_request_timeout_cancel(const char *url, const char *method,
     CURLcode res = curl_easy_perform(curl);
     long code;
     if (res != CURLE_OK) {
-        if (err) *err = curl_easy_strerror(res);
+        if (err) *err = net_transport_error(res);
         code = -(long)res;
     } else {
         code = 0;
@@ -407,7 +482,7 @@ long net_download_file_timeout(const char *url, const char *bearer,
 
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        if (err) *err = curl_easy_strerror(res);
+        if (err) *err = net_transport_error(res);
         code = -(long)res;
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -461,7 +536,7 @@ long net_download_file_progress(const char *url, const char *bearer,
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &dlctx);
     net_configure_curl(curl);
     res = curl_easy_perform(curl);
-    if (res != CURLE_OK) { if (err) *err = curl_easy_strerror(res); code = -(long)res; }
+    if (res != CURLE_OK) { if (err) *err = net_transport_error(res); code = -(long)res; }
     else curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);

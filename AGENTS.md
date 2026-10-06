@@ -1,5 +1,31 @@
 # Continuidade para agentes
 
+## Continuidade urgente — certificados/categorias/capas, 0.12.51 (05/10/2026)
+
+- Checkout ativo: `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch
+  `codex/switch-player-hardening`, base publicada .50/177c473. Nao editar main
+  antigo da raiz nem outros worktrees. Novo relato fisico: erro libcurl 77
+  bloqueando categorias/capas; nao e prova de bug do filtro nem de erro 60.
+- CA no Switch agora entra no SslContext por callback suportado pela SDK
+  curl 7.69.1/libnx. Mesmo bundle oficial; uma copia imutavel/NUL de 188901 B
+  antes das threads; sem leitura/gravação de CA no SD nem CAINFO_BLOB.
+  TLS peer/hostname/date continuam verificados; erros falham fechado.
+- Mensagem antiga 77 tambem cobria importacao nativa. Nao afirmar qual ramo
+  causou o relato sem trace novo. Agora importacao registra somente hexadecimal
+  seguro, thread-local. Backend inesperado rejeitado antes de converter contexto.
+- Tests TLS novos usam funcoes reais e bundle real, MAS SSL nativo simulado:
+  1000 contextos, 4 threads, OOM/importacao/backend, lifetime e checks seguros.
+  Simbolos do callback/memoria/backend confirmados no ELF; validador exige isso.
+- Build ARM64 completo -Werror + incremental final; bateria completa sem
+  SkipMediaFixtures passou. Digest 61e0e60075dd1a811bb859939935ba06c09a55aadb17ac8d9c9e55a2888f9b53,
+  NRO 24262479 B. Handshake Horizon, capas/GPU e Wi-Fi fisico pendentes.
+- Se 77 impedir atualizacao, substituir SOMENTE Nplay.nro manualmente; nao
+  apagar configs, perfis, SD ou confiar que a release sozinha conserta o updater
+  antigo. Testar .51: categorias, busca, capas, reproducao e update. Se persistir,
+  obter codigo hexadecimal novo + network trace antes de outra mudanca cega.
+- Relatorio `docs/TLS_CA_0_12_51.md`, notas `docs/RELEASE_0_12_51.md`.
+  Publicacao ainda nao confirmada neste ponto; registrar assets/latest apos subir.
+
 ## Publicacao .50 CONFIRMADA — 05/10/2026
 
 - Usuario autorizou explicitamente publicar apos informar que o atualizador nao

@@ -220,6 +220,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Historico/EOF/pausa perderam os guards de flux
 if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
 & node tools/test_app_navigation.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Navegacao geral, textos ou cache de capas falhou.' }
+& node tools/test_tls_ca.mjs
+if ($LASTEXITCODE -ne 0) { throw 'CA em memoria e verificacao TLS do Switch falharam.' }
 & node tools/test_media_list_sync.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Reconciliacao segura de Assistir mais tarde falhou.' }
 & node tools/test_seek_barrier.mjs
@@ -368,7 +370,7 @@ if (-not $nm) {
 }
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"
-foreach ($symbol in @('ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
+foreach ($symbol in @('switch_ca_context','g_ca_pem','Curl_ssl_libnx','ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
     Assert-True ($symbols -match [regex]::Escape($symbol)) "Simbolo obrigatorio ausente: $symbol"
 }
 
