@@ -24,7 +24,11 @@
   antigo. Testar .51: categorias, busca, capas, reproducao e update. Se persistir,
   obter codigo hexadecimal novo + network trace antes de outra mudanca cega.
 - Relatorio `docs/TLS_CA_0_12_51.md`, notas `docs/RELEASE_0_12_51.md`.
-  Publicacao ainda nao confirmada neste ponto; registrar assets/latest apos subir.
+  Publicacao confirmada: v0.12.51 latest publica, sem prerelease, 06/10/2026
+  00:25:09 UTC (05/10 21:25 Brasilia), tag em 5ff3c309ca4e7c85d9387a1035eef18861345c4a.
+  Digest/tamanho do asset e download publico sem autenticacao conferidos iguais
+  ao NRO validado; SHA sidecar presente (76 B). Nplay.nro.sha256 e arquivo
+  gerado local nao commitado; nunca commitar NRO. Teste fisico segue pendente.
 
 ## Publicacao .50 CONFIRMADA — 05/10/2026
 
