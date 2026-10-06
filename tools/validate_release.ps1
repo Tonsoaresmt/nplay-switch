@@ -196,6 +196,17 @@ if (-not $SkipBuild) {
 
 Assert-True (Test-Path Nplay.nro) 'Nplay.nro nao foi gerado.'
 Assert-True (Test-Path Nplay.elf) 'Nplay.elf nao foi gerado.'
+
+# Guarda contra binario velho: com -SkipBuild, um Nplay.nro de outra versao/commit
+# passaria nas checagens acima e seria publicado ou copiado pro SD por engano.
+# O NRO precisa carregar a versao do Makefile e nao pode ser mais antigo que a fonte.
+$nroBytes = [System.IO.File]::ReadAllBytes((Resolve-Path Nplay.nro))
+$nroText = [System.Text.Encoding]::ASCII.GetString($nroBytes)
+Assert-True ($nroText.Contains($makeVersion)) "Nplay.nro nao contem a versao $makeVersion do Makefile: binario velho ou de outra versao. Rode 'make clean; make'."
+$newestSource = Get-ChildItem -Path source, include, Makefile, data -Recurse -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$nroTime = (Get-Item Nplay.nro).LastWriteTimeUtc
+Assert-True ($nroTime -ge $newestSource.LastWriteTimeUtc) "Nplay.nro ($nroTime) e mais antigo que a fonte $($newestSource.Name) ($($newestSource.LastWriteTimeUtc)): recompile antes de validar/publicar."
 $hostGcc = $env:HOST_CC
 if (-not $hostGcc) {
     $gccCommand = Get-Command gcc -ErrorAction SilentlyContinue
