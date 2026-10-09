@@ -374,6 +374,21 @@ static size_t hdr_size(char *ptr, size_t sz, size_t nm, void *ud) {
 static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_t e) {
     (void)a; (void)d; (void)e;
     CurlIO *c = (CurlIO *)ud;
+    if (c->cancel_flag && SDL_AtomicGet(c->cancel_flag)) return 1;
+    if (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
+        (c->synchronous && abort_requested())) return 1;
+    // Backpressure also exists BETWEEN writer callbacks. A previous callback
+    // can fill the ring without blocking; libcurl still calls this callback
+    // while the consumer is paused. Do not count that local wait as body idle.
+    if (c->streaming && c->stream_len > 0) {
+        SDL_LockMutex(c->mtx);
+        int full = c->count == c->ring_cap;
+        SDL_UnlockMutex(c->mtx);
+        if (full) {
+            c->last_body_tick = SDL_GetTicks();
+            return 0;
+        }
+    }
     // Uma conexao persistente parada nao deve consumir os 30 s do low-speed
     // antes de tentar outro socket. Este limite vale somente ANTES do corpo;
     // ring cheio/backpressure e transferencia em andamento nao sao abortados.
@@ -381,9 +396,7 @@ static int xfer_cb(void *ud, curl_off_t a, curl_off_t b, curl_off_t d, curl_off_
         SDL_GetTicks() - c->stream_started_tick >= 8000u) return 1;
     if (c->streaming && c->stream_len > 0 &&
         SDL_GetTicks() - c->last_body_tick >= 8000u) return 1;
-    if (c->cancel_flag && SDL_AtomicGet(c->cancel_flag)) return 1;
-    return (!c->running || c->seek_req >= 0 || startup_deadline_expired() ||
-            (c->synchronous && abort_requested())) ? 1 : 0;
+    return 0;
 }
 
 static int fetch_block(CurlIO *c, int64_t start) {

@@ -4,7 +4,14 @@ import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
-const transport = readFileSync('source/curl_avio.c', 'utf8').replace(/\r\n/g, '\n');
+const baseline = process.argv.includes('--baseline');
+let transport = readFileSync('source/curl_avio.c', 'utf8').replace(/\r\n/g, '\n');
+if (baseline) {
+  const old = spawnSync('C:/Program Files/Git/cmd/git.exe',
+    ['show', '2d3bb1e:source/curl_avio.c'], {encoding:'utf8', windowsHide:true});
+  assert.equal(old.status, 0, old.stderr || old.error?.message);
+  transport = old.stdout.replace(/\r\n/g, '\n');
+}
 const structStart = transport.indexOf('typedef struct {\n    CURL *easy;');
 const progressStart = transport.indexOf('static int xfer_cb(');
 assert.ok(structStart >= 0 && progressStart >= 0);
@@ -20,18 +27,26 @@ const server = createServer((req, res) => {
   res.writeHead(200, { 'Content-Length': '1024' });
   res.write(Buffer.alloc(128));
   if (req.url === '/idle') return;
+  if (req.url === '/full') {
+    const end = setTimeout(() => res.end(Buffer.alloc(896)), 9500);
+    res.on('close', () => clearTimeout(end));
+    return;
+  }
   const first = setTimeout(() => res.write(Buffer.alloc(384)), 1000);
   const last = setTimeout(() => res.end(Buffer.alloc(512)), 4200);
   res.on('close', () => { clearTimeout(first); clearTimeout(last); });
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 try {
-  for (const seconds of ['2', '0', 'idle']) {
-    const p = spawn(exe, [`http://127.0.0.1:${server.address().port}/${seconds === 'idle' ? 'idle' : 'fixture'}`, seconds], { windowsHide: true });
+  for (const seconds of ['2', '0', 'idle', 'full']) {
+    const route = seconds === 'idle' || seconds === 'full' ? seconds : 'fixture';
+    const p = spawn(exe, [`http://127.0.0.1:${server.address().port}/${route}`, seconds], { windowsHide: true });
     let output = ''; p.stdout.on('data', chunk => output += chunk);
     const rc = await new Promise((ok, fail) => { p.on('error', fail); p.on('close', ok); });
     console.log(`low-speed=${seconds}s ${output.trim()}`);
-    assert.equal(rc, seconds === '0' ? 0 : 1);
-    assert.match(output, seconds === '2' ? /curl=28/ : seconds === 'idle' ? /curl=42/ : /curl=0 bytes=1024/);
+    const oldFull = baseline && seconds === 'full';
+    assert.equal(rc, seconds === '0' || (seconds === 'full' && !oldFull) ? 0 : 1);
+    assert.match(output, seconds === '2' ? /curl=28/ : seconds === 'idle' || oldFull ? /curl=42/ : /curl=0 bytes=1024/);
   }
+  if (baseline) console.log('BASELINE DEFECT REPRODUCED: full ring incorrectly aborts; this is NOT a release approval.');
 } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }

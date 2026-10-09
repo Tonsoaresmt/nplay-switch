@@ -3866,7 +3866,8 @@ static void draw_login(void) {
         SDL_UnlockMutex(g_pair.mutex);
     }
     text_draw(gRen, "NPLAY", 52, 36, C_ACC, 1);
-    text_draw(gRen, "Nintendo Switch", 52, 76, C_MUT, 2);
+    // Visible before authentication and in every pairing state.
+    text_draw(gRen, "Nintendo Switch | v" APP_VERSION_STR, 52, 76, C_MUT, 2);
 
     if (stage == LOGIN_PAIR_WAITING) {
         ui_panel(48, 108, 1184, 548, C_ACC2);

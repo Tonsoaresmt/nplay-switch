@@ -87,10 +87,128 @@ static CURLSH *g_share = NULL;
 static SDL_mutex *g_share_mtx[CURL_LOCK_DATA_LAST];
 #ifdef __SWITCH__
 // devkitPro curl 7.69/libnx supports SSL_CTX_FUNCTION, not CAINFO_BLOB.
-// Import the SAME Mozilla bundle without depending on a writable/readable SD.
-// Published once before workers start, freed only after they have joined.
-static unsigned char *g_ca_pem;
-static _Thread_local unsigned int g_tls_import_error;
+// Import the embedded Mozilla bundle without depending on a writable/readable SD.
+// Buffers are built once before workers start, are read-only afterwards, and are
+// freed only after the workers have joined.
+//
+// Importacao em estagios. O E1 replica EXATAMENTE o que o curl/libnx fazia com
+// CAINFO apontando para o arquivo da microSD (que funcionou por semanas): bundle
+// completo, tamanho exato do arquivo, SEM byte NUL final. A 0.12.51 passou a
+// enviar tamanho+1 (NUL depois do ultimo END CERTIFICATE), que um parser PEM pode
+// rejeitar por inteiro. Os estagios seguintes so rodam se o E1 falhar:
+//   E2: so as raizes prioritarias (PEM puro, sem comentarios), numa chamada;
+//   E3: essas mesmas raizes uma a uma (um certificado ruim nao derruba os demais).
+// Se nada importar, falha fechada (77); peer, hostname e data seguem verificados.
+static unsigned char *g_ca_pem;                 // copia heap do bundle completo
+static unsigned char *g_ca_sub;                 // PEM puro das raizes prioritarias
+static unsigned int g_ca_sub_len;
+#define CA_SUB_MAX 64                           // capacidade (a lista prioritaria tem ~55)
+static struct { unsigned int off, len; } g_ca_blk[CA_SUB_MAX];
+static unsigned int g_ca_blk_n;
+static _Thread_local unsigned int g_tls_import_error;   // 1o resultado nativo que falhou
+static _Thread_local unsigned int g_tls_import_stage;   // ultimo estagio tentado (1..3)
+
+// Nomes exatos como aparecem no bundle (linha acima de "=====" em cada bloco).
+// Cobrem os servidores do app (Google Trust Services, Sectigo/USERTrust, Let's
+// Encrypt) e as CAs mais usadas por CDNs. Fora da lista: so o E1 as importa.
+static const char *const k_ca_priority[] = {
+    "GTS Root R1", "GTS Root R3", "GTS Root R4",
+    "ISRG Root X1", "ISRG Root X2",
+    "USERTrust RSA Certification Authority", "USERTrust ECC Certification Authority",
+    "COMODO RSA Certification Authority", "COMODO ECC Certification Authority",
+    "Sectigo Public Server Authentication Root E46", "Sectigo Public Server Authentication Root R46",
+    "GlobalSign Root CA - R3", "GlobalSign ECC Root CA - R5", "GlobalSign Root CA - R6",
+    "GlobalSign Root R46", "GlobalSign Root E46", "GlobalSign ECC Root CA - R4",
+    "DigiCert Global Root G2", "DigiCert Global Root G3", "DigiCert Trusted Root G4",
+    "DigiCert Assured ID Root G2", "DigiCert Assured ID Root G3",
+    "DigiCert TLS ECC P384 Root G5", "DigiCert TLS RSA4096 Root G5",
+    "Amazon Root CA 1", "Amazon Root CA 2", "Amazon Root CA 3", "Amazon Root CA 4",
+    "Go Daddy Root Certificate Authority - G2", "Starfield Root Certificate Authority - G2",
+    "Starfield Services Root Certificate Authority - G2",
+    "Microsoft ECC Root Certificate Authority 2017", "Microsoft RSA Root Certificate Authority 2017",
+    "IdenTrust Commercial Root CA 1", "IdenTrust Public Sector Root CA 1",
+    "SSL.com Root Certification Authority RSA", "SSL.com Root Certification Authority ECC",
+    "SSL.com TLS RSA Root CA 2022", "SSL.com TLS ECC Root CA 2022",
+    "SSL.com EV Root Certification Authority RSA R2", "SSL.com EV Root Certification Authority ECC",
+    "QuoVadis Root CA 1 G3", "QuoVadis Root CA 2 G3", "QuoVadis Root CA 3 G3",
+    "Certum Trusted Network CA", "Certum Trusted Network CA 2", "Certum Trusted Root CA", "Certum EC-384 CA",
+    "Actalis Authentication Root CA", "Buypass Class 2 Root CA", "Buypass Class 3 Root CA",
+    "HARICA TLS RSA Root CA 2021", "HARICA TLS ECC Root CA 2021",
+    "Certainly Root R1", "Certainly Root E1",
+};
+
+static int ca_name_is_priority(const unsigned char *name, size_t len) {
+    for (size_t i = 0; i < sizeof(k_ca_priority) / sizeof(k_ca_priority[0]); i++)
+        if (strlen(k_ca_priority[i]) == len && !memcmp(k_ca_priority[i], name, len)) return 1;
+    return 0;
+}
+
+static const unsigned char *ca_find(const unsigned char *p, const unsigned char *limit, const char *needle) {
+    size_t n = strlen(needle);
+    while (p + n <= limit) {
+        p = memchr(p, needle[0], (size_t)(limit - p) - n + 1);
+        if (!p) return NULL;
+        if (!memcmp(p, needle, n)) return p;
+        p++;
+    }
+    return NULL;
+}
+
+// Inicio da linha cujo terminador '\n' esta em nl.
+static const unsigned char *ca_line_start(const unsigned char *base, const unsigned char *nl) {
+    const unsigned char *p = nl;
+    while (p > base && p[-1] != '\n') p--;
+    return p;
+}
+
+static int ca_is_rule_line(const unsigned char *s, const unsigned char *e) {
+    while (e > s && e[-1] == '\r') e--;
+    if (e - s < 3) return 0;
+    for (; s < e; s++) if (*s != '=') return 0;
+    return 1;
+}
+
+// Percorre os blocos PEM do bundle (formato curl.se: "Nome\n=====\n-----BEGIN...").
+// Com out != NULL copia os blocos prioritarios e registra g_ca_blk. Devolve o total
+// de bytes e, em *count, quantos blocos foram selecionados.
+static unsigned int ca_scan_priority(unsigned char *out, unsigned int *count) {
+    static const char begin_marker[] = "-----BEGIN CERTIFICATE-----";
+    static const char end_marker[] = "-----END CERTIFICATE-----";
+    const unsigned char *base = cacert_bin, *limit = cacert_bin + cacert_bin_size;
+    const unsigned char *p = base, *b;
+    unsigned int total = 0, n = 0;
+    while ((b = ca_find(p, limit, begin_marker)) != NULL) {
+        const unsigned char *e = ca_find(b, limit, end_marker);
+        if (!e) break;
+        e += sizeof(end_marker) - 1;
+        if (e < limit && *e == '\r') e++;
+        if (e < limit && *e == '\n') e++;
+        int wanted = 0;
+        if (b > base && b[-1] == '\n') {
+            const unsigned char *rule_end = b - 1;
+            const unsigned char *rule_start = ca_line_start(base, rule_end);
+            if (rule_start > base && ca_is_rule_line(rule_start, rule_end)) {
+                const unsigned char *name_end = rule_start - 1;
+                const unsigned char *name_start = ca_line_start(base, name_end);
+                while (name_end > name_start && name_end[-1] == '\r') name_end--;
+                wanted = ca_name_is_priority(name_start, (size_t)(name_end - name_start));
+            }
+        }
+        if (wanted) {
+            unsigned int len = (unsigned int)(e - b);
+            if (out && n < CA_SUB_MAX) {
+                memcpy(out + total, b, len);
+                g_ca_blk[n].off = total;
+                g_ca_blk[n].len = len;
+            }
+            total += len;
+            n++;
+        }
+        p = e;
+    }
+    if (count) *count = n;
+    return total;
+}
 
 static int prepare_ca_memory(void) {
     if (g_ca_pem) return 0;
@@ -98,27 +216,52 @@ static int prepare_ca_memory(void) {
     g_ca_pem = malloc((size_t)cacert_bin_size + 1);
     if (!g_ca_pem) return -1;
     memcpy(g_ca_pem, cacert_bin, cacert_bin_size);
-    g_ca_pem[cacert_bin_size] = 0;
+    g_ca_pem[cacert_bin_size] = 0;   // guarda de leitura; o NUL NAO e enviado ao servico SSL
+    // Subconjunto de fallback: opcional, falhar aqui nao impede o E1.
+    unsigned int n = 0, len = ca_scan_priority(NULL, &n);
+    if (len && n && n <= CA_SUB_MAX && (g_ca_sub = malloc((size_t)len + 1)) != NULL) {
+        ca_scan_priority(g_ca_sub, NULL);
+        g_ca_sub[len] = 0;
+        g_ca_sub_len = len;
+        g_ca_blk_n = n;
+    }
     return 0;
 }
 
 static CURLcode switch_ca_context(CURL *curl, void *ssl_ctx, void *userdata) {
     (void)curl; (void)userdata;
     g_tls_import_error = 0;
+    g_tls_import_stage = 0;
     const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
     if (!version || !version->ssl_version || strcmp(version->ssl_version, "libnx"))
         return CURLE_SSL_CACERT_BADFILE; // never cast another backend's context
     if (!g_ca_pem) return CURLE_OUT_OF_MEMORY;
     if (!ssl_ctx) return CURLE_SSL_CACERT_BADFILE;
-    // One import supports multiple PEM certificates; do not import each root as
-    // an object (Horizon limits those objects). Keep date/peer/hostname checks.
-    Result rc = sslContextImportServerPki((SslContext *)ssl_ctx, g_ca_pem,
-                    (u32)cacert_bin_size + 1, SslCertificateFormat_Pem, NULL);
-    if (R_FAILED(rc)) {
-        g_tls_import_error = rc;
-        return CURLE_SSL_CACERT_BADFILE;
+    SslContext *ctx = (SslContext *)ssl_ctx;
+
+    // E1: igual ao curl/libnx com CAINFO (tamanho exato do arquivo, sem NUL).
+    g_tls_import_stage = 1;
+    Result rc = sslContextImportServerPki(ctx, g_ca_pem, (u32)cacert_bin_size,
+                                          SslCertificateFormat_Pem, NULL);
+    if (!R_FAILED(rc)) return CURLE_OK;
+    g_tls_import_error = rc;   // causa raiz = primeira falha; os estagios abaixo nao a sobrescrevem
+
+    if (g_ca_sub && g_ca_sub_len) {
+        g_tls_import_stage = 2;
+        if (!R_FAILED(sslContextImportServerPki(ctx, g_ca_sub, g_ca_sub_len,
+                                                SslCertificateFormat_Pem, NULL))) {
+            g_tls_import_error = 0;   // recuperado pelo fallback
+            return CURLE_OK;
+        }
+        g_tls_import_stage = 3;
+        unsigned int imported = 0;
+        for (unsigned int i = 0; i < g_ca_blk_n; i++) {
+            if (!R_FAILED(sslContextImportServerPki(ctx, g_ca_sub + g_ca_blk[i].off, g_ca_blk[i].len,
+                                                    SslCertificateFormat_Pem, NULL))) imported++;
+        }
+        if (imported) { g_tls_import_error = 0; return CURLE_OK; }
     }
-    return CURLE_OK;
+    return CURLE_SSL_CACERT_BADFILE;
 }
 #else
 static int g_ca_ready = 0;
@@ -161,9 +304,10 @@ static const char *net_transport_error(CURLcode code) {
 #ifdef __SWITCH__
     static _Thread_local char message[128];
     if (code == CURLE_SSL_CACERT_BADFILE && g_tls_import_error) {
-        snprintf(message, sizeof(message), "Certificados HTTPS: importacao falhou (77 / %08X)",
-                 g_tls_import_error);
-        return message; // numeric native result only; never URL, token or path
+        // Curta de proposito: a tela de login corta ~26 caracteres e escondia o codigo.
+        // "TLS 77/<resultado nativo> E<estagio>"; so numeros, nunca URL, token ou caminho.
+        snprintf(message, sizeof(message), "TLS 77/%08X E%u", g_tls_import_error, g_tls_import_stage);
+        return message;
     }
 #endif
     if (code == CURLE_SSL_CACERT_BADFILE)
@@ -215,6 +359,10 @@ void net_exit(void) {
 #ifdef __SWITCH__
     free(g_ca_pem);
     g_ca_pem = NULL;
+    free(g_ca_sub);
+    g_ca_sub = NULL;
+    g_ca_sub_len = 0;
+    g_ca_blk_n = 0;
 #else
     g_ca_ready = 0;
 #endif
@@ -226,6 +374,7 @@ void net_configure_curl_isolated(CURL *curl) {
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);   // mantem a conexao viva
 #ifdef __SWITCH__
     g_tls_import_error = 0;
+    g_tls_import_stage = 0;
     // Fail closed even if the linked backend unexpectedly lacks the callback.
     curl_easy_setopt(curl, CURLOPT_CAINFO, "nplay-embedded-ca-only");
     curl_easy_setopt(curl, CURLOPT_CAPATH, NULL);

@@ -66,6 +66,18 @@ int main(void) {
     init(&c, ring); c.seek_req = 100; assert(xfer_cb(&c, 0, 1, 0, 0) == 1);
     init(&c, ring); c.streaming = 0; ticks = 30000;
     assert(xfer_cb(&c, 0, 0, 0, 0) == 0);
+    // No writer callback is blocked here: the previous callback filled the ring.
+    // A paused consumer is not a network failure between progress callbacks.
+    init(&c, ring); c.count = c.ring_cap; c.stream_len = 8;
+    ticks = 60000;
+    assert(xfer_cb(&c, 0, 8, 0, 0) == 0);
+    c.count = 0; ticks += 7999;
+    assert(xfer_cb(&c, 0, 8, 0, 0) == 0);
+    ticks++;
+    assert(xfer_cb(&c, 0, 8, 0, 0) == 1);
+    init(&c, ring); c.count = c.ring_cap; c.stream_len = 8;
+    c.running = 0; ticks = 60000;
+    assert(xfer_cb(&c, 0, 8, 0, 0) == 1);
     // Real writer callback: a full ring waits 60 s locally, then body idle
     // timer must be rearmed rather than treating pause as a broken network.
     init(&c, ring); c.count = 8; c.response_code = 200; drain_at = 60000;

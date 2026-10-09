@@ -16,12 +16,19 @@ static Uint32 SDL_GetTicks(void) { struct timespec t; clock_gettime(CLOCK_MONOTO
 static int startup_deadline_expired(void) { return 0; }
 static int abort_requested(void) { return 0; }
 static int SDL_AtomicGet(SDL_atomic_t *a) { return a->value; }
+// This probe has no concurrent consumer; locking is covered by the SDL harness.
+static inline void SDL_LockMutex(SDL_mutex *m) { (void)m; }
+static inline void SDL_UnlockMutex(SDL_mutex *m) { (void)m; }
 #include "curl_avio_progress_function.inc"
 static int first = 1;
+static int full_ring_mode;
 static size_t received;
 static size_t hold(char *data, size_t size, size_t count, void *ud) {
     (void)data; CurlIO *c = ud;
-    if (first) { struct timespec t = {4, 0}; first = 0; nanosleep(&t, NULL); }
+    if (full_ring_mode) {
+        c->count = first ? c->ring_cap : 0;
+        first = 0;
+    } else if (first) { struct timespec t = {4, 0}; first = 0; nanosleep(&t, NULL); }
     received += size * count;
     c->stream_len += size * count;
     c->last_body_tick = SDL_GetTicks();
@@ -31,6 +38,8 @@ int main(int argc, char **argv) {
     assert(argc == 3);
     CURL *easy = curl_easy_init(); assert(easy);
     CurlIO c = {0}; c.running = c.streaming = 1; c.seek_req = -1;
+    c.ring_cap = 4096;
+    full_ring_mode = !strcmp(argv[2], "full");
     c.stream_started_tick = c.last_body_tick = SDL_GetTicks();
     if (!strcmp(argv[2], "idle")) first = 0;
     curl_easy_setopt(easy, CURLOPT_URL, argv[1]);

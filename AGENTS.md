@@ -1,5 +1,62 @@
 # Continuidade para agentes
 
+## Publicacao .52 autorizada — 08/10/2026
+
+- Usuario pediu explicitamente subir para o atualizador. Checkout autorizado
+  continua switch-access-expiry; main raiz .51.1 nao foi alterado.
+- Candidato integrado inclui TLS .51.1, guard de artefato e backpressure fix.
+  Nao reutilizar candidato .52 anterior com TLS antigo. Secao historica abaixo
+  "Login bloqueado" foi superada: importacao falhou no NRO novo foi confirmada,
+  nao era prova de arquivo velho; 2aa74a0 corrige e registra conexao fisica.
+- Revalidar artefato final antes de publicar; codigo na branch hardening,
+  NRO apenas asset de Release. SHA/tamanho nas notas docs/RELEASE_0_12_52.md.
+  Publicacao so confirmada apos verificar latest, assets e download publico.
+  Teste fisico da .52 segue pendente; nao anunciar estabilidade definitiva.
+
+## Reconexoes/backpressure entre callbacks — 08/10/2026, LOCAL
+
+- Main raiz agora 2aa74a0/.51.1: SSL foi corrigido por outra rodada, commit
+  registra conexao fisica. Nao substituir por candidato .52 antigo deste checkout.
+- Pedido investigacao/reducao: transporte/player iguais nas bases comparadas.
+  Defeito reproduzido: xfer_cb abortava apos8s com ring cheio ENTRE callbacks.
+  wr_ring ja protegia espera dentro do callback, nao esse intervalo.
+- Fix LOCAL no checkout autorizado: snapshot de count sob mutex; idle rearmado
+  quando cheio. Cancel/seek/startup continuam prioritarios. TLS/memoria mantidos.
+- Teste C falhou antes/passou depois; libcurl real localhost com gap9.5s+ring
+  cheio concluiu0/1024B, idle real42, low-speed antigo28. Demux pthread,
+  supervisor e flow guards passaram; build ARM64 incremental -Werror passou.
+- Primeira suite completa passou. TLS .51.1 (net/test) e guard de NRO velho
+  portados sem alterar main; build integrado -Werror passou. Segunda suite completa
+  passou sem SkipMediaFixtures, com guard de NRO antigo e simbolos ELF.
+  NRO24266575B, SHA d908325c24d3dcb74a8fcb1e4bb5a3ab39282bf62e069a34086337f391e8a749.
+  Sidecar regenerado apos validacao. Relatorio docs/RECONNECT_BACKPRESSURE_2026_10_08.md.
+  Nenhum commit/push/release/hardware/backend. Candidato .52 agora preserva .51.1.
+- Logs existentes02/10 nao comprovam incidente novo. Pedido logs atualizado.
+
+## Login bloqueado: investigacao aberta, candidato LOCAL .52 — 05/10/2026
+
+- Usuario foi desconectado e nao consegue ver versao em Configuracoes/perfil.
+  Foto do login ainda mostra mensagem generica inglesa de CA (77). Na .51
+  o caminho real do login/net_request traduz 77; ELF tambem confirma esse ramo.
+  Isso sugere NRO antigo sendo aberto, MAS nao prova versao instalada.
+- Release publica reconferida .51 com digest correto. Nao houve nova mudanca
+  TLS nem publicacao depois desse relato. Precisamos de versao do hbmenu ou
+  substituicao manual do NRO executado, e erro completo subsequente.
+- Mudanca local pequena: versao visivel no cabecalho de draw_login antes de
+  todos os retornos de QR/carregamento. Candidato .52 so para nao reutilizar
+  numero/digest de .51 publicada. NAO e correcao comprovada do login/SSL.
+- Inspecao: catalog_fetch so marca expiracao com HTTP401+reason=expired;
+  erro SSL nao limpa token nesse caminho. Logout explicito/expiracao limpam.
+  Nao atribuir expulsao a TLS nem restaurar/burlar token sem evidencias novas.
+- Arquivos locais desta rodada: main.c, tools/test_app_navigation.mjs,
+  Makefile/include/update.h e este registro. Nao publicar outra mudanca TLS
+  baseada so em stubs. Continuar a partir da confirmacao do NRO realmente aberto.
+- Testes de navegacao/capas/busca e guard de versao no login passaram;
+  build incremental ARM64 sem avisos passou. Validacao completa .52 NAO rodada,
+  handshake fisico NAO testado, nenhum commit/push/release .52 criado.
+  Nplay.nro local agora e .52; sidecar SHA local ainda corresponde a .51:
+  renovar obrigatoriamente so apos validacao completa se for publicar .52.
+
 ## Continuidade urgente — certificados/categorias/capas, 0.12.51 (05/10/2026)
 
 - Checkout ativo: `C:/NplaySwitch/.codex-tmp/switch-access-expiry`, branch

@@ -3,6 +3,10 @@ import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 const read=p=>readFileSync(p,'utf8').replace(/\r\n/g,'\n');
 const main=read('source/main.c'),net=read('source/net.c'),text=read('source/text.c');
+const login=main.slice(main.indexOf('static void draw_login(void) {'),main.indexOf('// ------------------------------------------------------------- input'));
+const loginVersion=login.indexOf('"Nintendo Switch | v" APP_VERSION_STR');
+if(loginVersion<0 || loginVersion>login.indexOf('if (stage == LOGIN_PAIR_WAITING)'))
+ throw Error('Version must be visible before login and all QR/pairing branches');
 function section(s,a,b){const start=s.indexOf(a),end=s.indexOf(b,start);if(start<0||end<start)throw Error(a);return s.slice(start,end);}
 mkdirSync('build',{recursive:true});
 writeFileSync('build/app_cover.inc',section(main,'#define MAX_COV 3000','// ------------------------------------------------------------- card'));
