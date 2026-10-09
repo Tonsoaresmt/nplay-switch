@@ -9,7 +9,8 @@ alteracao foi feita no main, no backend, nas contas ou nos certificados.
 O candidato .52 preexistente estava sem a correcao HTTPS. Nesta rodada foram
 portados source/net.c e tools/test_tls_ca.c de 2aa74a0 e o guard de artefato
 de e9671e7 para o checkout autorizado, preservando todas as alteracoes locais.
-Main continua inalterado. Nenhuma nova release foi publicada.
+Main continua inalterado. Publicacao posteriormente autorizada e concluida:
+v0.12.52 latest, codigo/tag a95925096f5a24ae701186d07ddfa935e4d1c0fb.
 
 ## Defeito demonstrado
 
@@ -51,7 +52,11 @@ de limites ou acesso concorrente ao FFmpeg. TLS e checkpoints inalterados.
 
 Artefato integrado LOCAL .52: 24266575 bytes; SHA-256
 `d908325c24d3dcb74a8fcb1e4bb5a3ab39282bf62e069a34086337f391e8a749`.
-Sidecar atualizado apos validacao. Nenhum commit/push/release nesta rodada.
+Sidecar atualizado apos validacao. Validacao completa FINAL repetida antes
+de publicar, sem SkipMediaFixtures, aprovada. Release publicada em
+09/10/2026 01:08:56 UTC (08/10/2026 22:08:56 Sao Paulo). API latest publica,
+tamanho/digest do asset e download publico sem autenticacao foram conferidos.
+https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.52
 
 ## Outros riscos observados, ainda sem alteracao
 
@@ -78,6 +83,9 @@ a causa desta sessao. Precisamos de trace recente para distinguir HTTP
 401/403 (acesso/assinatura), 5xx, timeout, EOF parcial e backpressure local.
 
 ## Antes de publicar
+
+Publicacao de teste autorizada ja concluida; checklist fisico abaixo permanece
+pendente, nao foi homologacao no console. Para qualquer nova rodada:
 
 Antes de publicar, reconferir candidato/NRO/ELF/versao/hash e testar no console:
 pausa de 1/10 min, menus, retomada/seek, Wi-Fi intermitente, video >60 min.

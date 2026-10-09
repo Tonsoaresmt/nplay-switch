@@ -2,6 +2,16 @@
 
 ## Publicacao .52 autorizada — 08/10/2026
 
+- CONCLUIDA: codigo a95925096f5a24ae701186d07ddfa935e4d1c0fb enviado na branch
+  hardening; release v0.12.52 publica/latest, nao draft/prerelease.
+  Publicada09/10/2026 01:08:56UTC =08/10/2026 22:08:56 Sao Paulo.
+- API latest SEM autenticacao e download publico conferidos. Asset24266575B,
+  SHA d908325c24d3dcb74a8fcb1e4bb5a3ab39282bf62e069a34086337f391e8a749;
+  sidecar presente e tag aponta exatamente para o commit do build.
+- Suite FINAL completa passou de novo, sem SkipMediaFixtures; nao houve novo
+  build depois dessa prova. NRO apenas asset; main raiz e backend inalterados.
+  Atualizador pode detectar .52; homologacao no Switch fisico continua pendente.
+
 - Usuario pediu explicitamente subir para o atualizador. Checkout autorizado
   continua switch-access-expiry; main raiz .51.1 nao foi alterado.
 - Candidato integrado inclui TLS .51.1, guard de artefato e backpressure fix.
