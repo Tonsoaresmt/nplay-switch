@@ -1452,6 +1452,8 @@ typedef struct {
     SDL_atomic_t cancel_io;
     SDL_atomic_t finished;
     PlayerProgressCallback progress_cb;
+    PlayerStartedCallback started_cb;
+    PlaybackSource started_source; // Immutable snapshot; no render/worker sharing of SID.
     PlayerHeartbeatCallback heartbeat_cb;
     PlayerStopCallback stop_cb;
     void *callback_userdata;
@@ -4424,6 +4426,8 @@ static int playback_heartbeat_thread(void *userdata) {
     PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
     int elapsed_ms = 0, progress_ms = 0;
     int last_saved_pos = -1;
+    int started_tries = 0;
+    Uint32 started_retry_tick = 0;
     while (SDL_AtomicGet(&hb->running)) {
         SDL_Delay(100);
         if (!SDL_AtomicGet(&hb->running)) break;
@@ -4431,6 +4435,13 @@ static int playback_heartbeat_thread(void *userdata) {
             elapsed_ms = 0;
             progress_ms = 0;
             continue;
+        }
+        if (hb->started_cb && started_tries < 3 && !SDL_AtomicGet(&hb->cancel_io) &&
+            (!started_retry_tick || (Sint32)(SDL_GetTicks() - started_retry_tick) >= 0)) {
+            int rc = hb->started_cb(&hb->started_source, &hb->cancel_io, hb->callback_userdata);
+            started_tries++;
+            if (!rc) started_tries = 3;
+            else started_retry_tick = SDL_GetTicks() + (Uint32)started_tries * 2000u;
         }
         elapsed_ms += 100;
         progress_ms += 100;
@@ -4489,6 +4500,8 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     SDL_AtomicSet(&hb.cancel_io, 0);
     SDL_AtomicSet(&hb.finished, 0);
     hb.progress_cb = request->progress_cb;
+    hb.started_cb = request->started_cb;
+    hb.started_source = request->playback;
     hb.heartbeat_cb = request->heartbeat_cb;
     hb.stop_cb = request->stop_cb;
     hb.callback_userdata = request->userdata;

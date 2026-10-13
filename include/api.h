@@ -32,6 +32,7 @@ typedef struct {
     int item_id;
     int session_id;
     int source_id;
+    int request_id; // Pedido hot/TorBox; distinto das sessoes numerica e textual.
     char hot_session_id[96]; // Secret textual remux id; NOT the heartbeat session.
 
     char kind[24];
@@ -64,6 +65,11 @@ typedef struct {
 
 int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
                            HotStreamResult *out);
+void api_hot_inherit_context(PlaybackSource *hot, const PlaybackSource *catalog);
+int api_playback_needs_hot_source(const PlaybackSource *source);
+int api_hot_playback_started_cancel(const PlaybackSource *source, SDL_atomic_t *cancel);
+int api_hot_refresh_range_cancel(const PlaybackSource *source, SDL_atomic_t *cancel,
+                                 PlaybackSource *out);
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out);
 int api_resolve_playback_cancel(int item_id, const char *quality,

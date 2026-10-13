@@ -345,17 +345,11 @@ static void draw_card(int x, int y, int cw, int coverH, cJSON *item, int selecte
         text_center_at("NPLAY", x, cw, y + coverH / 2 - 18, C_MUT, 2);
     }
     const char *kind = jstr(item, "kind");
-    int ready = cJSON_IsTrue(cJSON_GetObjectItem(item, "r2_ready")) || jint(item, "r2_ready") != 0;
     int cam = cJSON_IsTrue(cJSON_GetObjectItem(item, "is_cam")) || jint(item, "is_cam") != 0;
     const char *year = jstr(item, "year");
     if (kind && !strcmp(kind, "live")) ui_card_badge("AO VIVO", x + 7, y + 7, C_ROSE);
     else if (cam) ui_card_badge("CAM", x + 7, y + 7, C_ROSE);
     else if (year && year[0]) ui_card_badge(year, x + 7, y + 7, C_MUT);
-    if (ready && !(kind && !strcmp(kind, "live"))) {
-        int tw = 0, th = 0; text_cached(gRen, "Pronto", C_TEXT, 2, &tw, &th);
-        int bw = tw + 14; if (bw < 28) bw = 28;
-        ui_card_badge("Pronto", x + cw - bw - 7, y + coverH - 29, C_GREEN);
-    }
     if (fav) {
         if (selected) {
             int tw = 0, th = 0; text_cached(gRen, "Na lista", C_TEXT, 2, &tw, &th);
@@ -778,7 +772,9 @@ static void landing_apply(int tab, cJSON *land) {
         add_rail("Atualizados esta semana", week, 1);
         if (arr_len(today) == 0 && arr_len(week) == 0)
             add_rail("Atualizacoes recentes", cJSON_GetObjectItem(g_land, "updated"), 1);
-        add_rail("Populares",          cJSON_GetObjectItem(g_land, "popular"), 1);
+        add_rail("Novas temporadas",    cJSON_GetObjectItem(g_land, "newSeasons"), 1);
+        add_rail("Em alta",             cJSON_GetObjectItem(g_land, "popular"), 1);
+        add_rail("Mais bem avaliados",  cJSON_GetObjectItem(g_land, "topRated"), 1);
         add_rail("Dublados",          cJSON_GetObjectItem(g_land, "dublados"), 1);
         add_rail("Filmes de anime",   cJSON_GetObjectItem(g_land, "filmes"), 1);
         cJSON *gs = cJSON_GetObjectItem(g_land, "genreShelves"), *e;
@@ -794,7 +790,7 @@ static void landing_apply(int tab, cJSON *land) {
             hero_pool_add_ready(g_heroesArr, cJSON_GetObjectItem(g_land, "recent"));
         }
         cJSON_AddItemToObject(g_land, "_switchHeroes", g_heroesArr);
-        add_rail("Pronto pra tocar", cJSON_GetObjectItem(g_land, "prontos"), is_series);
+        add_rail("Selecionados para voce", cJSON_GetObjectItem(g_land, "prontos"), is_series);
         add_rail("Minha lista", cJSON_GetObjectItem(g_land, "favoritos"), is_series);
         add_rail("Lancamentos", cJSON_GetObjectItem(g_land, "recent"), is_series);
         add_rail("Em alta", cJSON_GetObjectItem(g_land, "emAlta"), is_series);
@@ -995,6 +991,11 @@ static int on_player_heartbeat(int session_id, SDL_atomic_t *cancel, void *u) {
     return api_playback_heartbeat_cancel(session_id, cancel);
 }
 
+static int on_player_started(const PlaybackSource *source, SDL_atomic_t *cancel, void *u) {
+    (void)u;
+    return api_hot_playback_started_cancel(source, cancel);
+}
+
 static int on_player_stop(int item_id, int session_id,
                           SDL_atomic_t *cancel, void *u) {
     (void)session_id;
@@ -1006,6 +1007,8 @@ static int on_player_renew(const PlaybackSource *current, PlaybackSource *out,
                            SDL_atomic_t *cancel, void *u) {
     (void)u;
     if (!current) return -1;
+    if (!strcmp(current->delivery_str, "debrid") && !current->sequential_stream)
+        return api_hot_refresh_range_cancel(current, cancel, out);
     if (current->delivery == DELIVERY_R2 && current->session_id > 0)
         return api_refresh_playback_cancel(current, cancel, out);
     return api_reresolve_playback_cancel(current->item_id,
@@ -1361,9 +1364,11 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
                  src.season > 0 ? src.season : 1, src.episode);
     
     int rc = 0;
-    if (src.container[0] && !strcmp(src.container, "torrent")) {
+    if (api_playback_needs_hot_source(&src)) {
         // /stream devolve um magnet para clientes nativos. No Switch a rota
         // reproduzivel e a mesma usada pelo navegador: TorBox/hot-stream.
+        // Embeds novos tambem podem ter torrent validado: nao abrir HTML no
+        // FFmpeg nem marcar torrent_capable (Switch nao tem motor P2P local).
         // /stream pode escolher uma fonte que o hot-stream considera nao
         // confiavel. Sem escolha manual de variante, deixe o endpoint selecionar
         // a melhor fonte validada para TorBox.
@@ -1443,12 +1448,14 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
         req.episode_current = g_play_episode_current;
         if (src.sequential_stream) req.start_sec = 0;
         req.progress_cb = on_player_progress;
+        req.started_cb = src.request_id > 0 && src.hot_session_id[0] ? on_player_started : NULL;
         // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
         // /stream poderia entregar magnet ao demuxer e repetir a falha.
-        req.renew_cb = src.delivery_str[0] &&
+        req.renew_cb = !strcmp(src.delivery_str, "debrid") && !src.sequential_stream
+            ? on_player_renew : src.delivery_str[0] &&
             (!strcmp(src.delivery_str, "hot") || !strcmp(src.delivery_str, "debrid"))
             ? NULL : on_player_renew;
-        req.fallback_cb = req.renew_cb ? on_player_fallback : NULL;
+        req.fallback_cb = req.renew_cb && strcmp(src.delivery_str, "debrid") ? on_player_fallback : NULL;
         req.heartbeat_cb = src.session_id > 0 ? on_player_heartbeat : NULL;
         req.stop_cb = src.session_id > 0 ? on_player_stop : NULL;
         PlaybackSyncStatus sync = {0};
@@ -1868,6 +1875,7 @@ static int hot_wait_for_stream(int itemId, int sourceId, const char *title,
                 goto done;
             }
             if (poll.result.status == HOT_STREAMING) {
+                api_hot_inherit_context(&poll.result.source, out);
                 *out = poll.result.source;
                 result = 1; goto done;
             }
@@ -2740,8 +2748,7 @@ static void draw_landing(void) {
         const char *kl = hk ? (!strcmp(hk, "movie") ? "Filme" : !strcmp(hk, "live") ? "Ao vivo" : "Serie")
                             : (g_heroSeriesDefault ? "Serie" : "Filme");
         char meta[96]; const char *year = jstr(h, "year");
-        snprintf(meta, sizeof(meta), "%s%s%s%s", kl, year && year[0] ? "  |  " : "", year && year[0] ? year : "",
-                 (cJSON_IsTrue(cJSON_GetObjectItem(h, "r2_ready")) || jint(h, "r2_ready")) ? "  |  Pronto pra tocar" : "");
+        snprintf(meta, sizeof(meta), "%s%s%s", kl, year && year[0] ? "  |  " : "", year && year[0] ? year : "");
         text_clip(meta, content_x, hy + 83, C_MUT, 2, 650);
         const char *plot = jstr(h, "plot");
         if (plot && plot[0]) text_clip(plot, content_x, hy + 111, C_MUT, 0, 650);

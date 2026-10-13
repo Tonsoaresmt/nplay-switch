@@ -121,6 +121,8 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
                            HotStreamResult *out) {
     if (!out || item_id <= 0) return -1;
     memset(out, 0, sizeof(*out));
+    g_api_last_error[0] = 0;
+    g_api_last_access_expired = 0;
     char path[96], url[1024], body[80];
     snprintf(path, sizeof(path), "/api/stream/hot/%d", item_id);
     snprintf(url, sizeof(url), "%s%s", BASE, path);
@@ -159,16 +161,35 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
     if (hot_subtitle_session_valid(hot_sid))
         snprintf(out->source.hot_session_id, sizeof(out->source.hot_session_id), "%s", hot_sid);
     out->source.source_id = jint(json, "source_id");
+    cJSON *request_id = cJSON_GetObjectItem(json, "request_id");
+    if (cJSON_IsNumber(request_id) && request_id->valueint > 0 &&
+        request_id->valuedouble == request_id->valueint)
+        out->source.request_id = request_id->valueint;
+    cJSON *file_size = cJSON_GetObjectItem(json, "file_size");
+    if (cJSON_IsNumber(file_size) && file_size->valuedouble > 0 &&
+        file_size->valuedouble <= 9007199254740991.0)
+        out->source.source_bytes = (long long)file_size->valuedouble;
     const char *delivery = jstr(json, "delivery");
     if (delivery) snprintf(out->source.delivery_str, sizeof(out->source.delivery_str), "%s", delivery);
     out->source.delivery = DELIVERY_UPSTREAM;
     snprintf(out->source.container, sizeof(out->source.container), "mp4");
+    const char *container = jstr(json, "container");
+    if (container && (!strcasecmp(container, "hls") || !strcasecmp(container, "m3u8")))
+        snprintf(out->source.container, sizeof(out->source.container), "m3u8");
     const char *name = jstr(json, "file_name");
     out->source.sequential_stream = hot_sequential_file(name);
     absolute_play_url(jstr(json, "play_url"), out->source.play_url,
                       sizeof(out->source.play_url));
-    if (strstr(out->source.play_url, "/api/media/debrid/"))
+    const char *seek_mode = jstr(json, "seek_mode");
+    cJSON *seekable = cJSON_GetObjectItem(json, "seekable");
+    if (seek_mode && !strcmp(seek_mode, "restart"))
         out->source.sequential_stream = 1;
+    else if (seek_mode && !strcmp(seek_mode, "range"))
+        out->source.sequential_stream = 0;
+    else if (cJSON_IsBool(seekable))
+        out->source.sequential_stream = !cJSON_IsTrue(seekable);
+    else if ((!name || !name[0]) && strstr(out->source.play_url, "/api/media/debrid/"))
+        out->source.sequential_stream = 1; // Legacy ambiguous response: fail conservatively.
     if (out->status == HOT_STREAMING && !out->source.play_url[0]) {
         snprintf(g_api_last_error, sizeof(g_api_last_error), "Preparo sem URL de video");
         cJSON_Delete(json); membuf_free(&resp);
@@ -176,6 +197,61 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
     }
     cJSON_Delete(json); membuf_free(&resp);
     return 0;
+}
+
+int api_playback_needs_hot_source(const PlaybackSource *source) {
+    return source && (!strcmp(source->container, "torrent") || !strcmp(source->container, "embed"));
+}
+
+void api_hot_inherit_context(PlaybackSource *hot, const PlaybackSource *catalog) {
+    if (!hot || !catalog || hot->item_id <= 0 || hot->item_id != catalog->item_id) return;
+    if (!hot->kind[0]) snprintf(hot->kind, sizeof(hot->kind), "%s", catalog->kind);
+    if (!hot->section[0]) snprintf(hot->section, sizeof(hot->section), "%s", catalog->section);
+    if (!hot->season) hot->season = catalog->season;
+    if (!hot->episode) hot->episode = catalog->episode;
+    if (hot->source_id > 0 && hot->source_id == catalog->source_id)
+        hot->is_cam = catalog->is_cam;
+    // Never inherit the closed numeric session or old URL/transport metadata.
+}
+
+int api_hot_refresh_range_cancel(const PlaybackSource *source, SDL_atomic_t *cancel,
+                                 PlaybackSource *out) {
+    if (!source || !out || source->item_id <= 0 || source->source_id <= 0 ||
+        source->sequential_stream || strcmp(source->delivery_str, "debrid")) return -1;
+    HotStreamResult result = {0};
+    if (api_hot_stream_attempt(source->item_id, source->source_id, cancel, &result)) return -1;
+    if (result.status == HOT_R2_READY) {
+        PlaybackSource renewed = {0};
+        if (api_reresolve_playback_cancel(source->item_id, NULL, cancel, &renewed) ||
+            renewed.delivery != DELIVERY_R2 || !renewed.play_url[0]) return -1;
+        *out = renewed;
+        return 0;
+    }
+    if (result.status != HOT_STREAMING || result.source.sequential_stream ||
+        !result.source.play_url[0] || result.source.source_id != source->source_id) return -1;
+    api_hot_inherit_context(&result.source, source);
+    *out = result.source;
+    return 0;
+}
+
+int api_hot_playback_started_cancel(const PlaybackSource *source, SDL_atomic_t *cancel) {
+    if (!source || source->request_id <= 0 || source->item_id <= 0 ||
+        !hot_subtitle_session_valid(source->hot_session_id) ||
+        (strcmp(source->delivery_str, "debrid") && strcmp(source->delivery_str, "hot"))) return -1;
+    if (cancel && SDL_AtomicGet(cancel)) return -1;
+    char path[96], url[1024], body[256];
+    snprintf(path, sizeof(path), "/api/stream/hot/request/%d/started", source->request_id);
+    snprintf(url, sizeof(url), "%s%s", BASE, path);
+    // SID is validated as a safe opaque identifier, never logged or put in the path.
+    snprintf(body, sizeof(body), "{\"session_id\":\"%s\",\"delivery\":\"%s\"}",
+             source->hot_session_id, source->delivery_str);
+    struct membuf response = {0}; const char *error = NULL;
+    Uint32 started = SDL_GetTicks();
+    long code = net_request_timeout_cancel(url, "POST", body, g_token[0] ? g_token : NULL,
+                                           &response, &error, 3L, 5L, cancel);
+    diag_network_event("POST", path, code, SDL_GetTicks() - started, response.len);
+    membuf_free(&response);
+    return code == 200 ? 0 : -1;
 }
 
 cJSON *api_get(const char *path) {

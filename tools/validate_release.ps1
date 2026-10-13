@@ -332,6 +332,10 @@ Assert-True ($LASTEXITCODE -eq 0) 'Contrato hot subtitles falhou.'
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
+& node tools/test_playback_started.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Pedido foi confirmado antes de apresentar video ou repetido sem limite.' }
+& node tools/test_site_compatibility.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Contrato atual de TorBox/vitrine do site diverge do cliente.' }
 & $hostGcc -std=c11 -Wall -Wextra -Iinclude source/episode_flow.c source/cJSON.c tools/test_episode_flow.c -lm -o build/test_episode_flow.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
 & .\build\test_episode_flow.exe

@@ -1,5 +1,29 @@
 # Continuidade para agentes
 
+## Compatibilidade com site — 13/10/2026, candidato LOCAL .53
+
+- Base717f33f/.52; checkout/branch autorizados inalterados. SiteHEAD423b19ab,
+  quatro alteracoes locais do usuario preservadas. Sem escrita/deploy/backendDB.
+- API respeita seek_mode/seekable do TorBox: MP4 Range nao e mais sequencial.
+  Renew MP4 viahot mesmafonte ou R2 descriptor; nunca magnet/remux sem busca.
+- request_id separado de SID textual/heartbeat; started confirmado na thread
+  auxiliar apos quadro apresentado, max3retries/cancel, sem I/O no renderer.
+- Hot conserva contexto anime/T/E, file_size64bits; embed tenta hotvalidado,
+  sem declarar torrent_capable. Erro expired anterior nao contamina sucesso.
+- Testes siteTorBox49/anime/subtitulos com DBtmp passaram; C API/worker e
+  bateria completa do NRO com fixtures/simbolos passaram. Build ARM64-Werror.
+- Health publico revelou producao c9d0f77b; objeto local disponivel, snapshot
+  isolado em build/site-c9d0f77. Novo descriptor HLS TorBox reconhecido como
+  m3u8, SEM forcar HLS/novos jobs na VPS. newSeasons/topRated e sem selo Pronto.
+- Bateria FINAL contra snapshot c9 PASSOU, sem SkipMediaFixtures, com midia e
+  simbolos ELF; sidecar regenerado. NRO .53:24270671B,
+  SHA 8d877c7463f58649454353899535b94acb5e0afc087bdf136684019614cba5b7.
+  Relatorio docs/SITE_COMPATIBILITY_0_12_53.md. Sem teste fisico/playTorBox real.
+- MKV restart ainda exige integracao /seek + ?t + clocks + ?from; nao liberar
+  seek superficial. Central visual de pedidos nao foi implementada nesta rodada.
+- Publicacao foi perguntada ao usuario; nao anunciar .53 no atualizador sem
+  release real verificada. NRO apenas asset; preservar TLS .51.1 e fix .52.
+
 ## Publicacao .52 autorizada — 08/10/2026
 
 - CONCLUIDA: codigo a95925096f5a24ae701186d07ddfa935e4d1c0fb enviado na branch

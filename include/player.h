@@ -24,6 +24,8 @@ typedef enum {
 
 typedef int (*PlayerProgressCallback)(int item_id, int position_sec, int duration_sec,
                                       SDL_atomic_t *cancel, void *userdata);
+typedef int (*PlayerStartedCallback)(const PlaybackSource *source,
+                                     SDL_atomic_t *cancel, void *userdata);
 typedef int (*PlayerRenewCallback)(const PlaybackSource *current, PlaybackSource *out,
                                    SDL_atomic_t *cancel, void *userdata);
 typedef int (*PlayerHeartbeatCallback)(int session_id, SDL_atomic_t *cancel, void *userdata);
@@ -76,6 +78,7 @@ typedef struct {
     const SubtitleChoice *subtitle_choice; // semantic identity, same playback only
 
     PlayerProgressCallback progress_cb;
+    PlayerStartedCallback started_cb; // Auxiliary thread, only after actual presentation.
     PlayerRenewCallback renew_cb;
     PlayerRenewCallback fallback_cb;
     PlayerHeartbeatCallback heartbeat_cb;
