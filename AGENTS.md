@@ -2,6 +2,15 @@
 
 ## Compatibilidade com site — 13/10/2026, candidato LOCAL .53
 
+- PUBLICACAO POSTERIOR AUTORIZADA/CONCLUIDA: v0.12.53 latest publica,
+  nao draft/prerelease, 13/10/2026 11:16:41UTC (08:16:41 Sao Paulo).
+  Codigo cadecdb0e35e2cbd685bfb9faa4e556db0eac310; tag/build em
+  fa29bf0805499deb0caa4fdc2d1c31b89813a167 (notas, sem rebuild).
+- NRO24270671B + sidecar enviados; asset/digest e download publico SEM
+  autenticacao conferidos iguais ao artefato FINAL validado:
+  8d877c7463f58649454353899535b94acb5e0afc087bdf136684019614cba5b7.
+  Fonte enviada na branch hardening; NRO nao commitado. Hardware pendente.
+
 - Base717f33f/.52; checkout/branch autorizados inalterados. SiteHEAD423b19ab,
   quatro alteracoes locais do usuario preservadas. Sem escrita/deploy/backendDB.
 - API respeita seek_mode/seekable do TorBox: MP4 Range nao e mais sequencial.

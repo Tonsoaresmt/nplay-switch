@@ -93,6 +93,12 @@ Artefato LOCAL .53:24270671B; SHA256
 Primeira bateria completa passou no candidato anterior c0aacb60...; bateria
 FINAL contra c9d0f77 e com HLS/vitrine PASSOU, sem SkipMediaFixtures, no hash
 8d877c74... acima. Sidecar final renovado. Nao confundir os hashes.
-Sem release/deploy nesta rodada ate autorizacao de publicacao. Checklist fisico:
+Publicacao posteriormente autorizada e concluida: v0.12.53 latest publica,
+13/10/2026 11:16:41UTC (08:16:41 Sao Paulo). Tag em fa29bf0805499deb0caa4fdc2d1c31b89813a167;
+API latest e download publico sem autenticacao conferidos, tamanho/SHA identicos
+ao artefato FINAL acima. Nenhum deploy/backend/R2 alterado.
+https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.53
+
+Checklist fisico ainda pendente:
 TorBoxMP4 seek/retomada/queda, MKV inicio/legenda (sem anunciar seek), anime
 R2/direto/embed com alternativa e pedido sem quadro/cancelado.
