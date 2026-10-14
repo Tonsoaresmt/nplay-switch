@@ -8,11 +8,14 @@
 
 static _Thread_local char g_api_last_error[192] = "";
 static _Thread_local int g_api_last_access_expired = 0;
+static _Thread_local long g_api_last_http_code = 0;
 
 const char *api_last_error(void) { return g_api_last_error; }
 int api_last_error_access_expired(void) { return g_api_last_access_expired; }
+long api_last_error_http_code(void) { return g_api_last_http_code; }
 
 static void api_set_error(long code, const char *transport, cJSON *json) {
+    g_api_last_http_code = code;
     const char *message = jstr(json, "error");
     const char *reason = jstr(json, "reason");
     g_api_last_access_expired = code == 401 && reason && !strcmp(reason, "expired");
@@ -83,6 +86,7 @@ cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
     const char *err = NULL;
     g_api_last_error[0] = '\0';
     g_api_last_access_expired = 0;
+    g_api_last_http_code = 0;
     Uint32 started = SDL_GetTicks();
     long code = net_request_timeout_cancel(url, "GET", NULL,
                                            g_token[0] ? g_token : NULL,
@@ -123,6 +127,7 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
     memset(out, 0, sizeof(*out));
     g_api_last_error[0] = 0;
     g_api_last_access_expired = 0;
+    g_api_last_http_code = 0;
     char path[96], url[1024], body[80];
     snprintf(path, sizeof(path), "/api/stream/hot/%d", item_id);
     snprintf(url, sizeof(url), "%s%s", BASE, path);
@@ -304,6 +309,7 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
     
     g_api_last_error[0] = '\0';
     g_api_last_access_expired = 0;
+    g_api_last_http_code = 0;
     char *body = NULL;
     cJSON *request = cJSON_CreateObject();
     if (!request) {
@@ -375,13 +381,16 @@ int api_reresolve_playback_cancel(int item_id, const char *quality,
 int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
                                 PlaybackSource *out) {
     if (!current || !out || current->session_id <= 0) return -1;
+    g_api_last_http_code = 0;
+    g_api_last_access_expired = 0;
+    g_api_last_error[0] = 0;
     *out = *current;
     out->play_url[0] = '\0';
     char path[128], body[80];
     snprintf(path, sizeof(path), "/api/stream/session/%d/refresh", current->session_id);
     snprintf(body, sizeof(body), "{\"source_id\":%d}", current->source_id);
     char url[1024]; snprintf(url, sizeof(url), "%s%s", BASE, path);
-    struct membuf resp = {0};
+    struct membuf resp = { .limit = 64u * 1024u };
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
     long code = net_request_timeout_cancel(url, "POST", body,
@@ -403,6 +412,50 @@ int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *can
 
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
     return api_refresh_playback_cancel(current, NULL, out);
+}
+
+static int recovery_source_native(const PlaybackSource *source) {
+    return source->item_id > 0 && source->play_url[0] &&
+           (!strncmp(source->play_url, "https://", 8) ||
+            !strncmp(source->play_url, "http://", 7)) &&
+           source->container[0] && strcmp(source->container, "embed") &&
+           strcmp(source->container, "torrent") && !source->sequential_stream &&
+           (source->delivery != DELIVERY_R2 ||
+            (source->source_id > 0 && source->session_id > 0));
+}
+
+int api_renew_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                              PlaybackSource *out) {
+    if (!current || !out || current->item_id <= 0 ||
+        (cancel && SDL_AtomicGet(cancel))) return -1;
+    PlaybackSource renewed = {0};
+    if (current->delivery == DELIVERY_R2 && current->session_id > 0) {
+        int rc = api_refresh_playback_cancel(current, cancel, &renewed);
+        if (!rc) {
+            if (!recovery_source_native(&renewed)) {
+                snprintf(g_api_last_error, sizeof(g_api_last_error),
+                         "Renovacao sem fonte reproduzivel confirmada");
+                return -3;
+            }
+            if (cancel && SDL_AtomicGet(cancel)) return -1;
+            *out = renewed;
+            return 0;
+        }
+        if ((cancel && SDL_AtomicGet(cancel)) || g_api_last_http_code != 404)
+            return -1;
+        // Only a definite missing/closed session permits readmission. A timeout
+        // or an authorization/plan/device/source denial is NOT such evidence.
+    }
+    int rc = api_reresolve_playback_cancel(current->item_id,
+        current->quality[0] ? current->quality : NULL, cancel, &renewed);
+    if (rc || !recovery_source_native(&renewed)) {
+        if (!rc) snprintf(g_api_last_error, sizeof(g_api_last_error),
+                          "Retomada sem fonte reproduzivel confirmada");
+        return -3; // Do not automatically repeat an admission with unknown outcome.
+    }
+    if (cancel && SDL_AtomicGet(cancel)) return -1;
+    *out = renewed;
+    return 0;
 }
 
 static int has_playable_fallback(const PlaybackSource *current, SDL_atomic_t *cancel) {

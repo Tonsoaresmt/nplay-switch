@@ -21,6 +21,7 @@ int arr_len(cJSON *a);
 // A API devolve reason=expired em respostas 401. Separar isso de uma falha de
 // rede permite voltar ao login, sem repetir reconexoes impossiveis.
 int api_last_error_access_expired(void);
+long api_last_error_http_code(void);
 
 typedef enum {
     DELIVERY_UNKNOWN = 0,
@@ -80,6 +81,10 @@ int api_reresolve_playback_cancel(int item_id, const char *quality,
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out);
 int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
                                 PlaybackSource *out);
+// Closed R2 session: one authenticated readmission, never repeat an ambiguous
+// admission POST. -3 is terminal (authorization/invalid source/admission failure).
+int api_renew_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
+                              PlaybackSource *out);
 int api_fail_playback(const PlaybackSource *current, PlaybackSource *out);
 int api_fail_playback_cancel(const PlaybackSource *current, SDL_atomic_t *cancel,
                              PlaybackSource *out);

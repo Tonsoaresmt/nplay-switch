@@ -45,6 +45,7 @@
 #include "player_loading.h"
 #include "player_sync.h"
 #include "player_completion.h"
+#include "player_lifecycle.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -71,6 +72,7 @@
 #define PLAYER_RESTART_SEEK  2
 #define PLAYER_RESTART_TRACK 3
 #define PLAYER_REQUEST_NEXT  4
+#define PLAYER_RESTART_RESUME 6
 #include "player_buffer.h"
 #include "player_recovery.h"
 
@@ -198,6 +200,7 @@ static int player_open_interrupted(void *userdata) {
     // pertencem exclusivamente a thread que iniciou o player.
     {
         SDL_PumpEvents();
+        if (player_lifecycle_pending()) return 1;
         if (watch->suppress_cancel_until_release) {
             int held = watch->joy &&
                 (SDL_JoystickGetButton(watch->joy, JOY_B) ||
@@ -1461,6 +1464,7 @@ typedef struct {
     SDL_atomic_t done;
     int rc;
     int access_expired;
+    int terminal_failure;
     char error[192];
 } PlayerRecoveryJob;
 
@@ -1470,6 +1474,9 @@ static int player_recovery_thread(void *userdata) {
                             job->callback_userdata);
     if (job->rc != 0) {
         job->access_expired = api_last_error_access_expired();
+        long code = api_last_error_http_code();
+        job->terminal_failure = job->rc == -3 || code == 401 || code == 402 ||
+                                code == 403 || code == 409 || code == 429;
         const char *error = api_last_error();
         if (error && error[0])
             snprintf(job->error, sizeof(job->error), "%s", error);
@@ -1497,6 +1504,7 @@ static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
     if (!thread) return -1;
 
     int cancelled = 0;
+    int interrupted = 0;
     while (!SDL_AtomicGet(&job.done)) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -1519,6 +1527,10 @@ static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
             cancelled = 1;
             SDL_AtomicSet(&job.cancel, 1);
         }
+        if (player_lifecycle_pending()) {
+            interrupted = 1;
+            SDL_AtomicSet(&job.cancel, 1);
+        }
         pui_draw_loading(ren, title, headline, detail, SDL_GetTicks(), 1);
         SDL_RenderPresent(ren);
         SDL_Delay(16);
@@ -1528,9 +1540,11 @@ static int player_recovery_call(SDL_Renderer *ren, SDL_Joystick *joy,
         SDL_FlushEvent(SDL_JOYBUTTONDOWN);
         return 1;
     }
+    // HOME/sleep during resolution: never apply a response from before wake.
+    if (interrupted || player_lifecycle_pending()) return 2;
     if (job.rc != 0 || !job.renewed.play_url[0]) {
         if (job.error[0]) player_error_message(job.error);
-        return job.access_expired ? -2 : -1;
+        return job.access_expired ? -2 : job.terminal_failure ? -3 : -1;
     }
     *renewed = job.renewed;
     return 0;
@@ -2856,6 +2870,16 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     player_boot_stage(playing_stage);
 
     while (running) {
+        // Pump BEFORE clocks, queue checks and decoding. HOME/sleep can leave
+        // sockets, FFmpeg error flags and wall clocks obsolete. Only the owner
+        // tears down the attempt; the applet hook never touches the pipeline.
+        SDL_PumpEvents();
+        if (player_lifecycle_pending()) {
+            if (adev) SDL_PauseAudioDevice(adev, 1);
+            controlled_restart = PLAYER_RESTART_RESUME;
+            running = 0;
+            break;
+        }
         Uint32 now_ticks = SDL_GetTicks();
         ProgressiveSubtitle *progressive = external_subtitles.progressive;
         if (progressive_subtitle_failed_once(progressive)) {
@@ -4141,10 +4165,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             Uint32 left = wait_until - SDL_GetTicks();
                             SDL_Delay(left > 8 ? 8 : left);
                             SDL_PumpEvents();
+                            if (player_lifecycle_pending()) break;
                             if (SDL_PeepEvents(NULL, 0, SDL_PEEKEVENT,
                                                SDL_JOYBUTTONDOWN, SDL_JOYBUTTONDOWN) > 0) break;
                         }
                         sync_since_present_ms += SDL_GetTicks() - sync_started;
+                    }
+                    if (player_lifecycle_pending()) {
+                        if (adev) SDL_PauseAudioDevice(adev, 1);
+                        controlled_restart = PLAYER_RESTART_RESUME;
+                        running = 0;
+                        break;
                     }
                     AVFrame *u = frame;
                     if (frame->format == AV_PIX_FMT_NVTEGRA) {
@@ -4361,7 +4392,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             track_switch_failures, max_track_switch_ms);
     if (controlled_restart && have_video_frame && tex) {
         carry_frame_capture(ren, tex, &dst);
-        if (controlled_restart == PLAYER_RESTART_TRACK) {
+        if (controlled_restart == PLAYER_RESTART_RESUME) {
+            snprintf(g_reopen_headline, sizeof(g_reopen_headline), "Retomando seu video");
+        } else if (controlled_restart == PLAYER_RESTART_TRACK) {
             snprintf(g_reopen_headline, sizeof(g_reopen_headline), "Trocando o audio");
         } else {
             char when[24];
@@ -4479,6 +4512,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     carry_frame_release();
     subtitle_session_clear();
     if (!request || !result) return -1;
+    player_lifecycle_begin();
     memset(result, 0, sizeof(PlayerResult));
     g_player_last_access_expired = 0;
 
@@ -4515,6 +4549,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     int last_subtitle_priority = 0;
     SubtitleChoice last_subtitle_choice = {0};
     int controlled_restarts = 0;
+    int resume_recovery = 0;
     int pause_intent = request->start_paused != 0;
     char last_audio_language[8] = "";
     PlaybackSource active = request->playback;
@@ -4591,7 +4626,27 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             last_subtitle_priority = 1;
         }
 
+        int resumed = rc == PLAYER_RESTART_RESUME ||
+                      (rc < 0 && rc != -11 && player_lifecycle_pending());
+        if (resumed) {
+            resume_recovery = 1;
+            rc = -5; // Positive internal control code must never escape as success.
+            player_lifecycle_acknowledge();
+            // All demux/AVIO/subtitle workers are joined by internal cleanup.
+            // Drop idle sockets and signed metadata only now, never in hook.
+            nplay_curl_avio_pool_clear();
+            diag_player_event("lifecycle", "resume", "pos=%.2f paused=%d", current_pos, pause_intent);
+            if (active.sequential_stream || !request->renew_cb) {
+                player_error_message("Esta fonte nao permite retomada automatica. Seu ponto foi preservado.");
+                result->reason = EXIT_REASON_ERROR;
+                result->final_state = PLAYER_ERROR;
+                final_rc = -5;
+                break;
+            }
+        }
+
         if (rc == PLAYER_RESTART_SEEK || rc == PLAYER_RESTART_TRACK) {
+            resume_recovery = 0;
             current_pos = player_recovery_position(current_pos, out_pos,
                 presented_frame, rc == PLAYER_RESTART_SEEK);
             attempt_start = current_pos;
@@ -4647,12 +4702,14 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             break;
         } else { // Erro
             // rc < 0
-            int recoverable = rc == -2 || rc == -5 || rc == -10;
-            if (presented_frame && out_pos >= attempt_start + 30.0) {
+            int recoverable = resumed || rc == -2 || rc == -5 || rc == -10;
+            if (resumed) retry_count = 0;
+            if (!resumed && presented_frame && out_pos >= attempt_start + 30.0) {
                 diag_player_event("recover", "stable-window-reset",
                                   "played=%.1f oldRetry=%d", out_pos - attempt_start,
                                   retry_count);
                 retry_count = 0;
+                resume_recovery = 0;
             }
             int startup_failure = !presented_frame;
             // Na abertura, tentativa 0 renova a mesma sessao e tentativa 1 usa
@@ -4669,7 +4726,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             PlaybackSource renewed = {0};
             int renewed_ok = 0;
             int recovery_cancelled = 0;
-            int use_fallback = retry_count == 1 && request->fallback_cb;
+            int use_fallback = !resume_recovery && retry_count == 1 && request->fallback_cb;
             int max_renew_tries = use_fallback ? 1 : 4;
             PlayerRenewCallback recovery_cb = use_fallback ? request->fallback_cb : request->renew_cb;
             diag_player_event("recover", use_fallback ? "fallback-begin" : "renew-begin",
@@ -4701,6 +4758,12 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                     g_player_last_access_expired = 1;
                     break;
                 }
+                if (recovery_rc == -3) break; // Access/source/admission denial: no automatic loop.
+                if (recovery_rc == 2) {
+                    player_lifecycle_acknowledge();
+                    nplay_curl_avio_pool_clear();
+                    continue; // Bounded retry; stale descriptor was discarded after join.
+                }
                 if (use_fallback) break;
                 Uint32 wait_start = SDL_GetTicks();
                 int cancelled = 0;
@@ -4709,7 +4772,9 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                     while (SDL_PollEvent(&event)) {
                         if (event.type == SDL_QUIT ||
                             (event.type == SDL_JOYBUTTONDOWN &&
-                             (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS))) {
+                             (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS)) ||
+                            (event.type == SDL_FINGERDOWN && event.tfinger.x > 0.33f &&
+                             event.tfinger.x < 0.67f && event.tfinger.y > 0.84f)) {
                             cancelled = 1;
                             break;
                         }
@@ -4735,6 +4800,9 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
                 final_rc = rc;
                 break;
             }
+            // A new admission may select another native source. A manual index
+            // belongs to the old source; preserve language, not that raw index.
+            if (renewed.source_id != active.source_id) last_audio_priority = 1;
             active = renewed;
             SDL_AtomicSet(&hb.session_id, active.session_id);
             attempt_start = current_pos;
@@ -4792,6 +4860,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     subtitle_session_clear();
     player_boot_stage("10 player encerrado");
     diag_player_finish(final_rc);
+    player_lifecycle_end();
 
     return final_rc;
 }

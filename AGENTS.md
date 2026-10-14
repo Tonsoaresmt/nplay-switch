@@ -1,7 +1,40 @@
 # Continuidade para agentes
 
+## HOME/suspensao — 14/10/2026, candidato .54 SOMENTE LOCAL
+
+- Nova rodada sobre 7d783bc, mesmo checkout/branch. Usuario relatou HOME e
+  sono prendendo playback; implementadas protecoes, nao homologacao fisica.
+- Hook libnx por player_run sinaliza atomicos; renderer interrompe tentativa
+  antes de clocks/decodificacao. Teardown/join precede descarte de sockets e
+  metadados antigos. Checkpoint, pausa, audio/legenda conservados; nova fonte
+  remapeia idioma, nao indice manual antigo. Sem restart em zero/autoplay falso.
+- R2 refresh404 permite uma readmissao autenticada do mesmo item/qualidade.
+  Negativa de acesso/plano/dispositivo/telas e falha de POST ambiguo sao finais;
+  nao repetir admissao em loop. TLS/limites intactos; sem /fail global.
+- Wake durante resolucao cancela e descarta resultado depois de join. Retries
+  transitorios limitados, B/touch/quit; fonte sequencial/legada sem renovacao
+  ainda nao retoma automaticamente, sai com aviso e preserva checkpoint.
+- test_sleep_resume obrigatorio: lifecycle/API reais, 1000 ciclos com libnx
+  fake, 225 recuperacoes com pthread e UI/rede fake. Supervisor real extraido
+  testa pausa/faixas/posicao, fonte nova, retorno repetido e falha sem video.
+  --baseline-callback falha na assertion de readmissao; audit_sleep_resume
+  agora exige --baseline (exit0 ali = defeito historico reproduzido).
+- ARM64 completo -Werror + incremental FINAL; duas baterias completas com
+  fixtures/simbolos passaram, a ultima no artefato final abaixo. Sem Switch,
+  GPU/NVTEGRA/Wi-Fi/sono reais, Linux integrado, backend/deploy ou publicacao.
+- FINAL NRO local .54: 24282959 B, SHA256
+  a3fa8b5bf2a927e1b898ecb67e79c13c198e2247c36f1ae652b6203c2af899dc.
+  Substitui f441102... da rodada de internet. Relatorio/roteiro em
+  docs/HOME_SLEEP_RESUME_0_12_54.md. Crash nativo anterior continua sem dump.
+- Usuario disse "Ainda nao publicar": NAO push/release/promocao/atualizador
+  ate nova autorizacao. .53 continua publica. NRO/sidecar nao commitar.
+
 ## Teste de internet — 14/10/2026, candidato LOCAL .54 atualizado
 
+- Publicacao NAO autorizada: em 14/10/2026 o usuario respondeu "Ainda nao
+  publicar". Commit local 7d783bc e build .54 permanecem somente locais;
+  nao enviar/prometer release, promover assets ou alterar o atualizador
+  sem nova autorizacao explicita. Validacao fisica segue pendente.
 - Base7e5ea2c, mesmo checkout/branch. Configuracoes > Aplicativo > Teste de
   internet; nova quinta linha com geometria draw/touch compartilhada. Pipoca,
   quatro cards, comparacao anterior completa em memoria, B/touch cancelavel.

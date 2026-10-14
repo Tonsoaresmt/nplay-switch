@@ -1014,11 +1014,7 @@ static int on_player_renew(const PlaybackSource *current, PlaybackSource *out,
     if (!current) return -1;
     if (!strcmp(current->delivery_str, "debrid") && !current->sequential_stream)
         return api_hot_refresh_range_cancel(current, cancel, out);
-    if (current->delivery == DELIVERY_R2 && current->session_id > 0)
-        return api_refresh_playback_cancel(current, cancel, out);
-    return api_reresolve_playback_cancel(current->item_id,
-                                         current->quality[0] ? current->quality : NULL,
-                                         cancel, out);
+    return api_renew_playback_cancel(current, cancel, out);
 }
 
 static int on_player_fallback(const PlaybackSource *current, PlaybackSource *out,
