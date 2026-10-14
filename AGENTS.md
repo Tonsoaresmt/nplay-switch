@@ -1,15 +1,19 @@
 # Continuidade para agentes
 
-## Publicacao .54 — autorizada em 14/10/2026, em andamento
+## Publicacao .54 — CONFIRMADA em 14/10/2026
 
 - Usuario pediu explicitamente subir ao GitHub para aparecer no atualizador.
   Essa autorizacao substitui "Ainda nao publicar" para este candidato .54.
 - Artefato final permanece24287055B/SHA7e3a3e60460ca39389bc57dc197ed17eed8e84408a56ef1dd167215de09804fc;
   build completo -Werror e bateria FINAL com fixtures/simbolos passaram.
   Sem rebuild desde a prova; nao commitar NRO/sidecar.
-- Publicacao deve usar branch hardening, tag v0.12.54, Nplay.nro+sidecar,
-  conferir digest/assets, promover latest e verificar acesso publico sem auth.
-  Nao declarar disponivel ate concluir. Teste fisico continua pendente.
+- Codigo enviado na branch hardening; tag v0.12.54 aponta para
+  b1480e0681b06a4a0312c4b9638208c26ee96060. Release publica/latest, nao draft
+  nem prerelease, publicada14/10/2026 22:08:29UTC (19:08:29 Sao Paulo).
+- Nplay.nro + sidecar76B enviados. Digest do asset, API latest SEM auth e
+  download publico integral foram conferidos iguais ao artefato validado.
+  Atualizador pode detectar .54. Teste fisico continua pendente.
+- URL: https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.54
 
 ## Descoberta de legendas — 14/10/2026, CORRECAO LOCAL .54
 

@@ -78,5 +78,8 @@ O sidecar foi atualizado. O binario anterior `a3fa8b5...` e o intermediario
 Nao houve reproducao de Dragon Ball Super: Beerus em producao ou no Switch
 fisico. Faltam numero/ID do episodio e traces dessa tentativa para atribuir
 aquele incidente a uma fonte especifica. Nenhum backend, pacote R2, conta ou
-preferencia remota foi alterado. Publicacao segue suspensa por instrucao do
-usuario; a release publica continua .53.
+preferencia remota foi alterado. Apos nova autorizacao expressa do usuario,
+a .54 foi publicada como latest em 14/10/2026 22:08:29 UTC (19:08:29 Sao Paulo).
+Tag/codigo b1480e0681b06a4a0312c4b9638208c26ee96060. Asset, sidecar e download
+publico sem autenticacao conferidos com tamanho/digest acima. Isso habilita
+o atualizador; a validacao fisica continua pendente.
