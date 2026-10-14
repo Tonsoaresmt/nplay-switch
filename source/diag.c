@@ -1,4 +1,5 @@
 #include "diag.h"
+#include "net.h"
 #include <switch.h>
 #include <SDL.h>
 #include <stdarg.h>
@@ -96,6 +97,18 @@ void diag_player_finish(int result_code) {
     diag_player_event("player", "finish", "rc=%d", result_code);
 }
 
+void diag_set_boot_stage(const char *stage) {
+    diag_lock();
+    FILE *file = fopen("sdmc:/switch/.nplay-player-boot.txt", "wb");
+    if (!file) file = fopen("sdmc:/switch/Nplay/player_boot.txt", "wb");
+    if (!file) file = fopen("sdmc:/switch/Meruem/player_boot.txt", "wb");
+    if (file) {
+        fprintf(file, "%s\n", stage ? stage : "desconhecido");
+        fclose(file);
+    }
+    diag_unlock();
+}
+
 static void safe_path(const char *path, char *out, size_t cap) {
     if (!out || cap == 0) return;
     out[0] = '\0';
@@ -111,9 +124,12 @@ void diag_network_event(const char *method, const char *path, long http_code,
                         unsigned elapsed_ms, size_t response_bytes) {
     char clean[104], line[DIAG_LINE_CAP];
     safe_path(path, clean, sizeof(clean));
-    snprintf(line, sizeof(line), "%10u %-4.4s code=%ld ms=%u bytes=%u %.100s",
+    NetRequestTiming timing = {0};
+    net_take_request_timing(&timing);
+    snprintf(line, sizeof(line), "%10u %-4.4s code=%ld ms=%u bytes=%u dns=%u tcp=%u tls=%u first=%u %.72s",
              SDL_GetTicks(), method ? method : "?", http_code, elapsed_ms,
-             (unsigned)(response_bytes > 0xffffffffu ? 0xffffffffu : response_bytes), clean);
+             (unsigned)(response_bytes > 0xffffffffu ? 0xffffffffu : response_bytes),
+             timing.dns_ms, timing.connect_ms, timing.tls_ms, timing.first_byte_ms, clean);
     append_line(NETWORK_LOG, line, 1);
 }
 

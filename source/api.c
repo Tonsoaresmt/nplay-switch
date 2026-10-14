@@ -330,7 +330,8 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
         return -1;
     }
 
-    struct membuf resp = { 0 };
+    // This is a descriptor, not media/catalog data. Bound even chunked bodies.
+    struct membuf resp = { .limit = 64u * 1024u };
     const char *err = NULL;
     Uint32 started = SDL_GetTicks();
     long code = net_request_timeout_cancel(url, "POST", body, g_token[0] ? g_token : NULL,

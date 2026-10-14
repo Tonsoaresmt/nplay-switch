@@ -50,7 +50,8 @@ Assert-True ($sources -notmatch 'Save progress once at the end') 'Progresso fina
 Assert-True ($sources -match 'retry_limit = startup_failure \? 2 : 3') 'Falha inicial voltou a encerrar antes de tentar a fonte alternativa.'
 Assert-True ($sources -match 'player_recovery_thread' -and $sources -match 'player_recovery_call') 'Renovacao de sessao voltou a bloquear a interface do player.'
 Assert-True ($sources -match 'player_boot_stage\("03 abrindo fonte"\)') 'Crash do player voltou a nao deixar diagnostico persistente.'
-Assert-True ($sources -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnostico de crash depende de uma subpasta opcional.'
+Assert-True ($sources -match 'diag_set_boot_stage\(stage\)' -and
+    (Get-Content source/diag.c -Raw) -match 'sdmc:/switch/\.nplay-player-boot\.txt') 'Diagnostico de crash depende de uma subpasta opcional.'
 Assert-True ($sources -match 'diag_player_begin') 'Trace persistente nao e iniciado para cada reproducao.'
 Assert-True ($sources -match 'first-frame') 'Trace nao distingue falha anterior ao primeiro frame.'
 Assert-True ($sources -match 'first-present') 'Trace nao confirma a primeira apresentacao no renderer.'
@@ -227,6 +228,8 @@ if ($LASTEXITCODE -ne 0) { throw 'AVIO de rede falhou.' }
 if ($LASTEXITCODE -ne 0) { throw 'Supervisor perdeu ponto salvo.' }
 & node tools/test_player_flow_guards.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Historico/EOF/pausa perderam os guards de fluxo.' }
+& node tools/test_playback_resolution.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Resolucao de episodio/timeout/progresso desconhecido falhou.' }
 & node tools/test_player_navigation.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
 & node tools/test_app_navigation.mjs

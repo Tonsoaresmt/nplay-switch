@@ -25,6 +25,10 @@ int net_get_profile_id(void);
 void net_configure_curl(CURL *curl);
 void net_configure_curl_isolated(CURL *curl);
 
+// Cumulative times from the most recent request on THIS thread. No URL/body.
+typedef struct { unsigned dns_ms, connect_ms, tls_ms, first_byte_ms; } NetRequestTiming;
+void net_take_request_timing(NetRequestTiming *out);
+
 // Bounded HTTPS text, no redirects/credentials/logged URLs. Partial bodies are
 // discarded on HTTP/transport failure. Caller owns out on success.
 long net_get_text_limited(const char *url, size_t limit, long timeout_ms,

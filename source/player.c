@@ -133,14 +133,7 @@ static int player_url_is_hls(const char *url) {
 }
 
 static void player_boot_stage(const char *stage) {
-    // O caminho plano existe mesmo quando o NRO foi instalado fora de uma pasta.
-    // Os caminhos antigos ficam como fallback para instalacoes ja existentes.
-    FILE *file = fopen("sdmc:/switch/.nplay-player-boot.txt", "wb");
-    if (!file) file = fopen("sdmc:/switch/Nplay/player_boot.txt", "wb");
-    if (!file) file = fopen("sdmc:/switch/Meruem/player_boot.txt", "wb");
-    if (!file) return;
-    fprintf(file, "%s\n", stage ? stage : "desconhecido");
-    fclose(file);
+    diag_set_boot_stage(stage);
 }
 
 const char *player_last_error(void) { return g_player_last_error; }
@@ -4792,11 +4785,13 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     if (final_rc < 0)
         diag_player_event("player", "final-error", "rc=%d %s", final_rc,
                           g_player_last_error[0] ? g_player_last_error : "falha sem detalhe");
-    diag_player_finish(final_rc);
+    diag_player_event("player", "release-begin", NULL);
     ui_popcorn_release();
     nplay_curl_avio_pool_clear();
     carry_frame_release();
     subtitle_session_clear();
+    player_boot_stage("10 player encerrado");
+    diag_player_finish(final_rc);
 
     return final_rc;
 }

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <curl/curl.h>
 #include <SDL.h>
 #include "cacert_bin.h"
@@ -398,12 +399,33 @@ static int request_cancel_cb(void *userdata, curl_off_t dltotal, curl_off_t dlno
     return SDL_AtomicGet((SDL_atomic_t *)userdata) ? 1 : 0;
 }
 
+static _Thread_local NetRequestTiming g_request_timing;
+void net_take_request_timing(NetRequestTiming *out) {
+    if (out) *out = g_request_timing;
+    memset(&g_request_timing, 0, sizeof(g_request_timing));
+}
+
+static unsigned request_time_ms(CURL *curl, CURLINFO info) {
+    double seconds = 0;
+    if (curl_easy_getinfo(curl, info, &seconds) != CURLE_OK ||
+        !isfinite(seconds) || seconds <= 0) return 0;
+    return seconds >= 4294967.295 ? 0xffffffffu : (unsigned)(seconds * 1000.0);
+}
+
+static void capture_request_timing(CURL *curl) {
+    g_request_timing.dns_ms = request_time_ms(curl, CURLINFO_NAMELOOKUP_TIME);
+    g_request_timing.connect_ms = request_time_ms(curl, CURLINFO_CONNECT_TIME);
+    g_request_timing.tls_ms = request_time_ms(curl, CURLINFO_APPCONNECT_TIME);
+    g_request_timing.first_byte_ms = request_time_ms(curl, CURLINFO_STARTTRANSFER_TIME);
+}
+
 long net_request_timeout_cancel(const char *url, const char *method,
                                 const char *body, const char *bearer,
                                 struct membuf *out, const char **err,
                                 long connect_timeout, long total_timeout,
                                 SDL_atomic_t *cancel) {
     if (err) *err = NULL;
+    memset(&g_request_timing, 0, sizeof(g_request_timing));
     if (cancel && SDL_AtomicGet(cancel)) return -(long)CURLE_ABORTED_BY_CALLBACK;
 
     CURL *curl = curl_easy_init();
@@ -448,6 +470,7 @@ long net_request_timeout_cancel(const char *url, const char *method,
     }
 
     CURLcode res = curl_easy_perform(curl);
+    capture_request_timing(curl);
     long code;
     if (res != CURLE_OK) {
         if (err) *err = net_transport_error(res);

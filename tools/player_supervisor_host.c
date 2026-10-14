@@ -46,6 +46,7 @@ static void nplay_curl_avio_set_abort_check(void *a, void *b) { (void)a; (void)b
 static void nplay_curl_avio_set_startup_window(unsigned ms) { (void)ms; }
 static void nplay_curl_avio_pool_clear(void) {}
 static void ui_popcorn_release(void) {}
+void player_boot_stage(const char *stage) { (void)stage; }
 static void player_error_message(const char *msg) { snprintf(g_player_last_error, sizeof(g_player_last_error), "%s", msg); }
 typedef struct { double expected_start, out; int rc, presented, seeked; } Step;
 static Step steps[8];

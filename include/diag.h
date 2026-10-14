@@ -15,6 +15,8 @@ void diag_player_begin(int item_id, int session_id, int source_id,
 void diag_player_event(const char *component, const char *event,
                        const char *format, ...);
 void diag_player_finish(int result_code);
+// Sparse renderer-owned stage markers, including resolution BEFORE player_run.
+void diag_set_boot_stage(const char *stage);
 
 // Log leve de latencia da API. A query string e removida para nao gravar busca,
 // token ou qualquer parametro privado.

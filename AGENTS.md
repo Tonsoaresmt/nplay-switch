@@ -1,5 +1,48 @@
 # Continuidade para agentes
 
+## Logs/crash ao proximo — 14/10/2026, candidato LOCAL .54
+
+- Checkout/branch autorizados inalterados; base3d36eb6/.53 publicada. Usuario
+  confirmou crash ao proximo. Logs.53: animehinatasoulMP4; dois players limpos,
+  next228916 termina em progress5s+stream20s timeout. Sem novo run-begin.
+- 790requests:754HTTP200,34timeout28,2cancel42. CA igualbundle; nao e evidencia
+  SSL/R2/TBBT/OOM. Crash nativo NAO comprovado: falta foto/dump Atmosphere.
+- Corrigido defeito reproduzido: GETprogresso timeout era tratado fetched/zero.
+  Agora valida schema, tentaGETfallback cancelavel; desconhecido nao entra no
+  player, tenta stop pelaUI e avisa. Sem outbox/guard novo no caminho legado.
+- Falha de fonte ofereceA/retry eB/voltar/touch; POST so com confirmacao, nao
+  retry automatico ambiguo. Workers joined antesde reciclarstate; expiredlogin.
+- Descriptor64KiB; resolucao/cleanup/retornoPresent agora trace/bootesparsos.
+  Rede dns/tcp/tls/first cumulativos thread-local, semURL/JWT/SID. TLS mantido.
+- Teste negativo dafuncao.53 falhou corretamente; positivo1000transicoes,
+  timing4threads e bateria FINAL completa comfixtures/simbolos PASSOU. ARM64
+  completo-Werror+incremental. SemtesteSwitch/GPU/SSLreal/deploy/push/release.
+- NRO.54LOCAL24270671B, SHAe937e2aed408c290e35fe217af366f251734b264bc2adecd9323d46c7c144da1.
+  Nao rebuild depoisda prova. Sidecargerado; nao commitarNRO. .53continua release.
+- docs/NEXT_EPISODE_CRASH_AUDIT_2026_10_14.md registraevidencias/limites/roteiro.
+  SonoR2 continua tarefa distinta aberta; nao atribuir novo incidente a ela.
+- Reconstrucaoisolada.53 em build/crash-symbols-0.12.53/Nplay.elf: codigo/dados/
+  assets identicos ao publiconro8d877c...; diferenca40B somente build-id(header+
+  noteGNU), layoutsiguais. Enderecos servempara dump.53, SHAarquivo diferente.
+  Nao publicar copia.53 nem remendar IDs; relatorio documentaprova/digests.
+
+## Auditoria hibernacao — 13/10/2026, SEM ALTERACAO NO APP
+
+- Pedido foi investigar. Base .53/3d36eb6; somente docs e audit_sleep_resume
+  novos. NRO/versao/backend/contas/sessoes reais inalterados. Nao publicar fix.
+- R2 on_player_renew so usa refresh do ID antigo. C/API real+HTTP fake
+  reproduziu404/Sessao encerrada quatrovezes, sem nova resolucao; reabrir
+  item recebe78 em vez77. Nao prova incidente real sem logs/provedor.
+- Ausencia de hook proprio OnResume confirmada. SDL_switchvideo.o importa
+  appletMainLoop; nao afirmar falta absoluta de pump de eventos libnx.
+- Backend refresh requeractive1, nao exigeTTL90diretamente; novo Play/cleanup
+  pode encerrar sessao calada. Dormir90s nao garante sozinho registro inativo.
+- audit_sleep_resume exit0 = defeito REPRODUZIDO, nao aprovacao/release.
+  Supervisor checkpoint/pausa passou; nada de hardware/sono real.
+- Relatorio docs/SLEEP_RESUME_AUDIT_2026_10_13.md traz correcao proposta e
+  testes necessarios. Nao implementar/publicar sem pedido de correcao; logs
+  recentes/titulo/versao foram solicitados. MKV TorBox tem limitacao distinta.
+
 ## Compatibilidade com site — 13/10/2026, candidato LOCAL .53
 
 - PUBLICACAO POSTERIOR AUTORIZADA/CONCLUIDA: v0.12.53 latest publica,

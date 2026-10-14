@@ -12,6 +12,8 @@
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <math.h>
+#include <limits.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -498,6 +500,7 @@ static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index
 // Lista do painel Episodios do player (montada por play_episode_sequence).
 static PlayerEpisode *g_play_episodes = NULL;
 static int g_play_episode_count = 0, g_play_episode_current = -1, g_play_chosen_item = 0;
+static int g_playback_ui_return_item = 0;
 static char g_next_audio_language[8] = "", g_last_audio_language[8] = "";
 static int g_next_audio_pref_override = -1;
 static int g_next_audio_pref_explicit = 0;
@@ -1185,15 +1188,40 @@ typedef struct {
     // Progresso salvo pedido junto com /stream: antes era uma segunda ida e
     // volta a API so depois da fonte resolvida (e outra tela de espera).
     int want_progress, progress_fetched;
+    char progress_error[192];
     SDL_atomic_t progress_cancel; // B ou falha de /stream: nao esperar o progresso
     cJSON *progress;
 } ResolvePoll;
+
+// A failed/invalid response is UNKNOWN progress, never proof of position zero.
+// A valid {"progress":null} is different: there really is no saved checkpoint.
+static int playback_progress_valid(cJSON *json) {
+    if (!cJSON_IsObject(json)) return 0;
+    cJSON *progress = cJSON_GetObjectItemCaseSensitive(json, "progress");
+    if (cJSON_IsNull(progress)) return 1;
+    if (!cJSON_IsObject(progress)) return 0;
+    cJSON *position = cJSON_GetObjectItemCaseSensitive(progress, "position_seconds");
+    if (!cJSON_IsNumber(position) || !isfinite(position->valuedouble) ||
+        position->valuedouble < 0 || position->valuedouble > INT_MAX) return 0;
+    cJSON *completed = cJSON_GetObjectItemCaseSensitive(progress, "completed");
+    return !completed || cJSON_IsBool(completed) ||
+           (cJSON_IsNumber(completed) &&
+            (completed->valuedouble == 0 || completed->valuedouble == 1));
+}
 
 static int resolve_progress_thread(void *userdata) {
     ResolvePoll *poll = (ResolvePoll *)userdata;
     char path[96]; snprintf(path, sizeof(path), "/api/sync/progress/%d", poll->item_id);
     poll->progress = api_get_timeout_cancel(path, 2L, 5L, &poll->progress_cancel);
-    poll->progress_fetched = !SDL_AtomicGet(&poll->progress_cancel);
+    poll->progress_fetched = playback_progress_valid(poll->progress) &&
+                              !SDL_AtomicGet(&poll->progress_cancel);
+    if (!poll->progress_fetched) {
+        const char *error = api_last_error();
+        snprintf(poll->progress_error, sizeof(poll->progress_error), "%s",
+                 error && error[0] ? error : "Resposta de progresso invalida");
+        cJSON_Delete(poll->progress);
+        poll->progress = NULL;
+    }
     return 0;
 }
 
@@ -1267,13 +1295,20 @@ static int prompt_sequential_restart(const char *title) {
 
 // A resolucao da API pode incluir uma fonte externa. Renderiza a espera e
 // permite cancelar sem deixar a tela de abertura congelada por ate 20 s.
-static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out,
+static int resolve_open_once_with_animation(int itemId, const char *title, PlaybackSource *out,
                                        cJSON **progress_out, int *progress_fetched) {
     ResolvePoll poll = { .item_id = itemId, .want_progress = progress_out != NULL };
     if (progress_out) *progress_out = NULL;
     if (progress_fetched) *progress_fetched = 0;
+    char stage[96];
+    snprintf(stage, sizeof(stage), "00 resolvendo item=%d", itemId);
+    diag_set_boot_stage(stage);
+    diag_player_event("resolve", "begin", "item=%d", itemId);
     SDL_Thread *thread = SDL_CreateThread(resolve_open_thread, "resolve-play", &poll);
-    if (!thread) { toast("Nao foi possivel abrir a fonte"); return -1; }
+    if (!thread) {
+        diag_player_event("resolve", "thread-unavailable", "item=%d", itemId);
+        toast("Nao foi possivel abrir a fonte"); return -1;
+    }
     int cancelled = 0;
     appletSetMediaPlaybackState(true);
     while (g_running && !SDL_AtomicGet(&poll.done)) {
@@ -1303,11 +1338,16 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
     }
     SDL_WaitThread(thread, NULL);
     appletSetMediaPlaybackState(false);
+    diag_player_event("resolve", "joined", "item=%d rc=%d progress=%d cancel=%d",
+                      itemId, poll.rc, poll.progress_fetched,
+                      cancelled || SDL_AtomicGet(&poll.cancel));
     if (!g_running || cancelled || SDL_AtomicGet(&poll.cancel)) {
         cJSON_Delete(poll.progress);
         return -2;
     }
     if (poll.rc != 0) {
+        snprintf(stage, sizeof(stage), "00 falha ao resolver item=%d", itemId);
+        diag_set_boot_stage(stage);
         cJSON_Delete(poll.progress);
         if (poll.access_expired) {
             access_expired_to_login();
@@ -1321,6 +1361,56 @@ static int resolve_open_with_animation(int itemId, const char *title, PlaybackSo
     else cJSON_Delete(poll.progress);
     if (progress_fetched) *progress_fetched = poll.progress_fetched;
     return 0;
+}
+
+// Never automatically repeat POST /stream after a timeout: its response may
+// have been lost after a session was created. A new request requires A/touch.
+static int prompt_playback_retry(const char *title) {
+    diag_set_boot_stage("00 aguardando escolha apos falha de fonte");
+    while (g_running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; return 0; }
+            if (event.type == SDL_JOYBUTTONDOWN) {
+                if (event.jbutton.button == JOY_A) return 1;
+                if (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS) return 0;
+            }
+            if (event.type == SDL_FINGERDOWN) {
+                int x = (int)(event.tfinger.x * WIN_W), y = (int)(event.tfinger.y * WIN_H);
+                if (ui_header_action_hit(x, y)) return 0;
+                if (y >= 440 && y < 500) {
+                    if (x >= 282 && x < 582) return 1;
+                    if (x >= 606 && x < 906) return 0;
+                }
+            }
+        }
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255);
+        SDL_RenderClear(gRen);
+        ui_header("NPLAY", "Nao foi possivel abrir este video", "B Voltar");
+        text_center_at(title && title[0] ? title : "Video", 160, WIN_W - 320, 290, C_TEXT, 1);
+        text_center("Voce pode tentar novamente ou voltar para a lista.", 354, C_MUT, 0);
+        text_clip(g_toast, 160, 395, C_MUT, 2, WIN_W - 320);
+        fill_rect(282, 440, 300, 60, C_ACC);
+        text_center_at("A  Tentar novamente", 282, 300, 457, C_BG, 0);
+        fill_rect(606, 440, 300, 60, C_CARD);
+        text_center_at("B  Voltar", 606, 300, 457, C_TEXT, 0);
+        SDL_RenderPresent(gRen);
+        SDL_Delay(16);
+    }
+    return 0;
+}
+
+static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out,
+                                       cJSON **progress_out, int *progress_fetched) {
+    int rc;
+    do {
+        rc = resolve_open_once_with_animation(itemId, title, out, progress_out, progress_fetched);
+        if (rc != -1 || !g_running || g_screen == SC_LOGIN) break;
+        if (!prompt_playback_retry(title)) { rc = -2; break; }
+        diag_player_event("resolve", "retry-confirmed", "item=%d", itemId);
+    } while (g_running);
+    g_playback_ui_return_item = itemId;
+    return rc;
 }
 
 #define STABLE_TEXT 256
@@ -1403,7 +1493,17 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             char p[96]; snprintf(p, sizeof(p), "/api/sync/progress/%d", itemId);
             int cancelled = 0;
             pr = ui_request_get(gRen, p, &g_running, &cancelled);
-            if (cancelled) return 0;
+            if (cancelled || !playback_progress_valid(pr)) {
+                cJSON_Delete(pr);
+                diag_player_event("resolve", "progress-unavailable", "item=%d cancel=%d", itemId, cancelled);
+                // Do not silently start at zero or overwrite the saved point.
+                if (src.session_id > 0) {
+                    snprintf(p, sizeof(p), "/api/stream/%d/stop", itemId);
+                    ui_send(p, "POST", "{}");
+                }
+                if (!cancelled) toast("Nao consegui consultar seu ponto salvo. Tente novamente.");
+                return 0;
+            }
         }
         if (pr) {
             cJSON *prog = cJSON_GetObjectItem(pr, "progress");
@@ -6048,6 +6148,11 @@ int main(int argc, char **argv) {
             if (tx) { SDL_Rect d = { WIN_W / 2 - w / 2, WIN_H - 110, w, h }; SDL_RenderCopy(gRen, tx, NULL, &d); }
         }
         SDL_RenderPresent(gRen);
+        if (g_playback_ui_return_item > 0) {
+            diag_player_event("ui", "playback-return-present", "item=%d screen=%d", g_playback_ui_return_item, g_screen);
+            diag_set_boot_stage("11 retorno ao catalogo apresentado");
+            g_playback_ui_return_item = 0;
+        }
         unsigned ui_frame_ms = SDL_GetTicks() - ui_frame_start;
         g_ui_frames++;
         if (ui_frame_ms > 20) g_ui_over_20ms++;
