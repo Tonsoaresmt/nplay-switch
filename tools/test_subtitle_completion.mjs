@@ -17,7 +17,7 @@ if (!process.argv.includes('--baseline')) {
   const menuEnd = source.indexOf('Uint32 switch_started = SDL_GetTicks();', menuStart);
   const menu = source.slice(menuStart, menuEnd);
   if (menuStart < 0 || menuEnd < menuStart ||
-      !menu.includes('next == scur && (next < 0 || !manifest_subtitle_fallback)') ||
+      !menu.includes('next == scur && (next < 0 || !SUB_EXTERNAL(scur))') ||
       menu.includes('external_subtitle_count'))
     throw Error('Current external subtitle selection must reload even with old cues');
 }

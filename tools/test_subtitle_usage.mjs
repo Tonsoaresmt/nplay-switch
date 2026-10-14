@@ -75,7 +75,8 @@ static const char *lang_norm(const char *s){return audio_language_normalize(s,NU
 static const char *stream_norm(const char **fmt,int i){return audio_language_normalize(fmt[i],NULL);}
 static int choose(Request *req,const char *saved,const char *first,const char *second){
   int scur=-1,sub_chosen=0,nsub=2,naud=1,pt_audio=-1,known_audio=1,acur=0;
-  int aidxs[]={2},sidxs[]={0,1},manifest_subtitle_fallback=1;
+  int aidxs[]={2},sidxs[]={0,1};
+#define SUB_EXTERNAL(i) ((i) >= 0)
   const char *fmt[]={first,second,"ja"};Track manifest_subtitles[]={{first,"Track 1"},{second,"Track 2"}};
   SubtitleTrackKey subtitle_keys[2]={{{0},{0},0,0},{{0},{0},0,0}};
   for(int i=0;i<2;i++){snprintf(subtitle_keys[i].language,8,"%s",fmt[i]);snprintf(subtitle_keys[i].name,96,"%s",fmt[i]);}

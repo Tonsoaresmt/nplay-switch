@@ -250,6 +250,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Barreira de seek reabriu fonte ocupada.' }
 if ($LASTEXITCODE -ne 0) { throw 'libcurl real falhou em backpressure ou idle.' }
 & node tools/test_subtitle_io.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
+& node tools/test_subtitle_discovery.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Descoberta de legendas perdeu faixas, origem ou ownership.' }
 & node tools/test_subtitle_transport.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Transporte de legendas rejeitou 8 MiB ou perdeu limite/cancelamento.' }
 & node tools/test_subtitle_fetch.mjs
@@ -394,7 +396,7 @@ if (-not $nm) {
 }
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"
-foreach ($symbol in @('player_lifecycle_begin','player_lifecycle_end','player_lifecycle_pending','api_renew_playback_cancel','switch_ca_context','g_ca_pem','Curl_ssl_libnx','ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
+foreach ($symbol in @('subtitle_catalog_add','player_lifecycle_begin','player_lifecycle_end','player_lifecycle_pending','api_renew_playback_cancel','switch_ca_context','g_ca_pem','Curl_ssl_libnx','ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
     Assert-True ($symbols -match [regex]::Escape($symbol)) "Simbolo obrigatorio ausente: $symbol"
 }
 

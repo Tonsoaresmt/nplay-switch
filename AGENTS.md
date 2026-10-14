@@ -1,5 +1,70 @@
 # Continuidade para agentes
 
+## Publicacao .54 — autorizada em 14/10/2026, em andamento
+
+- Usuario pediu explicitamente subir ao GitHub para aparecer no atualizador.
+  Essa autorizacao substitui "Ainda nao publicar" para este candidato .54.
+- Artefato final permanece24287055B/SHA7e3a3e60460ca39389bc57dc197ed17eed8e84408a56ef1dd167215de09804fc;
+  build completo -Werror e bateria FINAL com fixtures/simbolos passaram.
+  Sem rebuild desde a prova; nao commitar NRO/sidecar.
+- Publicacao deve usar branch hardening, tag v0.12.54, Nplay.nro+sidecar,
+  conferir digest/assets, promover latest e verificar acesso publico sem auth.
+  Nao declarar disponivel ate concluir. Teste fisico continua pendente.
+
+## Descoberta de legendas — 14/10/2026, CORRECAO LOCAL .54
+
+- Usuario pediu continuar apos a auditoria: implementacao no mesmo checkout e
+  branch, sobre 0deb304. Nao editar main raiz ou backend. Sem publicacao.
+- Catalogo por faixa/origem substitui fallback global e comparacao de contagens:
+  master HLS + probe hot mesmo com EN nativo + streams nativas. Dedup externa
+  exige origem/URL/nome/idioma/forced; query integral, indice existente estavel.
+- Selecao/render/seek/decoder/cache seguem origem selecionada; OFF e troca de
+  origem cancelam fetch antigo. Poll de fetch aceito limpa decoder/cues nativos.
+  Titulo nativo NULL e tratado. Limite de menu continua16, sem reorder tardio.
+- Probe inicial ainda modal/cancelavel5s. Falha transitoria/vazio agenda3
+  consultas async2/5/10s; X/touch tambem consulta com faixas presentes. Resultado
+  so aposdone/join; copiaSID/metadata/cancel proprios, teardown antesde liberar
+  tentativa, sem demux_abort/URLs noslogs. 401/403/404/410/TLS nao auto-repetem.
+- Descoberta tardia avisa X; nao muda OFF/manual automaticamente. Selecionar
+  hot ainda usa loader modal preexistente; nao prometer zero pausas nessa troca,
+  nem catalogo acima16/recuperacao de PT numa lista ja cheia.
+- test_subtitle_discovery obrigatorio: bloco de abertura real/parsers com
+  fonte/FFmpeg/HTTP fake, 100 ciclos pthread reais de join/cancel, capacity,
+  nome ausente/forced/query. Auditoria historica exige --baseline-053.
+- ARM64 completo FINAL -Werror e bateria completa FINAL sem SkipMediaFixtures
+  passaram, incluindo simbolo subtitle_catalog_add. Sem rebuild apos a prova.
+  NRO .54 local24287055B, SHA256
+  7e3a3e60460ca39389bc57dc197ed17eed8e84408a56ef1dd167215de09804fc.
+  Sidecar atualizado; substitui a3fa8b5/2b8160. Nao commitar NRO/sidecar.
+- Nenhum Switch fisico/Beerus/producao/Linux integrado testado. Nao afirmar
+  causa daquela tentativa sem episodio/traces. docs/SUBTITLE_DISCOVERY_FIX_0_12_54.md.
+- "Ainda nao publicar" permanece: sem push/release/atualizador/reprocessamento.
+  NRO/sidecar sao artefatos locais; nunca commitar. .53 continua publica.
+
+## Descoberta de legendas — 14/10/2026, AUDITORIA SEM CORRECAO NO APP
+
+- Usuario confirmou .53; fotos Dragon Ball Super: Beerus mostram NRO somente
+  EN, navegador anuncia PT/EN/ES. Numero/ID/fonte e logs novos ainda faltam;
+  mesmo titulo nao comprova mesmo pacote. Screenshot web ainda em loading.
+- C real da .53 e .54 local reproduziu: nativa EN impede hot probe (!nsub),
+  master PT com contagem igual a nativa EN ignorado, probe503 inicial sem retry
+  automatico de descoberta. X tambem so repete probe com nsub0. Nao confundir
+  descoberta com retry do download VTT ja listado. Nao atribuir incidente a
+  limitação do idioma/GPU nem reprocessar pacote por palpite.
+- tools/audit_subtitle_discovery.mjs (--baseline-053 ou atual): exit0 = defeitos
+  REPRODUZIDOS; nao incluir como criterio positivo de release. Parsers/control
+  C reais, FFmpeg/fonte/HTTP/render simulados; sem Dragon Ball/producao/hardware.
+- Proposta: inventario por origem/identidade, probe async+retry/cancel/geracao,
+  remap seguro, preservar OFF/manual e atualizar X mesmo com outra faixa.
+  Remover !nsub isoladamente NAO basta (fallback global/comparacao de contagens).
+- Apenas docs e ferramentas novos; NRO/codigo do app/backend/release inalterados,
+  .54 local permanece a3fa8b5.../24282959B. Sem build/validador novos. Teste
+  subtitle_io preexistente passou. Relatorio docs/SUBTITLE_DISCOVERY_AUDIT_2026_10_14.md.
+- Inspecao Git em C:/iptv recusada por permissao, nao contornada. Snapshot c9
+  e frontend acessivel foram lidos; nao afirmar estado/deploy do site atual.
+- "Ainda nao publicar" continua vigente. Necessaria autorizacao de correcao,
+  conversao do audit em regressoes positivas, build/validator final e hardware.
+
 ## HOME/suspensao — 14/10/2026, candidato .54 SOMENTE LOCAL
 
 - Nova rodada sobre 7d783bc, mesmo checkout/branch. Usuario relatou HOME e
