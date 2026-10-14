@@ -35,6 +35,8 @@
 #include "playback_resume.h"
 #include "navigation_input.h"
 #include "cover_policy.h"
+#include "connection_test_ui.h"
+#include "settings_layout.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -4919,19 +4921,24 @@ static void format_subscription_period(cJSON *account, cJSON *subscription, char
     else snprintf(out, cap, "Periodo encerrado em %02d/%02d/%04d", day, month, year);
 }
 static const char *const SETTINGS_NAV[] = { "Meu perfil", "Reproducao", "Conta", "Aplicativo" };
-static const char *const SETTINGS_ROWS[4][5] = {
+static const char *const SETTINGS_ROWS[4][6] = {
     { "Editar meu cartao", "Trocar perfil", "Adicionar perfil", NULL },
     { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido", NULL },
     { "Alterar senha", "E-mail de recuperacao", "Sair da conta", NULL },
-    { "Buscar atualizacao", "Diagnostico do player", "Reiniciar Nplay", "Fechar Nplay", NULL }
+    { "Buscar atualizacao", "Diagnostico do player", "Teste de internet", "Reiniciar Nplay", "Fechar Nplay", NULL }
 };
-static const char *const SETTINGS_DETAILS[4][5] = {
+static const char *const SETTINGS_DETAILS[4][6] = {
     { "Nome, avatar, cor e acesso infantil", "Escolha quem esta assistindo", "Crie outro espaco para favoritos e progresso", NULL },
     { "Remove titulos adultos da descoberta", "Continua a serie apos o fim do episodio", "Para a rotacao automatica dos destaques", "Prioridade quando ha varias versoes", NULL },
     { "Proteja o acesso com uma nova senha", "Para recuperar a conta se esquecer a senha", "Encerra o acesso neste Switch", NULL },
-    { "Instale a versao mais recente pelo aplicativo", "Dados locais para investigar a reproducao", "Reabre o aplicativo", "Volta ao menu HOME", NULL }
+    { "Instale a versao mais recente pelo aplicativo", "Dados locais para investigar a reproducao", "Download e respostas: compare outro comodo", "Reabre o aplicativo", "Volta ao menu HOME", NULL }
 };
-static int settings_row_count(void) { return g_settings_section == 0 || g_settings_section == 2 ? 3 : 4; }
+static int settings_row_count(void) {
+    if (g_settings_section < 0 || g_settings_section > 3) return 0;
+    int count = 0;
+    while (count < 5 && SETTINGS_ROWS[g_settings_section][count]) count++;
+    return count;
+}
 static void open_profile_editor(int id) {
     if (!profile_by_id(id)) { toast("Perfil indisponivel. Atualize a lista."); return; }
     g_profile_editor_return = g_screen;
@@ -5116,7 +5123,8 @@ static void settings_execute(void) {
     } else {
         if (g_setSel == 0) { snprintf(g_status, sizeof(g_status), "Verificando atualizacao..."); g_do_update = 1; }
         else if (g_setSel == 1) { g_diag_page = 0; reload_player_diagnostics(); g_diag_open = 1; }
-        else if (g_setSel == 2) schedule_restart(NULL);
+        else if (g_setSel == 2) connection_test_show(gRen, BASE, &g_running);
+        else if (g_setSel == 3) schedule_restart(NULL);
         else g_running = 0;
     }
 }
@@ -5140,7 +5148,7 @@ static void draw_settings(void) {
         if (i == g_settings_section && !g_settings_focus) ui_focus(53, y - 3, 198, 66);
         text_draw(gRen, SETTINGS_NAV[i], 72, y + 16, i == g_settings_section ? C_TEXT : C_MUT, 0);
     }
-    ui_panel(290, 202, 950, 406, C_ACC);
+    ui_panel(290, 202, 950, g_settings_section == 3 ? 418 : 406, C_ACC);
     const char *heading = g_settings_section == 0 ? "Seu perfil" : g_settings_section == 1 ? "Conteudo e reproducao" :
                           g_settings_section == 2 ? "Seguranca e acesso" : "Sobre o aplicativo";
     text_draw(gRen, heading, 320, 219, C_TEXT, 1);
@@ -5169,9 +5177,9 @@ static void draw_settings(void) {
     }
     int count = settings_row_count();
     for (int i = 0; i < count; i++) {
-        int y = 322 + i * 65;
-        fill_rect(316, y, 898, 57, C_BAR);
-        if (g_settings_focus && g_setSel == i) { ui_focus(313, y - 3, 904, 63); fill_rect(316, y, 4, 57, C_ACC); }
+        int y = settings_row_y(g_settings_section, i), height = settings_row_height(g_settings_section);
+        fill_rect(316, y, 898, height, C_BAR);
+        if (g_settings_focus && g_setSel == i) { ui_focus(313, y - 3, 904, height + 6); fill_rect(316, y, 4, height, C_ACC); }
         text_draw(gRen, SETTINGS_ROWS[g_settings_section][i], 338, y + 5,
                   g_settings_section == 2 && i == 2 ? C_ROSE : C_TEXT, 0);
         text_clip(SETTINGS_DETAILS[g_settings_section][i], 338, y + 32, C_MUT, 2, 600);
@@ -5183,7 +5191,7 @@ static void draw_settings(void) {
             text_right(value, 1188, y + 14, C_ACC2, 0);
         }
     }
-    if (g_status[0]) text_clip(g_status, 48, 622, C_ACC2, 0, 1160);
+    if (g_status[0]) text_clip(g_status, 48, g_settings_section == 3 ? 637 : 622, C_ACC2, 0, 1160);
     ui_footer("Esquerda/direita Secao    Cima/baixo Navegar    A Confirmar    X Diagnostico    B Voltar");
     draw_player_diagnostics();
     draw_profile_editor();
@@ -5698,9 +5706,9 @@ static void handle_touch_tap(int x, int y) {
             if (section < 4 && (y - 264) % 77 < 60) {
                 g_settings_section = section; g_settings_focus = 1; g_setSel = 0;
             }
-        } else if (x >= 316 && x < 1214 && y >= 322 && y < 582) {
-            int index = (y - 322) / 65;
-            if (index < settings_row_count() && (y - 322) % 65 < 57) {
+        } else {
+            int index = settings_row_at(g_settings_section, settings_row_count(), x, y);
+            if (index >= 0) {
                 g_settings_focus = 1; g_setSel = index; input_settings(JOY_A);
             }
         }

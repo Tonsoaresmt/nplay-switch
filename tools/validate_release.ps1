@@ -230,6 +230,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Supervisor perdeu ponto salvo.' }
 if ($LASTEXITCODE -ne 0) { throw 'Historico/EOF/pausa perderam os guards de fluxo.' }
 & node tools/test_playback_resolution.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Resolucao de episodio/timeout/progresso desconhecido falhou.' }
+& node tools/test_connection_test.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Teste de internet, memoria, TLS ou cancelamento falhou.' }
+& node tools/test_connection_probe.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Teste de internet com HTTPS/libcurl reais falhou.' }
 & node tools/test_player_navigation.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
 & node tools/test_app_navigation.mjs

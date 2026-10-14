@@ -1,5 +1,29 @@
 # Continuidade para agentes
 
+## Teste de internet — 14/10/2026, candidato LOCAL .54 atualizado
+
+- Base7e5ea2c, mesmo checkout/branch. Configuracoes > Aplicativo > Teste de
+  internet; nova quinta linha com geometria draw/touch compartilhada. Pipoca,
+  quatro cards, comparacao anterior completa em memoria, B/touch cancelavel.
+- Confirmacao explicita; sem medicao automatica. Quatro sondas Cloudflare,
+  tres GEThealth sem auth, dois downloads4MiB descartados sem reter corpo.
+  Maxcorpo8.847.360B(~9MB), deadline30s, conn1.5s/probe2s/download6s. Um worker
+  e easy isolado; phase/progressatomicos, report so apos done/join; TLS mantido.
+- Sem JWT/cookie/profile/telemetriaPOST/jobs/player/conta/deploy. Aviso do IP
+  e servicoexterno no consentimento. Internet e Nplay separados, parcial
+  explicitamente naUI; HTTP/RTT/range nao sao ping/perda/RSSI/bitrate de obra.
+- Orientacao8Mbps/range120ms/2x e heuristica, nao prova de culpa do cliente.
+  TLS/localOOM/testeexternoindisponivel/Nplay503 sao avisos distintos.
+- test_connection_test transport/modelo/UI reais+curlfake+pthread; probe com
+  libcurl HTTPSlocalreal:8MiB full, timeout6s parcial, certificado errado60.
+  Cert/chavesfixture ficam apenasem buildignorado; nunca publicarcredenciais.
+- ARM64 completo-Werror+incremental FINAL; bateria completa comfixtures,
+  simbolos e novas suites; nunca homologacaoSwitch/GPU/WiFireal. Relatorio
+  docs/CONNECTION_TEST_0_12_54.md. .53continua release ate publicarcomautoridade.
+- NRO.54LOCALatual24282959B,SHAf441102d4c397b401e60c9c203830da37c43de9e47c796f89f926b24b9d348cb.
+  Substitui candidatoe937e2a da rodada abaixo. SHA sidecar deve acompanhar.
+  Crash anterior/R2sleep permanecem investigacoes distintas, nao afirmarfix.
+
 ## Logs/crash ao proximo — 14/10/2026, candidato LOCAL .54
 
 - Checkout/branch autorizados inalterados; base3d36eb6/.53 publicada. Usuario
