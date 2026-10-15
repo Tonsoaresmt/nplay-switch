@@ -54,6 +54,8 @@ typedef struct {
     long long source_bytes;
     int is_cam;
     int sequential_stream; // fMP4 gerado na hora: sem seek nem retomada
+    int restart_seek; // Explicit TorBox restart contract, NOT byte seekability.
+    double restart_base, restart_duration; // Prepared attempt only; seconds in full title.
 } PlaybackSource;
 
 typedef enum { HOT_PREPARING, HOT_STREAMING, HOT_R2_READY } HotStatus;
@@ -71,6 +73,9 @@ int api_playback_needs_hot_source(const PlaybackSource *source);
 int api_hot_playback_started_cancel(const PlaybackSource *source, SDL_atomic_t *cancel);
 int api_hot_refresh_range_cancel(const PlaybackSource *source, SDL_atomic_t *cancel,
                                  PlaybackSource *out);
+int api_hot_refresh_cancel(const PlaybackSource *source, SDL_atomic_t *cancel, PlaybackSource *out);
+int api_prepare_restart_cancel(const PlaybackSource *source, double target,
+                               SDL_atomic_t *cancel, PlaybackSource *out);
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out);
 int api_resolve_playback_cancel(int item_id, const char *quality,

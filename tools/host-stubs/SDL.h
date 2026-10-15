@@ -14,6 +14,8 @@ typedef struct { int value; } SDL_atomic_t;
 Uint32 SDL_GetTicks(void);
 int SDL_AtomicSet(SDL_atomic_t *, int);
 int SDL_AtomicGet(SDL_atomic_t *);
+void SDL_AtomicLock(int *);
+void SDL_AtomicUnlock(int *);
 SDL_Thread *SDL_CreateThread(int (*)(void *), const char *, void *);
 void SDL_WaitThread(SDL_Thread *, int *);
 int SDL_PollEvent(SDL_Event *);

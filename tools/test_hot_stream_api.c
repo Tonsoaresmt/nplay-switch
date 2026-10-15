@@ -100,6 +100,10 @@ int main(void) {
     run("{\"error\":\"sem fonte\"}", 409, -1);
     assert(strstr(api_last_error(), "HTTP 409"));
     assert(calls == 8);
+    r = run("{\"status\":\"streaming\",\"delivery\":\"debrid\",\"seek_mode\":\"restart\","
+            "\"session_id\":\"1234567890abcdef_safe-session\",\"source_id\":7,"
+            "\"play_url\":\"/api/media/debrid/1234567890abcdef_safe-session/video?token=test\"}",200,0);
+    assert(r.source.sequential_stream && r.source.restart_seek);
     PlaybackSource route={0}; assert(!api_playback_needs_hot_source(NULL));
     snprintf(route.container,sizeof(route.container),"embed"); assert(api_playback_needs_hot_source(&route));
     snprintf(route.container,sizeof(route.container),"torrent"); assert(api_playback_needs_hot_source(&route));

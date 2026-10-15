@@ -149,6 +149,8 @@ static void SDL_LockMutex(SDL_mutex *m){(void)m;locks++;}
 static void SDL_UnlockMutex(SDL_mutex *m){(void)m;locks--;}
 `+section(player,'typedef struct ProgressiveSubtitle','static void progressive_subtitle_stop(ProgressiveSubtitle *stream);')+
 section(player,'static int external_subtitle_count(','static const char *external_subtitle_text(')+
+'static SubtitleSigns g_active_signs;\n'+
+section(player,'static const char *external_subtitle_text(','static const char *active_subtitle_text(')+
 section(player,'static void external_subtitle_keys(','static void external_subtitle_labels(')+String.raw`
 int main(void){
   HlsManifestTrack tracks[17]={0};SubtitleTrackKey keys[17]={0};
@@ -165,6 +167,11 @@ int main(void){
   assert(subtitle_store_add(&p.store.cues,10,12,"real progressive speech"));
   assert(subtitle_store_count(&wrapper.cues)==0);
   assert(external_subtitle_count(&wrapper)==1&&locks==0);
+  wrapper.time_offset=598;
+  assert(strstr(external_subtitle_text(&wrapper,608.5),"real progressive speech")&&locks==0);
+  assert(!external_subtitle_text(&wrapper,10.5)[0]);
+  wrapper.time_offset=4;
+  assert(strstr(external_subtitle_text(&wrapper,14.5),"real progressive speech"));
   subtitle_store_free(&p.store.cues);
   puts("PASS: late external metadata, 16-track cap, progressive count under mutex.");
 }`,['source/audio_policy.c','source/subtitle_choice.c','source/subtitle_store.c','source/subtitle_queue.c']);

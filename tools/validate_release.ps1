@@ -246,12 +246,16 @@ if ($LASTEXITCODE -ne 0) { throw 'CA em memoria e verificacao TLS do Switch falh
 if ($LASTEXITCODE -ne 0) { throw 'Reconciliacao segura de Assistir mais tarde falhou.' }
 & node tools/test_seek_barrier.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Barreira de seek reabriu fonte ocupada.' }
+& node tools/test_hls_seek_guard.mjs
+if ($LASTEXITCODE -ne 0) { throw 'HLS voltou ao seek nativo inseguro.' }
 & node tools/test_curl_backpressure_probe.mjs
 if ($LASTEXITCODE -ne 0) { throw 'libcurl real falhou em backpressure ou idle.' }
 & node tools/test_subtitle_io.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Isolamento de legendas remux falhou.' }
 & node tools/test_subtitle_discovery.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Descoberta de legendas perdeu faixas, origem ou ownership.' }
+& node tools/test_playback_restart.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Plano de salto remux perdeu posicao, validacao ou cancelamento.' }
 & node tools/test_subtitle_transport.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Transporte de legendas rejeitou 8 MiB ou perdeu limite/cancelamento.' }
 & node tools/test_subtitle_fetch.mjs
@@ -268,7 +272,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Suite do player real aceitou crash, timeout ou
 if ($LASTEXITCODE -ne 0) { throw 'Regressoes de legenda falharam ao compilar.' }
 & .\build\test_subtitle_edges.exe
 if ($LASTEXITCODE -ne 0) { throw 'Fala curta ou cue estendido desapareceu.' }
-& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_safe_fallback_api.c -lm -o build/test_safe_fallback_api.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/playback_restart.c source/hot_subtitles.c source/cJSON.c tools/test_safe_fallback_api.c -lm -o build/test_safe_fallback_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Failover nao destrutivo falhou ao compilar.' }
 & .\build\test_safe_fallback_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Failover desativou fonte globalmente ou aceitou resposta invalida.' }
@@ -339,7 +343,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Geometria dos letreiros perdeu tarjas, ancoras
 Assert-True ($LASTEXITCODE -eq 0) 'Compilacao hot subtitles falhou.'
 & .\build\test_hot_subtitles.exe
 Assert-True ($LASTEXITCODE -eq 0) 'Contrato hot subtitles falhou.'
-& $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
+& $hostGcc -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/playback_restart.c source/hot_subtitles.c source/cJSON.c tools/test_hot_stream_api.c -lm -o build/test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou ao compilar.' }
 & .\build\test_hot_stream_api.exe
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao TorBox/R2 falhou.' }
@@ -369,7 +373,7 @@ Assert-True ($sources -match 'subtitle_store_add' -and $sources -match 'subtitle
 Assert-True ($sources -match 'AV_PKT_DATA_WEBVTT_SETTINGS' -and $sources -match 'subtitle_store_signs' -and $sources -match 'subtitle_queue_signs' -and $sources -match 'hud_base.signs') 'Letreiros posicionados (placas/onomatopeias) voltaram a cair no meio das falas.'
 Assert-True ($sources -notmatch 'store->count >= 8192') 'Teto antigo de 8192 cues voltou: a legenda de anime com karaoke parava no meio.'
 Assert-True ($sources -match 'stream-retry') 'Legenda progressiva do torrent perdeu a nova tentativa apos queda.'
-& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
+& $hostGcc -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Itools/host-stubs -Iinclude source/api.c source/playback_restart.c source/hot_subtitles.c source/cJSON.c tools/test_playback_source.c -lm -o build/test_playback_source.exe
 if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 falhou ao compilar.' }
 & .\build\test_playback_source.exe
 if ($LASTEXITCODE -ne 0) { throw 'Contrato anime/R2 perdeu a fonte escolhida pelo backend.' }
@@ -387,6 +391,8 @@ if (-not $SkipMediaFixtures -and (Get-Command ffmpeg -ErrorAction SilentlyContin
     if ($LASTEXITCODE -ne 0) { throw 'Simulacao local do remux chunked falhou.' }
     & node tools/test_hls_player_fixture.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Fixture HLS multifaixa/seek/legendas falhou.' }
+    & node tools/test_player_delivery_fixture.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Range, restart ou classificacao HTTP real regrediram.' }
 }
 $nm = $env:TARGET_NM
 if (-not $nm) {
@@ -396,7 +402,7 @@ if (-not $nm) {
 }
 Assert-True (Test-Path $nm) 'aarch64-none-elf-nm nao encontrado.'
 $symbols = (& $nm Nplay.elf) -join "`n"
-foreach ($symbol in @('subtitle_catalog_add','player_lifecycle_begin','player_lifecycle_end','player_lifecycle_pending','api_renew_playback_cancel','switch_ca_context','g_ca_pem','Curl_ssl_libnx','ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
+foreach ($symbol in @('api_prepare_restart_cancel','playback_restart_supported','subtitle_catalog_add','player_lifecycle_begin','player_lifecycle_end','player_lifecycle_pending','api_renew_playback_cancel','switch_ca_context','g_ca_pem','Curl_ssl_libnx','ff_https_protocol','ff_hls_demuxer','ff_webvtt_demuxer','ff_webvtt_decoder','ff_h264_nvtegra_hwaccel','av_hwdevice_ctx_create')) {
     Assert-True ($symbols -match [regex]::Escape($symbol)) "Simbolo obrigatorio ausente: $symbol"
 }
 

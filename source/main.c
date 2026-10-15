@@ -1012,8 +1012,8 @@ static int on_player_renew(const PlaybackSource *current, PlaybackSource *out,
                            SDL_atomic_t *cancel, void *u) {
     (void)u;
     if (!current) return -1;
-    if (!strcmp(current->delivery_str, "debrid") && !current->sequential_stream)
-        return api_hot_refresh_range_cancel(current, cancel, out);
+    if (!strcmp(current->delivery_str, "debrid"))
+        return api_hot_refresh_cancel(current, cancel, out);
     return api_renew_playback_cancel(current, cancel, out);
 }
 
@@ -1511,7 +1511,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             cJSON_Delete(pr);
         }
         start = playback_resume_position(start, completed);
-        if (!completed && start > 10 && src.sequential_stream) {
+        if (!completed && start > 10 && src.sequential_stream && !src.restart_seek) {
             if (!prompt_sequential_restart(stable_title)) return 0;
             start = 0;
         } else if (!completed && start > 10) {
@@ -1544,12 +1544,12 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
         req.episodes = g_play_episodes;
         req.episode_count = g_play_episode_count;
         req.episode_current = g_play_episode_current;
-        if (src.sequential_stream) req.start_sec = 0;
+        if (src.sequential_stream && !src.restart_seek) req.start_sec = 0;
         req.progress_cb = on_player_progress;
         req.started_cb = src.request_id > 0 && src.hot_session_id[0] ? on_player_started : NULL;
         // Hot/debrid nao tem sessao /stream renovavel. Uma recuperacao via
         // /stream poderia entregar magnet ao demuxer e repetir a falha.
-        req.renew_cb = !strcmp(src.delivery_str, "debrid") && !src.sequential_stream
+        req.renew_cb = !strcmp(src.delivery_str, "debrid") && (!src.sequential_stream || src.restart_seek)
             ? on_player_renew : src.delivery_str[0] &&
             (!strcmp(src.delivery_str, "hot") || !strcmp(src.delivery_str, "debrid"))
             ? NULL : on_player_renew;

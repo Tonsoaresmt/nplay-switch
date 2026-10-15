@@ -43,7 +43,7 @@ static int modal_touch_active,modal_touch_kind,modal_touch_hit,modal_touch_row,m
 static float modal_touch_y,modal_touch_motion;
 static int timeline_seek,episodes_menu,episodes_sel,episode_count;
 static int track_menu,have_video_frame=1;
-static int sequential_stream;
+static int seekable_stream=1;
 static double dur=1800,timeline_seek_target;
 static int paused,timeline_seek_was_paused;
 static void SDL_PauseAudioDevice(int d,int p){(void)d;(void)p;}
@@ -99,8 +99,8 @@ int main(void){
  assert(touch(SDL_FINGERDOWN,1150,55,1)==JOY_DLEFT);
  assert(touch(SDL_FINGERDOWN,150,650,1)==JOY_L);
  assert(touch(SDL_FINGERDOWN,250,650,1)==JOY_R);
- sequential_stream=1;assert(touch(SDL_FINGERDOWN,250,650,1)==-1);
- sequential_stream=0;preview(588,0);
+ seekable_stream=0;assert(touch(SDL_FINGERDOWN,250,650,1)==-1);
+ seekable_stream=1;preview(588,0);
  assert(timeline_seek&&paused&&!timeline_seek_was_paused&&modal_touch_active&&timeline_seek_target==900);
  assert(touch(SDL_FINGERMOTION,804,600,1)==-1&&timeline_seek_target>1259&&timeline_seek_target<1261);
  assert(touch(SDL_FINGERUP,804,600,1)==-1);assert(tap(1100,658)==JOY_B);

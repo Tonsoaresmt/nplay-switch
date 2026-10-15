@@ -32,7 +32,7 @@ static double direct(int itemId) {
 static double resolved(int sequential) {
     int itemId = 17;
     const char *stable_title = "The Big Bang Theory";
-    struct { int sequential_stream, session_id; } src = {sequential, 7};
+    struct { int sequential_stream, session_id, restart_seek; } src = {sequential!=0, 7, sequential==2};
     double start = 0;
     int completed = 0;
     cJSON *pr = cJSON_Duplicate(fixture, 1);
@@ -50,9 +50,9 @@ int main(void) {
     };
     for (int i = 0; i < 6; i++) {
         fixture = cJSON_Parse(cases[i]); assert(fixture);
-        for (int path = 0; path < 3; path++) {
+        for (int path = 0; path < 4; path++) {
             prompts = restart_prompts = 0; decision = 1;
-            double start = path == 0 ? direct(17) : resolved(path == 2);
+            double start = path == 0 ? direct(17) : resolved(path == 2 ? 1 : path == 3 ? 2 : 0);
             double expected = i == 2 && path != 2 ? 600 : 0;
             if (start != expected) {
                 printf("FAIL case=%d path=%d expected=%.0f actual=%.0f\n", i, path, expected, start);

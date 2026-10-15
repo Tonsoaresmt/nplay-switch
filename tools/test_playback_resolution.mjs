@@ -26,7 +26,7 @@ writeFileSync('build/playback_request_timing.inc',section(net,
   'static _Thread_local NetRequestTiming g_request_timing;', 'long net_request_timeout_cancel('));
 const exe=resolve('build/test_playback_resolution'+(process.platform==='win32'?'.exe':''));
 const args=['-std=c11','-Wall','-Wextra','-Werror','-pthread','-ffunction-sections','-fdata-sections','-Wl,--gc-sections',
-  '-Itools/host-stubs','-Iinclude','-Ibuild','tools/playback_resolution_host.c','source/api.c','source/hot_subtitles.c','source/cJSON.c','-lm','-o',exe];
+  '-Itools/host-stubs','-Iinclude','-Ibuild','tools/playback_resolution_host.c','source/api.c','source/playback_restart.c','source/hot_subtitles.c','source/cJSON.c','-lm','-o',exe];
 let r=spawnSync(process.env.HOST_CC||'gcc',args,{encoding:'utf8',windowsHide:true,timeout:30000});
 if(r.status!==0)throw Error(r.stderr||r.error?.message);
 r=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:30000});

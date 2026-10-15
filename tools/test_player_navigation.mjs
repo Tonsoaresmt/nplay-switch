@@ -10,7 +10,7 @@ writeFileSync('build/navigation_landing.inc',section(main,'static void add_rail(
  section(main,'static void load_landing(int tab) {','static void landing_invalidate('));
 writeFileSync('build/navigation_enter.inc',section(main,'static void enter_tab(int tab) {','static void input_landing('));
 writeFileSync('build/navigation_touch.inc',section(player,'            if ((timeline_seek || episodes_menu) &&','            if (e.type == SDL_FINGERDOWN && track_menu) {'));
-writeFileSync('build/navigation_preview.inc',section(player,'                    // A drag previews one target;', '                } else if (!sequential_stream && ty >= 635'));
+writeFileSync('build/navigation_preview.inc',section(player,'                    // A drag previews one target;', '                } else if (seekable_stream && ty >= 635'));
 const exe=resolve('build/test_player_navigation.exe');
 let r=spawnSync(process.env.HOST_CC||'gcc',['-std=c11','-Wall','-Wextra','-Werror','-Iinclude','-Ibuild',
  'tools/player_navigation_host.c','source/cJSON.c','-lm','-o',exe],{encoding:'utf8',windowsHide:true,timeout:30000});

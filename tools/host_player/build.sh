@@ -6,7 +6,7 @@ WORK=${HOST_PLAYER_WORK:-$REPO/build/host_player}; OUT=${1:-$WORK/bin}
 CF="-std=gnu11 -O1 -g -w -DAPP_VERSION_STR=\"harness\" -I $HERE/stubs -I $WORK/gen -I $WORK/inc -I $REPO/include -I $REPO/source $(sdl2-config --cflags)"
 mkdir -p "$OUT"
 for f in player player_ui text diag curl_avio net store ui audio_policy hls_manifest subtitle_queue subtitle_store subtitle_catalog \
-         player_clock player_loading player_next player_sync player_lifecycle hot_subtitles vtt_stream touch_input cJSON api; do
+         player_clock player_loading player_next player_sync player_lifecycle playback_restart hot_subtitles vtt_stream touch_input cJSON api; do
     gcc $CF -c -o "$OUT/$f.o" "$REPO/source/$f.c"
 done
 for f in "$WORK"/gen/*.c "$HERE/stubs/nx_stubs.c" "$HERE/harness_main.c"; do

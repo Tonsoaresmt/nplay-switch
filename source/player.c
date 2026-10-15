@@ -47,6 +47,7 @@
 #include "player_sync.h"
 #include "player_completion.h"
 #include "player_lifecycle.h"
+#include "playback_restart.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -600,23 +601,9 @@ static double adjacent_chapter(AVFormatContext *fmt, double target, int forward,
 
 static int seek_video_time(AVFormatContext *fmt, int video_index, int is_hls,
                            double target, double timeline_origin, int flags) {
+    (void)video_index;
+    if (is_hls) return AVERROR(ENOSYS); // HLS must reopen a positioned playlist.
     int64_t global_ts = (int64_t)((target + timeline_origin) * AV_TIME_BASE);
-    if (is_hls && video_index >= 0 &&
-        fmt->streams[video_index]->time_base.num > 0 &&
-        fmt->streams[video_index]->time_base.den > 0) {
-        int64_t video_ts = av_rescale_q(global_ts, AV_TIME_BASE_Q,
-                                        fmt->streams[video_index]->time_base);
-        int64_t window = av_rescale_q(15LL * AV_TIME_BASE, AV_TIME_BASE_Q,
-                                      fmt->streams[video_index]->time_base);
-        int64_t min_ts = video_ts > INT64_MIN + window ? video_ts - window : INT64_MIN;
-        int64_t max_ts = video_ts < INT64_MAX - window / 3
-            ? video_ts + window / 3 : INT64_MAX;
-        int rc = avformat_seek_file(fmt, video_index, min_ts, video_ts, max_ts,
-                                    flags & ~AVSEEK_FLAG_BACKWARD);
-        if (rc >= 0) return rc;
-        diag_player_event("seek", "window-fallback", "rc=%d target=%.2f", rc, target);
-        return av_seek_frame(fmt, video_index, video_ts, flags);
-    }
     int64_t min_ts = global_ts > INT64_MIN + 15LL * AV_TIME_BASE
         ? global_ts - 15LL * AV_TIME_BASE : INT64_MIN;
     int64_t max_ts = global_ts < INT64_MAX - 5LL * AV_TIME_BASE
@@ -741,6 +728,7 @@ typedef struct ProgressiveSubtitle ProgressiveSubtitle;
 typedef struct {
     SubtitleStore cues;
     ProgressiveSubtitle *progressive;
+    double time_offset; // Progressive restart captions are relative to its keyframe.
 } ExternalSubtitleStore;
 
 struct ProgressiveSubtitle {
@@ -795,6 +783,7 @@ static int external_subtitle_count(const ExternalSubtitleStore *store) {
 static const char *external_subtitle_text(ExternalSubtitleStore *store,
                                           double position) {
     if (!store) return "";
+    position -= store->time_offset;
     ProgressiveSubtitle *progressive = store->progressive;
     if (!progressive) {
         subtitle_store_signs(&store->cues, position, &g_active_signs);
@@ -1204,11 +1193,14 @@ static int hot_subtitle_wait(SDL_Renderer *ren, const char *title, HotSubtitleJo
     return job->result;
 }
 static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *url,
-                              ExternalSubtitleStore *store) {
+                              ExternalSubtitleStore *store, double offset) {
     ProgressiveSubtitle *stream = calloc(1, sizeof(*stream));
     if (!stream) return -1;
     if (!url || strlen(url) >= sizeof(stream->url)) { free(stream); return -1; }
-    snprintf(stream->url, sizeof(stream->url), "%s", url);
+    int written = offset > 0
+        ? snprintf(stream->url,sizeof(stream->url),"%s%cfrom=%.3f",url,strchr(url,'?')?'&':'?',offset)
+        : snprintf(stream->url,sizeof(stream->url),"%s",url);
+    if (written < 0 || (size_t)written >= sizeof(stream->url)) { free(stream); return -1; }
     stream->mutex = SDL_CreateMutex();
     vtt_stream_init(&stream->parser, progressive_subtitle_block, stream);
     if (stream->mutex) stream->thread = SDL_CreateThread(progressive_subtitle_worker, "subtitle-stream", stream);
@@ -1233,7 +1225,7 @@ static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *u
     }
     if (finished && !external_subtitle_count(&stream->store)) { progressive_subtitle_stop(stream); return -1; }
     // Heap-owned session outlives this modal. Close always cancels and joins it.
-    external_subtitle_clear(store); store->progressive = stream;
+    external_subtitle_clear(store); store->progressive = stream; store->time_offset = offset;
     return 0;
 }
 
@@ -1493,7 +1485,9 @@ typedef struct {
     SDL_atomic_t finished;
     PlayerProgressCallback progress_cb;
     PlayerStartedCallback started_cb;
-    PlaybackSource started_source; // Immutable snapshot; no render/worker sharing of SID.
+    PlaybackSource started_source; // Mailbox copied under started_lock; no network under lock.
+    int started_lock;
+    unsigned started_generation;
     PlayerHeartbeatCallback heartbeat_cb;
     PlayerStopCallback stop_cb;
     void *callback_userdata;
@@ -1989,6 +1983,11 @@ static void demux_worker_stop(DemuxWorker *worker) {
     if (worker->watch) SDL_AtomicSet(&worker->watch->demux_abort, 0);
     memset(worker, 0, sizeof(*worker));
 }
+static int player_prepare_restart(const PlaybackSource *source, PlaybackSource *out,
+                                   SDL_atomic_t *cancel, void *opaque) {
+    return api_prepare_restart_cancel(source, *(const double *)opaque, cancel, out);
+}
+
 static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *req,
                                 PlaybackHeartbeat *heartbeat, double start_sec,
                                 double *out_pos, double *out_dur,
@@ -2012,6 +2011,23 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                  player_url_is_hls(url);
     int sequential_stream = req->playback.sequential_stream;
     const char *title = req->title;
+    int restart_seek = playback_restart_supported(&req->playback,BASE);
+    int seekable_stream = !sequential_stream || restart_seek;
+    PlaybackSource restart_source = {0};
+    double restart_base = 0;
+    if (restart_seek) {
+        int prepared = player_recovery_call(ren,joy,title,"Preparando o trecho",
+            "Buscando o ponto escolhido...  |  B para cancelar",player_prepare_restart,
+            &req->playback,&restart_source,&start_sec);
+        if (prepared==1) return -11;
+        if (prepared==2) return PLAYER_RESTART_RESUME;
+        if (prepared==-2) { g_player_last_access_expired=1; return -3; }
+        if (prepared==-3) return -3;
+        if (prepared) return -10;
+        url=restart_source.play_url;
+        restart_base=restart_source.restart_base;
+        diag_player_event("seek","restart-plan","target=%.3f base=%.3f",start_sec,restart_base);
+    }
     // Tela de preparacao enquanto abre a conexao e le os metadados.
     pui_draw_loading(ren, title, "Preparando video", "Conectando...", SDL_GetTicks(), 0);
     SDL_RenderPresent(ren);
@@ -2161,9 +2177,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         av_dict_set(&open_opts, "tls_verify", "1", 0);
         av_dict_set(&open_opts, "rw_timeout", "30000000", 0);
         av_dict_set(&open_opts, "reconnect", "1", 0);
-        av_dict_set(&open_opts, "reconnect_streamed", "1", 0);
+        // A non-Range remux must be reopened as a new attempt at its checkpoint.
+        // HTTP's byte-zero reconnect cannot retain the old decoder timestamps.
+        av_dict_set(&open_opts, "reconnect_streamed", sequential_stream ? "0" : "1", 0);
         av_dict_set(&open_opts, "reconnect_on_network_error", "1", 0);
-        av_dict_set(&open_opts, "reconnect_on_http_error", "4xx,5xx", 0);
+        av_dict_set(&open_opts, "reconnect_on_http_error", "408,429,500,502,503,504", 0);
         av_dict_set(&open_opts, "reconnect_delay_max", "5", 0);
         av_dict_set(&open_opts, "reconnect_max_retries", "3", 0);
         av_dict_set(&open_opts, "reconnect_delay_total_max", "15", 0);
@@ -2527,7 +2545,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     } else if (scur >= 0 && SUB_EXTERNAL(scur)) {
         int64_t before_subtitles = av_gettime_relative();
         int sub_result = load_hot_subtitle(ren, title, manifest_subtitles[scur].uri,
-                                           &external_subtitles);
+                                           &external_subtitles, restart_base);
         if (open_watch.deadline_us > 0)
             open_watch.deadline_us += av_gettime_relative() - before_subtitles;
         if (sub_result != 0) {
@@ -2566,6 +2584,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         diag_player_event("streams", "sequential-duration", "demuxer=%.1f probe=%.1f",
                           dur, hot_probe_duration);
         dur = hot_probe_duration > 0 ? hot_probe_duration : 0;
+    }
+    if (restart_seek) {
+        timeline_origin -= restart_base;
+        if (restart_source.restart_duration > 0) dur=restart_source.restart_duration;
     }
     if (out_dur) *out_dur = dur;
 
@@ -2804,7 +2826,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
     // Nunca apresentar o inicio como se fosse uma retomada. Uma fonte continua
     // sem busca precisa de outra fonte ou de erro explicito, nao perder progresso.
-    if (sequential_stream && start_sec > 0) {
+    if (sequential_stream && !restart_seek && start_sec > 0) {
         player_error_message("Esta fonte nao permite retomar; buscando alternativa");
         playback_error = -10;
         running = 0;
@@ -2813,8 +2835,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     // Basta descartar video/audio anteriores ao alvo (preroll), sem seek. Se
     // nenhuma playlist pode ser cortada e o alvo esta longe do inicio, caia
     // no caminho antigo de seek para nao decodificar minutos de preroll.
-    int positioned_ready = positioned_open &&
-        (positioned_playlists > 0 || start_sec < 12.0);
+    int positioned_ready = (positioned_open &&
+        (positioned_playlists > 0 || start_sec < 12.0)) || (restart_seek && start_sec > 0);
     if (running && positioned_ready) {
         player_boot_stage("08 retomando posicao");
         if (out_resume_seeked) *out_resume_seeked = 1;
@@ -2834,35 +2856,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         first_frame_budget_ms = 20000u;
     } else if (running && !sequential_stream && start_sec > 0) {
         if (native_hls) {
-            // hls_read_seek calcula o segmento usando first_timestamp. Com o
-            // probe de cabecalhos pulado, ele ainda nao existe ate o primeiro
-            // pacote. Leia um pacote (sem decodificar) para fixar a linha do
-            // tempo antes de buscar a posicao salva.
-            player_boot_stage("08 fixando linha do tempo");
-            open_watch.detail = "Preparando a retomada...  |  B para cancelar";
-            Uint32 warm_started = SDL_GetTicks();
-            int warm_rc = AVERROR(EAGAIN);
-            while (SDL_GetTicks() - warm_started < 8000u && !open_watch.cancelled &&
-                   !open_watch.timed_out) {
-                warm_rc = av_read_frame(fmt, pkt);
-                if (warm_rc != AVERROR(EAGAIN)) break;
-                player_open_interrupted(&open_watch);
-                SDL_Delay(25);
-            }
-            diag_player_event("seek", "timeline-warm",
-                              "rc=%d ms=%u stream=%d", warm_rc,
-                              SDL_GetTicks() - warm_started,
-                              warm_rc >= 0 ? pkt->stream_index : -1);
-            av_packet_unref(pkt);
-            if (warm_rc < 0 || open_watch.cancelled || open_watch.timed_out) {
-                if (out_resume_seeked) *out_resume_seeked = 1;
-                if (open_watch.cancelled) running = 0;
-                else {
-                    player_error_message("Nao foi possivel preparar a retomada HLS");
-                    playback_error = -5;
-                    running = 0;
-                }
-            }
+            // The old fallback silently called FFmpeg's broken fMP4 HLS seek
+            // whenever a growing/unsupported playlist could not be trimmed.
+            // Keep the checkpoint; renew/select another source instead.
+            player_error_message("Este trecho ainda nao pode ser retomado nesta fonte");
+            diag_player_event("seek","positioned-unavailable","target=%.2f",start_sec);
+            playback_error=-5;
+            running=0;
         }
         if (running) {
             player_boot_stage("08 retomando posicao");
@@ -3202,7 +3202,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 episode_count > 1 && have_video_frame && e.tfinger.x >= 0.80f && e.tfinger.y < 96.0f / PWIN_H)
                 touch_track_button = JOY_DLEFT; // Visible Episodes action, same controller path.
             if (e.type == SDL_FINGERDOWN && !track_menu && !timeline_seek && !episodes_menu &&
-                have_video_frame && !sequential_stream && e.tfinger.y >= 635.0f / PWIN_H &&
+                have_video_frame && seekable_stream && e.tfinger.y >= 635.0f / PWIN_H &&
                 e.tfinger.x >= 120.0f / PWIN_W && e.tfinger.x < 290.0f / PWIN_W)
                 touch_track_button = e.tfinger.x < 205.0f / PWIN_W ? JOY_L : JOY_R;
             if (e.type == SDL_FINGERDOWN && track_menu) {
@@ -3267,7 +3267,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (adev) SDL_PauseAudioDevice(adev, 1);
                         int seek_rc = player_seek_with_barrier(
                             &demux, &open_watch, ren, joy, title,
-                            "Indo para o ponto escolhido", fmt, vidx, native_hls,
+                            "Indo para o ponto escolhido", fmt, vidx, native_hls || restart_seek,
                             vctx, actx, sctx, adev, target, 0, timeline_origin,
                             &wall_start, &audio_clock, &cur_pos, &last_ac,
                             &last_ac_wall, &subtitles);
@@ -3381,7 +3381,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (track_menu == TRACK_MENU_AUDIO) {
                             if (track_sel == acur_ui) {
                                 snprintf(notice, sizeof(notice), "Audio atual mantido");
-                            } else if (native_hls) {
+                            } else if (native_hls || restart_seek) {
                                 // Trocar a rendition HLS exige seek, que o FFmpeg
                                 // 7.1 corrompe em fMP4. Reabra no mesmo ponto com a
                                 // faixa exata escolhida (prioridade manual).
@@ -3527,7 +3527,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                         SDL_GetTicks(), 1);
                                     SDL_RenderPresent(ren);
                                     int sub_result = load_hot_subtitle(ren, title,
-                                        manifest_subtitles[next].uri, &external_subtitles);
+                                        manifest_subtitles[next].uri, &external_subtitles, restart_base);
                                     if (sub_result == 0) {
                                         scur = next;
                                         const char *norm = audio_language_normalize(
@@ -3563,6 +3563,12 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                         "choice=%d ms=%u", next + 1,
                                         SDL_GetTicks() - switch_started);
                                 }
+                            } else if (restart_seek) {
+                                subtitle_fetch_cancel(&subtitle_fetch);
+                                subtitle_choice_capture(&g_player_subtitle_choice,subtitle_keys,nsub,
+                                                        next,req->source_id);
+                                controlled_restart=PLAYER_RESTART_TRACK;
+                                running=0;
                             } else {
                                 subtitle_fetch_cancel(&subtitle_fetch);
                                 subtitle_retry_select(&subtitle_retry, -1);
@@ -3708,7 +3714,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     snprintf(notice, sizeof(notice), "Volume  %d%%", vol);
                     notice_until = SDL_GetTicks() + 1800;
                 }
-                else if (sequential_stream &&
+                else if (!seekable_stream &&
                          (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL)) {
                     snprintf(notice, sizeof(notice), "Busca disponivel apos o preparo completo");
                     notice_until = SDL_GetTicks() + 2200;
@@ -3778,7 +3784,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     hud_base.focus = PUI_FOCUS_NEXT_CARD;
                     hud_base.next_card_alpha = 1.0f;
                     hud_until = SDL_GetTicks() + 8000;
-                } else if (!sequential_stream && dur > 1 && ty >= 580 && ty < 635 &&
+                } else if (seekable_stream && dur > 1 && ty >= 580 && ty < 635 &&
                     tx >= 48 && tx <= 1128) {
                     // A drag previews one target; only the visible Confirm
                     // action performs the seek. Releasing cannot reopen video.
@@ -3791,7 +3797,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     modal_touch_active = 1; modal_finger = e.tfinger.fingerId;
                     modal_touch_kind = 1; modal_touch_hit = PLAYER_TOUCH_PREVIEW;
                     modal_touch_drag = 0; modal_touch_motion = 0; modal_touch_y = e.tfinger.y;
-                } else if (!sequential_stream && ty >= 635 && tx >= 120 && tx < 290) {
+                } else if (seekable_stream && ty >= 635 && tx >= 120 && tx < 290) {
                     target += tx < 205 ? -10 : 10;
                     touch_seek = 1;
                 } else if (ty >= 635 && tx < 115) {
@@ -3823,7 +3829,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     if (adev) SDL_PauseAudioDevice(adev, 1);
                     int seek_rc = player_seek_with_barrier(
                         &demux, &open_watch, ren, joy, title,
-                        "Indo para o ponto escolhido", fmt, vidx, native_hls,
+                        "Indo para o ponto escolhido", fmt, vidx, native_hls || restart_seek,
                         vctx, actx, sctx, adev, target, 0, timeline_origin,
                         &wall_start, &audio_clock, &cur_pos, &last_ac,
                         &last_ac_wall, &subtitles);
@@ -3880,7 +3886,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             seek_arm_dir = 0;
             seek_arm_since = 0;
         }
-        if (!sequential_stream && !track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
+        if (seekable_stream && !track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
             if (stick_abs >= SEEK_ENTER_AXIS) {
                 int direction = stick_x > 0 ? 1 : -1;
                 if (seek_arm_dir != direction) {
@@ -3927,7 +3933,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 scur, SUB_EXTERNAL(scur), &subtitles,
                 &external_subtitles, timeline_seek_from);
             draw_hud(ren, &hud_base, timeline_seek_from, dur, 1, vol,
-                     acur_ui, scur, !sequential_stream, NULL,
+                     acur_ui, scur, seekable_stream, NULL,
                      timeline_seek_target, scrub_label[0] ? scrub_label : NULL,
                      active_subtitle);
             SDL_RenderPresent(ren);
@@ -3977,7 +3983,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 scur, SUB_EXTERNAL(scur), &subtitles,
                 &external_subtitles, cur_pos);
             draw_hud(ren, &hud_base, cur_pos, dur, 1, vol,
-                     acur_ui, scur, !sequential_stream, NULL, -1, NULL,
+                     acur_ui, scur, seekable_stream, NULL, -1, NULL,
                      active_subtitle);
             if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
             SDL_RenderPresent(ren);
@@ -4026,7 +4032,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 diag_player_event("demux", "read-wait", "ms=%u audio=%u rc=%d pos=%.1f",
                                   read_ms, audio_before_ms, ret, cur_pos);
         }
-        if (!logged_first_read) {
+        if (!logged_first_read && take != 0) {
             diag_player_event("demux", ret >= 0 ? "first-read-ok" : "first-read-fail",
                               "rc=%d stream=%d", ret, ret >= 0 ? pkt->stream_index : -1);
             logged_first_read = 1;
@@ -4056,7 +4062,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     scur, SUB_EXTERNAL(scur), &subtitles,
                     &external_subtitles, cur_pos);
                 draw_hud(ren, &hud_base, cur_pos, dur, 0, vol,
-                         acur_ui, scur, !sequential_stream, dots, -1, NULL,
+                         acur_ui, scur, seekable_stream, dots, -1, NULL,
                          active_subtitle);
                 if (now_ticks < notice_until) draw_notice(ren, notice);
                 SDL_RenderPresent(ren);
@@ -4066,7 +4072,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             // supervisor renovar a sessao evita reconexao infinita na mesma URL.
             unsigned audio_queued = adev ? SDL_GetQueuedAudioSize(adev) : 0;
             if (player_recovery_should_renew_after_stall(
-                    now_ticks - buffering_since, native_hls, logged_first_present,
+                    now_ticks - buffering_since, native_hls || req->renew_cb != NULL, logged_first_present,
                     audio_switch_pending || subtitle_switch_pending, audio_queued)) {
                 diag_player_event("recover", "stall-escalate", "ms=%u audio=%u pos=%.1f",
                                   now_ticks - buffering_since, audio_queued, cur_pos);
@@ -4359,7 +4365,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         &external_subtitles, cur_pos);
                     if (hud_pinned || SDL_GetTicks() < hud_until) {
                         draw_hud(ren, &hud_base, cur_pos, dur, 0, vol,
-                                 acur_ui, scur, !sequential_stream, NULL, -1, NULL,
+                                 acur_ui, scur, seekable_stream, NULL, -1, NULL,
                                  active_subtitle);
                     } else {
                         draw_subtitle_overlay(ren, &hud_base, active_subtitle);
@@ -4548,43 +4554,51 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
 
 static int playback_heartbeat_thread(void *userdata) {
     PlaybackHeartbeat *hb = (PlaybackHeartbeat *)userdata;
-    int elapsed_ms = 0, progress_ms = 0;
+    Uint32 heartbeat_tick = SDL_GetTicks(), progress_tick = heartbeat_tick;
     int last_saved_pos = -1;
     int started_tries = 0;
+    unsigned started_generation = 0;
+    PlaybackSource started_source = {0};
     Uint32 started_retry_tick = 0;
     while (SDL_AtomicGet(&hb->running)) {
         SDL_Delay(100);
         if (!SDL_AtomicGet(&hb->running)) break;
         if (!SDL_AtomicGet(&hb->pipeline_ready)) {
-            elapsed_ms = 0;
-            progress_ms = 0;
+            heartbeat_tick = progress_tick = SDL_GetTicks();
             continue;
         }
+        SDL_AtomicLock(&hb->started_lock);
+        if (started_generation != hb->started_generation) {
+            started_source=hb->started_source;
+            started_generation=hb->started_generation;
+            started_tries=0;
+            started_retry_tick=0;
+        }
+        SDL_AtomicUnlock(&hb->started_lock);
         if (hb->started_cb && started_tries < 3 && !SDL_AtomicGet(&hb->cancel_io) &&
             (!started_retry_tick || (Sint32)(SDL_GetTicks() - started_retry_tick) >= 0)) {
-            int rc = hb->started_cb(&hb->started_source, &hb->cancel_io, hb->callback_userdata);
+            int rc = hb->started_cb(&started_source, &hb->cancel_io, hb->callback_userdata);
             started_tries++;
             if (!rc) started_tries = 3;
             else started_retry_tick = SDL_GetTicks() + (Uint32)started_tries * 2000u;
         }
-        elapsed_ms += 100;
-        progress_ms += 100;
-
-        if (elapsed_ms >= 20000) {
+        Uint32 now = SDL_GetTicks();
+        if (now - heartbeat_tick >= 20000u) {
+            heartbeat_tick = now;
             int session_id = SDL_AtomicGet(&hb->session_id);
             if (session_id > 0 && hb->heartbeat_cb)
                 hb->heartbeat_cb(session_id, &hb->cancel_io, hb->callback_userdata);
-            elapsed_ms = 0;
         }
 
-        if (progress_ms >= 15000 || SDL_AtomicCAS(&hb->force_progress, 1, 0)) {
+        now = SDL_GetTicks();
+        if (now - progress_tick >= 15000u || SDL_AtomicCAS(&hb->force_progress, 1, 0)) {
+            progress_tick = now;
             int pos = SDL_AtomicGet(&hb->current_pos);
             int dur = SDL_AtomicGet(&hb->duration);
             if (hb->progress_cb && pos > 5 &&
                 hb->progress_cb(hb->item_id, pos, dur, &hb->cancel_io,
                                 hb->callback_userdata) == 0)
                 last_saved_pos = pos;
-            progress_ms = 0;
         }
     }
     int final_pos = SDL_AtomicGet(&hb->current_pos);
@@ -4627,6 +4641,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     hb.progress_cb = request->progress_cb;
     hb.started_cb = request->started_cb;
     hb.started_source = request->playback;
+    hb.started_generation = 1;
     hb.heartbeat_cb = request->heartbeat_cb;
     hb.stop_cb = request->stop_cb;
     hb.callback_userdata = request->userdata;
@@ -4665,10 +4680,11 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
     diag_player_begin(active.item_id, active.session_id, active.source_id,
                       active.container, delivery);
     diag_player_event("player", "run-begin", "start=%.1f", current_pos);
-    diag_player_event("source", "resolved", "provider=%s section=%s season=%d episode=%d next=%d",
+    diag_player_event("source", "resolved", "provider=%s section=%s season=%d episode=%d next=%d sequential=%d restart=%d",
                       active.source_provider[0] ? active.source_provider : "unspecified",
                       !strcmp(active.section, "anime") ? "anime" : "other",
-                      active.season, active.episode, request->has_next);
+                      active.season, active.episode, request->has_next,
+                      active.sequential_stream,active.restart_seek);
 
     while (1) {
         SDL_AtomicSet(&hb.pipeline_ready, 0);
@@ -4734,7 +4750,7 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             // Drop idle sockets and signed metadata only now, never in hook.
             nplay_curl_avio_pool_clear();
             diag_player_event("lifecycle", "resume", "pos=%.2f paused=%d", current_pos, pause_intent);
-            if (active.sequential_stream || !request->renew_cb) {
+            if ((active.sequential_stream && !active.restart_seek) || !request->renew_cb) {
                 player_error_message("Esta fonte nao permite retomada automatica. Seu ponto foi preservado.");
                 result->reason = EXIT_REASON_ERROR;
                 result->final_state = PLAYER_ERROR;
@@ -4901,7 +4917,15 @@ int player_run(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequest *request, Pla
             // A new admission may select another native source. A manual index
             // belongs to the old source; preserve language, not that raw index.
             if (renewed.source_id != active.source_id) last_audio_priority = 1;
+            int changed_request = renewed.request_id != active.request_id ||
+                                  strcmp(renewed.hot_session_id,active.hot_session_id);
             active = renewed;
+            if (changed_request) {
+                SDL_AtomicLock(&hb.started_lock);
+                hb.started_source=active;
+                hb.started_generation++;
+                SDL_AtomicUnlock(&hb.started_lock);
+            }
             SDL_AtomicSet(&hb.session_id, active.session_id);
             attempt_start = current_pos;
             retry_count++;

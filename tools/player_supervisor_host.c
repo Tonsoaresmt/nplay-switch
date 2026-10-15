@@ -9,6 +9,8 @@ typedef int SDL_Renderer;
 typedef int SDL_Joystick;
 typedef int SDL_Thread;
 typedef struct { int value; } SDL_atomic_t;
+static void SDL_AtomicLock(int *v) { assert(!*v); *v=1; }
+static void SDL_AtomicUnlock(int *v) { assert(*v); *v=0; }
 typedef struct { int type; struct { int button; } jbutton; struct { float x,y; } tfinger; } SDL_Event;
 #define SDL_QUIT 1
 #define SDL_JOYBUTTONDOWN 2
@@ -169,6 +171,13 @@ int main(void) {
     steps[0]=(Step){3000,3002,PLAYER_RESTART_RESUME,1,0};
     assert(player_run(NULL,NULL,&r,&out)==-5&&out.position==3002&&!renew_calls);
     r.playback.sequential_stream=0;
+    setup();count=2;r.playback.sequential_stream=1;r.playback.restart_seek=1;scripted_pause=1;
+    steps[0]=(Step){3000,3002,PLAYER_RESTART_RESUME,1,0};steps[1]=(Step){3002,3003,0,1,1};
+    assert(player_run(NULL,NULL,&r,&out)==0&&out.position==3003&&renew_calls==1&&pause_seen[1]);
+    setup();count=2;
+    steps[0]=(Step){3000,1800,PLAYER_RESTART_SEEK,1,0};steps[1]=(Step){1800,1801,0,1,1};
+    assert(player_run(NULL,NULL,&r,&out)==0&&out.position==1801&&!renew_calls);
+    r.playback.sequential_stream=r.playback.restart_seek=0;
     assert(lifecycle_begins==lifecycle_ends&&!lifecycle_pending);
     puts("PASS HOME/sleep supervisor: position/pause/tracks retained, readmission, no fallback, terminal denial, sequential safe exit, hook teardown.");
     puts("PLAYER SUPERVISOR OK: actual player_run, seek/renew failure preserves position, pause recovery, explicit zero, cancel");

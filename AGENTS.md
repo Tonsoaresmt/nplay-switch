@@ -1,5 +1,36 @@
 # Continuidade para agentes
 
+## Player TorBox/R2/direto — 15/10/2026, candidato LOCAL .55
+
+- Base5ff7570, checkout/branch autorizados inalterados. Usuario relatou
+  VisionQuest, sem T/E/trace/versao; nao declarar causa fisica comprovada.
+- Restart TorBox explicito validado: novo PlaybackSource.restart_seek,
+  API plano8s/16KiB em worker, URLHTTPS/SID/path exatos, t preserva query,
+  base/duracao plausiveis. Sem fallback de plano invalido para zero.
+  Main permite retomada e callback para restart; controles reabrem com
+  preroll, legendas from=base + lookup offset; R2 nao volta a seek interno.
+- Reconnect_streamed0 para sequenciais; HTTP somente4xx transitorios/5xx
+  allowlisted, starvation gerenciada tambem em MP4 com renovacao. TLS/bytes
+  intactos. Fontes hot legadas sem contrato debrid continuam sem salto.
+- Heartbeat usa ticks reais, nao soma100ms ignorando HTTP. Started tem
+  mailbox lock curto/geracao e copia propria, reconfirma pedido novo apos
+  quadro; nao ha rede sob lock. Teste .54 falha na cadencia como esperado.
+- Build ARM64 completo-Werror + incremental FINAL e bateria completa FINAL
+  SEM SkipMediaFixtures passaram, incluindo guard de HLS, fixtures/simbolos.
+  Teste adicional100trocas pthread tambem passou. Sem rebuild depois da prova.
+  NRO.55LOCAL24291151B, SHA256
+  2d8da20f5c66cfd7b5aec1bc688bce99ef8d119073492b177b1481684ea54096.
+  Sidecar atualizado; nao usar intermediario b887640. Nao commitar binarios.
+  Novos testes obrigatorios: playback_restart e player_delivery_fixture;
+  supervisor/started/subtitle_usage ampliados. CLI real8.1.1, SDK7.1;
+  WSL/hostintegrado indisponiveis, sem Switch/GPU/VisionQuest/producao.
+- docs/PLAYER_DELIVERY_HARDENING_0_12_55.md detalha contrato/evidencias/
+  limites e roteiro. Backend/sessoes reais inalterados. Nenhuma release.55;
+  autorizacao anterior era.54. NRO e sidecar nunca commitar.
+- Revisao final tambem remove fallback HLS interno: sem playlist posicionavel,
+  preserva ponto e falha/recupera; seek_video_time rejeita HLS sem tocar FFmpeg.
+  Teste C real test_hls_seek_guard obrigatorio; MP4 conserva seek nativo.
+
 ## Publicacao .54 — CONFIRMADA em 14/10/2026
 
 - Usuario pediu explicitamente subir ao GitHub para aparecer no atualizador.

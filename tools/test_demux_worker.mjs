@@ -9,7 +9,7 @@ const normalized = player.replace(/\r\n/g, '\n');
 const first = normalized.indexOf('typedef struct {\n    AVPacket *packet;');
 const end = normalized.indexOf('// A thread de UI permanece viva', first);
 const stopBegin = normalized.indexOf('static void demux_worker_stop(');
-const stopEnd = normalized.indexOf('static int player_play_internal', stopBegin);
+const stopEnd = normalized.indexOf('static int player_prepare_restart', stopBegin);
 if (first < 0 || end < first || stopBegin < 0 || stopEnd < stopBegin) throw new Error('Worker boundaries changed: review harness');
 mkdirSync('build', { recursive: true });
 writeFileSync('build/demux_worker_test.inc', normalized.slice(first, end) + normalized.slice(stopBegin, stopEnd));

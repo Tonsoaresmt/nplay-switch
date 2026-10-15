@@ -2,6 +2,7 @@
 #include "net.h"
 #include "diag.h"
 #include "hot_subtitles.h"
+#include "playback_restart.h"
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -195,6 +196,10 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
         out->source.sequential_stream = !cJSON_IsTrue(seekable);
     else if ((!name || !name[0]) && strstr(out->source.play_url, "/api/media/debrid/"))
         out->source.sequential_stream = 1; // Legacy ambiguous response: fail conservatively.
+    if (seek_mode && !strcmp(seek_mode,"restart")) {
+        out->source.restart_seek=1;
+        if (!playback_restart_supported(&out->source,BASE)) out->source.restart_seek=0;
+    }
     if (out->status == HOT_STREAMING && !out->source.play_url[0]) {
         snprintf(g_api_last_error, sizeof(g_api_last_error), "Preparo sem URL de video");
         cJSON_Delete(json); membuf_free(&resp);
@@ -221,8 +226,15 @@ void api_hot_inherit_context(PlaybackSource *hot, const PlaybackSource *catalog)
 
 int api_hot_refresh_range_cancel(const PlaybackSource *source, SDL_atomic_t *cancel,
                                  PlaybackSource *out) {
+    if (!source || source->sequential_stream) return -1;
+    return api_hot_refresh_cancel(source,cancel,out);
+}
+
+int api_hot_refresh_cancel(const PlaybackSource *source, SDL_atomic_t *cancel,
+                           PlaybackSource *out) {
     if (!source || !out || source->item_id <= 0 || source->source_id <= 0 ||
-        source->sequential_stream || strcmp(source->delivery_str, "debrid")) return -1;
+        (source->sequential_stream && !playback_restart_supported(source,BASE)) ||
+        strcmp(source->delivery_str, "debrid")) return -1;
     HotStreamResult result = {0};
     if (api_hot_stream_attempt(source->item_id, source->source_id, cancel, &result)) return -1;
     if (result.status == HOT_R2_READY) {
@@ -232,11 +244,45 @@ int api_hot_refresh_range_cancel(const PlaybackSource *source, SDL_atomic_t *can
         *out = renewed;
         return 0;
     }
-    if (result.status != HOT_STREAMING || result.source.sequential_stream ||
+    if (result.status != HOT_STREAMING ||
+        (result.source.sequential_stream && !playback_restart_supported(&result.source,BASE)) ||
         !result.source.play_url[0] || result.source.source_id != source->source_id) return -1;
     api_hot_inherit_context(&result.source, source);
     *out = result.source;
     return 0;
+}
+
+int api_prepare_restart_cancel(const PlaybackSource *source,double target,
+                               SDL_atomic_t *cancel,PlaybackSource *out) {
+    g_api_last_error[0]=0;g_api_last_access_expired=0;g_api_last_http_code=0;
+    if (!source || !out || (cancel && SDL_AtomicGet(cancel))) return -1;
+    char probe[1024],video[sizeof(source->play_url)];
+    if (!playback_restart_urls(source,BASE,target,probe,sizeof(probe),video,sizeof(video))) {
+        snprintf(g_api_last_error,sizeof(g_api_last_error),"Esta fonte nao permite esse salto");return -3;
+    }
+    PlaybackSource prepared=*source;
+    prepared.restart_base=prepared.restart_duration=0;
+    if (target>0) {
+        struct membuf body={.limit=16384u};const char *error=NULL;
+        Uint32 started=SDL_GetTicks();
+        long code=net_request_timeout_cancel(probe,"GET",NULL,g_token[0]?g_token:NULL,
+                                             &body,&error,3L,8L,cancel);
+        diag_network_event("GET","/api/stream/hot/[session]/seek",code,SDL_GetTicks()-started,body.len);
+        cJSON *json=body.data?cJSON_Parse(body.data):NULL;
+        int ok=code==200 && playback_restart_plan(json,target,&prepared.restart_base,&prepared.restart_duration);
+        if (!ok) api_set_error(code,error,json);
+        cJSON_Delete(json);membuf_free(&body);
+        if (!ok) {
+            if (code==200) {
+                snprintf(g_api_last_error,sizeof(g_api_last_error),"Nao foi possivel confirmar o ponto do video");
+                return -3;
+            }
+            return -1;
+        }
+    }
+    if (cancel && SDL_AtomicGet(cancel)) return -1;
+    snprintf(prepared.play_url,sizeof(prepared.play_url),"%s",video);
+    *out=prepared;return 0;
 }
 
 int api_hot_playback_started_cancel(const PlaybackSource *source, SDL_atomic_t *cancel) {
