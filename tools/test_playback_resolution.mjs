@@ -29,7 +29,10 @@ const args=['-std=c11','-Wall','-Wextra','-Werror','-pthread','-ffunction-sectio
   '-Itools/host-stubs','-Iinclude','-Ibuild','tools/playback_resolution_host.c','source/api.c','source/playback_restart.c','source/hot_subtitles.c','source/cJSON.c','-lm','-o',exe];
 let r=spawnSync(process.env.HOST_CC||'gcc',args,{encoding:'utf8',windowsHide:true,timeout:30000});
 if(r.status!==0)throw Error(r.stderr||r.error?.message);
-r=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:30000});
+// MSYS nanosleep(1ms) can round to a Windows timer quantum. Measured 1000
+// transitions at ~31s (900 at 28s), so 30s killed a progressing test. Keep a
+// bounded 60s outer guard; assertions and the 1000-cycle workload are unchanged.
+r=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:60000});
 process.stdout.write(r.stdout||'');
 if(r.status!==0)throw Error(r.stderr||r.error?.message||`exit ${r.status}`);
 if(!main.includes('if (cancelled || !playback_progress_valid(pr))'))throw Error('Unknown progress can still start from zero');

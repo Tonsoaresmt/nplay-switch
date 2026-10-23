@@ -44,7 +44,8 @@ static float modal_touch_y,modal_touch_motion;
 static int timeline_seek,episodes_menu,episodes_sel,episode_count;
 static int track_menu,have_video_frame=1;
 static int seekable_stream=1;
-static double dur=1800,timeline_seek_target;
+static double dur=1800,timeline_seek_target,timeline_seek_from,cur_pos=120;
+static int quick_seek_active,seek_axis_lock;
 static int paused,timeline_seek_was_paused;
 static void SDL_PauseAudioDevice(int d,int p){(void)d;(void)p;}
 static void preview(int tx,int initial_pause){

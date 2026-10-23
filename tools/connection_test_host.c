@@ -183,7 +183,7 @@ int main(void){
  fake_ticks=UINT32_MAX-100;connection_test_run("https://nplay.test",&cancel,&phase,&progress,&report);assert(calls==9 && report.elapsed_ms==450);
  connection_test_run("http://nplay.test",&cancel,&phase,&progress,&report);assert(!report.bytes && calls==9);
  puts("PASS timing/model: finite Mbps, partial marked, median/range, wrap-safe deadline, independent service vs external diagnosis.");
- for(int section=0;section<4;section++){g_settings_section=section;int count=settings_row_count();assert(count==(section==3?5:section==1?4:3));
+ for(int section=0;section<4;section++){g_settings_section=section;int count=settings_row_count();assert(count==((section==3||section==1)?5:3));
   assert(SETTINGS_NAV[section] && SETTINGS_DETAILS[section][0]);
   for(int i=0;i<count;i++){int y=settings_row_y(section,i);assert(settings_row_at(section,count,500,y)==i);assert(settings_row_at(section,count,500,y+settings_row_height(section))==-1);assert(y+settings_row_height(section)<=620);}
  }assert(settings_row_at(3,5,500,612)==4);assert(!strcmp(SETTINGS_ROWS[3][2],"Teste de internet"));

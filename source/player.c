@@ -48,6 +48,7 @@
 #include "player_completion.h"
 #include "player_lifecycle.h"
 #include "playback_restart.h"
+#include "player_seek_input.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -67,10 +68,7 @@
 #define PWIN_H 720
 #define TRACK_MENU_AUDIO 1
 #define TRACK_MENU_SUB   2
-#define SEEK_ENTER_AXIS  24500
 #define SEEK_MOVE_AXIS   14000
-#define SEEK_RELEASE_AXIS 9000
-#define SEEK_HOLD_MS       550
 #define PLAYER_RESTART_SEEK  2
 #define PLAYER_RESTART_TRACK 3
 #define PLAYER_REQUEST_NEXT  4
@@ -2802,7 +2800,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int subtitle_packets = 0, subtitle_cues = 0;
     int audio_switch_pending = 0, subtitle_switch_pending = 0;
     Uint32 audio_switch_started = 0, subtitle_switch_started = 0;
-    int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 0;
+    int timeline_seek = 0, timeline_seek_was_paused = 0, seek_axis_lock = 1;
     int seek_arm_dir = 0;
     double timeline_seek_from = 0, timeline_seek_target = 0;
     Uint32 timeline_seek_tick = SDL_GetTicks(), seek_arm_since = 0;
@@ -2812,6 +2810,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int quick_seek_active = 0;
     double quick_seek_target = 0;
     Uint32 quick_seek_deadline = 0;
+    PlayerSeekHold seek_hold = {0};
     Uint32 first_frame_started = SDL_GetTicks();
     Uint32 first_frame_budget_ms = native_hls ? 30000u : 45000u;
     int resume_preroll = 0, resume_preroll_frames = 0;
@@ -3045,27 +3044,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 }
             }
         }
-        if (quick_seek_active && SDL_TICKS_PASSED(now_ticks, quick_seek_deadline)) {
-            quick_seek_active = 0;
-            if (!timeline_seek && !track_menu && !next_selected) {
-                // Reutiliza a confirmacao da timeline (mesmo caminho de A).
-                timeline_seek = 1;
-                timeline_seek_was_paused = paused;
-                timeline_seek_from = cur_pos;
-                timeline_seek_target = quick_seek_target;
-                timeline_seek_tick = now_ticks;
-                seek_axis_lock = 1;
-                if (adev) SDL_PauseAudioDevice(adev, 1);
-                SDL_Event commit;
-                memset(&commit, 0, sizeof(commit));
-                commit.type = SDL_JOYBUTTONDOWN;
-                commit.jbutton.button = JOY_A;
-                commit.jbutton.state = SDL_PRESSED;
-                SDL_PushEvent(&commit);
-                diag_player_event("seek", "quick-commit", "from=%.2f target=%.2f",
-                                  cur_pos, quick_seek_target);
-            }
-        }
         // Uma operacao dentro da sessao nao pode deixar o usuario eternamente
         // olhando o ultimo quadro. Se a nova geracao nao produz video em 20 s,
         // use a reabertura completa ja existente como fallback, preservando a
@@ -3135,11 +3113,39 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         hud_base.next_card_progress = next_ui.progress;
         hud_base.focus = next_selected ? PUI_FOCUS_NEXT_CARD : PUI_FOCUS_PLAY;
 
-        while (SDL_PollEvent(&e)) {
+        for (;;) {
+            if (!running) break;
+            int local_seek_button = -1;
+            if (!SDL_PollEvent(&e)) {
+                // Drain real input first: B cancels and opening a modal cannot
+                // turn a queued synthetic A into episode/track confirmation.
+                unsigned held = 0;
+                if (joy) for (int b = JOY_L; b <= JOY_ZR; b++)
+                    if (SDL_JoystickGetButton(joy, b)) held |= 1u << (b - JOY_L);
+                int allowed = running && have_video_frame && seekable_stream &&
+                              !track_menu && !episodes_menu && !next_selected;
+                if (!allowed || timeline_seek) quick_seek_active = 0;
+                local_seek_button = player_seek_hold_tick(&seek_hold, held, SDL_GetTicks(), allowed);
+                if (local_seek_button < 0 && !held && quick_seek_active && allowed && !timeline_seek &&
+                    SDL_TICKS_PASSED(SDL_GetTicks(), quick_seek_deadline)) {
+                    quick_seek_active = 0;
+                    timeline_seek = 1;
+                    timeline_seek_was_paused = paused;
+                    timeline_seek_from = cur_pos;
+                    timeline_seek_target = quick_seek_target;
+                    timeline_seek_tick = SDL_GetTicks();
+                    seek_axis_lock = 1;
+                    if (adev) SDL_PauseAudioDevice(adev, 1);
+                    local_seek_button = JOY_A;
+                    diag_player_event("seek", "quick-commit", "from=%.2f target=%.2f", cur_pos, quick_seek_target);
+                }
+                if (local_seek_button < 0) break;
+                memset(&e, 0, sizeof(e)); // Local action; never enters SDL's global queue.
+            }
             // O painel e uma superficie direta no modo portatil: tocar numa
             // faixa deve executar a mesma operacao transacional do botao A,
             // sem fabricar eventos de Joy-Con nem manter um cursor invisivel.
-            int touch_track_button = -1;
+            int touch_track_button = local_seek_button;
             if ((timeline_seek || episodes_menu) &&
                 (e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION || e.type == SDL_FINGERUP)) {
                 int tx = (int)(e.tfinger.x * PWIN_W), ty = (int)(e.tfinger.y * PWIN_H);
@@ -3233,6 +3239,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN || touch_track_button >= 0) {
+                if (touch_track_button < 0 && joy &&
+                    e.jbutton.which != SDL_JoystickInstanceID(joy)) continue;
                 int b = touch_track_button >= 0
                     ? touch_track_button : e.jbutton.button;
                 // Antes do primeiro quadro, so cancelar faz sentido. Pausa,
@@ -3242,10 +3250,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 hud_until = SDL_GetTicks() + 4000;
                 if (quick_seek_active && b == JOY_B) {
                     quick_seek_active = 0;
+                    seek_hold.blocked = 1;
                     snprintf(notice, sizeof(notice), "Salto cancelado");
                     notice_until = SDL_GetTicks() + 1200;
                     continue;
                 }
+                if (quick_seek_active && !player_seek_button(b)) quick_seek_active = 0;
+                if (!player_seek_button(b) && local_seek_button < 0) seek_hold.blocked = 1;
                 if (next_selected) {
                     if (b == JOY_A) {
                         next_requested = 1;
@@ -3329,9 +3340,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                b == JOY_L || b == JOY_R || b == JOY_ZL || b == JOY_ZR) {
                         double step = (b == JOY_ZL || b == JOY_ZR) ? 60.0 : 10.0;
                         int forward = b == JOY_DRIGHT || b == JOY_R || b == JOY_ZR;
-                        timeline_seek_target += forward ? step : -step;
-                        if (timeline_seek_target < 0) timeline_seek_target = 0;
-                        if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
+                        timeline_seek_target = player_seek_target(timeline_seek_target, dur, forward ? step : -step);
                     }
                     continue;
                 }
@@ -3716,16 +3725,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 }
                 else if (!seekable_stream &&
                          (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL)) {
-                    snprintf(notice, sizeof(notice), "Busca disponivel apos o preparo completo");
+                    snprintf(notice, sizeof(notice), "Esta fonte ainda nao permite saltos; tente a versao preparada");
                     notice_until = SDL_GetTicks() + 2200;
                 }
                 else if (b == JOY_R || b == JOY_L || b == JOY_ZR || b == JOY_ZL) {
                     double step = (b == JOY_ZR || b == JOY_ZL) ? 60 : 10;
                     int forward = (b == JOY_R || b == JOY_ZR);
                     double base = quick_seek_active ? quick_seek_target : cur_pos;
-                    double t = base + (forward ? step : -step);
-                    if (t < 0) t = 0;
-                    if (dur > 0 && t > dur - 1) t = dur - 1;
+                    double t = player_seek_target(base, dur, forward ? step : -step);
                     // Nao dispare uma reabertura por toque: os toques somam e um
                     // unico salto acontece 700 ms depois do ultimo, com o video
                     // tocando ate la (como as setas do player do site/TV).
@@ -3735,7 +3742,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     double delta = t - cur_pos;
                     char when[24];
                     pui_format_time(t, when, sizeof(when));
-                    snprintf(notice, sizeof(notice), "%s%.0f s   ->   %s   |   B cancela",
+                    snprintf(notice, sizeof(notice), "%s%.0f s -> %s | Solte para ir | B cancela",
                              delta >= 0 ? "+" : "-", delta >= 0 ? delta : -delta, when);
                     notice_until = SDL_GetTicks() + 1500;
                     diag_player_event("seek", "quick-step", "target=%.2f", t);
@@ -3789,7 +3796,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     // A drag previews one target; only the visible Confirm
                     // action performs the seek. Releasing cannot reopen video.
                     timeline_seek = 1;
+                    quick_seek_active = 0;
+                    seek_axis_lock = 1;
                     timeline_seek_was_paused = paused;
+                    timeline_seek_from = cur_pos;
                     timeline_seek_target = dur * (tx - 48) / 1080.0;
                     if (timeline_seek_target > dur - 1) timeline_seek_target = dur - 1;
                     paused = 1;
@@ -3878,37 +3888,23 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 notice_until = SDL_GetTicks() + 3500;
             }
         }
-        int stick_x = joy ? SDL_JoystickGetAxis(joy, 0) : 0;
+        int stick_x = req->right_stick_seek && joy && SDL_JoystickNumAxes(joy) >= 3
+            ? SDL_JoystickGetAxis(joy, 2) : 0;
         int stick_abs = stick_x < 0 ? -stick_x : stick_x;
         Uint32 seek_now = SDL_GetTicks();
-        if (stick_abs < SEEK_RELEASE_AXIS) {
-            seek_axis_lock = 0;
-            seek_arm_dir = 0;
-            seek_arm_since = 0;
-        }
-        if (seekable_stream && !track_menu && dur > 1 && !timeline_seek && !seek_axis_lock) {
-            if (stick_abs >= SEEK_ENTER_AXIS) {
-                int direction = stick_x > 0 ? 1 : -1;
-                if (seek_arm_dir != direction) {
-                    seek_arm_dir = direction;
-                    seek_arm_since = seek_now;
-                } else if (seek_now - seek_arm_since >= SEEK_HOLD_MS) {
-                    timeline_seek = 1;
-                    timeline_seek_was_paused = paused;
-                    timeline_seek_from = cur_pos;
-                    timeline_seek_target = cur_pos;
-                    timeline_seek_tick = seek_now;
-                    seek_arm_dir = 0; seek_arm_since = 0;
-                    if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
-                } else if (seek_now - seek_arm_since >= 280) {
-                    snprintf(notice, sizeof(notice), "Continue segurando para abrir a timeline");
-                    notice_until = seek_now + 300;
-                    hud_until = seek_now + 1200;
-                }
-            } else {
-                seek_arm_dir = 0;
-                seek_arm_since = 0;
-            }
+        int stick_allowed = seekable_stream && have_video_frame && !track_menu &&
+                            !episodes_menu && !next_selected && dur > 1;
+        int stick_armed = player_seek_stick_arm(req->right_stick_seek, stick_allowed,
+                            stick_x, seek_now, &seek_axis_lock, &seek_arm_dir, &seek_arm_since);
+        if (!timeline_seek && stick_armed) {
+            timeline_seek = 1;
+            quick_seek_active = 0;
+            timeline_seek_was_paused = paused;
+            timeline_seek_from = cur_pos;
+            timeline_seek_target = cur_pos;
+            timeline_seek_tick = seek_now;
+            seek_arm_dir = 0; seek_arm_since = 0;
+            if (adev && !paused) SDL_PauseAudioDevice(adev, 1);
         }
         if (timeline_seek) {
             buffering_since = 0;
@@ -3916,7 +3912,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             double elapsed = (seek_now - timeline_seek_tick) / 1000.0;
             if (elapsed > 0.08) elapsed = 0.08;
             timeline_seek_tick = seek_now;
-            if (stick_abs >= SEEK_MOVE_AXIS) {
+            if (req->right_stick_seek && !seek_axis_lock && stick_abs >= SEEK_MOVE_AXIS) {
                 double amount = (stick_abs - SEEK_MOVE_AXIS) / (32767.0 - SEEK_MOVE_AXIS);
                 if (amount > 1.0) amount = 1.0;
                 double speed = dur * (0.006 + amount * amount * 0.039);

@@ -238,6 +238,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Teste de internet, memoria, TLS ou cancelament
 if ($LASTEXITCODE -ne 0) { throw 'Teste de internet com HTTPS/libcurl reais falhou.' }
 & node tools/test_player_navigation.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
+& node tools/test_seek_controls.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Controles de busca, analogico opt-in ou preferencia local falharam.' }
 & node tools/test_app_navigation.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Navegacao geral, textos ou cache de capas falhou.' }
 & node tools/test_tls_ca.mjs

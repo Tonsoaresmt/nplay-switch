@@ -494,6 +494,19 @@ void store_save_pref_sub(const char *lang) {
     fclose(f);
 }
 
+int store_load_seek_stick(void) {
+    if (g_media_profile_id <= 0) return 0;
+    char path[128];
+    snprintf(path, sizeof(path), DIR_APP "/seek_stick_%d.txt", g_media_profile_id);
+    return read_positive_id(path) == 2;
+}
+int store_save_seek_stick(int enabled) {
+    if (g_media_profile_id <= 0) return 0;
+    char path[128];
+    snprintf(path, sizeof(path), DIR_APP "/seek_stick_%d.txt", g_media_profile_id);
+    return write_positive_id(path, enabled ? 2 : 1);
+}
+
 int store_load_player_volume(int *volume) {
     int value;
     FILE *f;

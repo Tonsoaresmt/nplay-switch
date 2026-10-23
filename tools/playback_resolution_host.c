@@ -121,6 +121,7 @@ static int progress_guard(cJSON**prefetched_progress,int progress_fetched,double
 }
 static void reset(void){assert(!active && created==joined && !allocations);g_running=1;g_screen=SC_SERIES;chosen=in_retry=0;source_calls=fail_source=fail_progress=cancel_source=fail_thread=expired=release_events=input_type=0;draws=0;choice=JOY_B;progress_fixture="{\"progress\":null}";}
 int main(void){
+ setvbuf(stdout,NULL,_IONBF,0);
  renderer=pthread_self();cJSON_Hooks hooks={json_alloc,json_free};cJSON_InitHooks(&hooks);
  reset();fail_progress=1;ResolvePoll p={.item_id=42};
  SDL_Thread*pt=SDL_CreateThread(resolve_progress_thread,"resolve-progress",&p);SDL_WaitThread(pt,NULL);
@@ -155,7 +156,9 @@ int main(void){
  assert(progress_guard(&progress,1,&position,&done));assert(position==600 && done==1 && guard_queries==queries && !progress);
  puts("PASS: actual playback-entry guard blocks unavailable/invalid progress, closes allocated session; valid checkpoints preserved.");
  // Many alternating next-opening failures/successes with real concurrent workers.
- for(int i=0;i<1000;i++){reset();fail_source=i%2;int rc=resolve_open_with_animation(42,"Anime",&out,&progress,&fetched);assert(rc==(i%2?-2:0));cJSON_Delete(progress);}
+ Uint32 transitions_started=SDL_GetTicks();
+ for(int i=0;i<1000;i++){reset();fail_source=i%2;int rc=resolve_open_with_animation(42,"Anime",&out,&progress,&fetched);assert(rc==(i%2?-2:0));cJSON_Delete(progress);
+  if((i+1)%250==0)printf("Resolution transitions %d/1000, elapsed=%u ms\n",i+1,SDL_GetTicks()-transitions_started);}
  reset();struct membuf body={.limit=64u*1024u};char chunk[4096]={0};
  for(int i=0;i<16;i++)assert(write_cb(chunk,1,sizeof(chunk),&body)==sizeof(chunk));
  assert(body.len==body.limit && body.cap==body.limit+1 && write_cb(chunk,1,1,&body)==0);membuf_free(&body);

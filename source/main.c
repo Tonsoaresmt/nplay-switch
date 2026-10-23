@@ -498,6 +498,7 @@ static unsigned g_prefs_revision = 0, g_settings_prefs_revision = 0;
 static int g_settings_refresh_pending = 0;
 static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
+static int g_pref_seek_stick = 0; // local profile, disabled by default
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
 // Lista do painel Episodios do player (montada por play_episode_sequence).
 static PlayerEpisode *g_play_episodes = NULL;
@@ -1111,6 +1112,7 @@ static int play_with_progress_details(int itemId, const char *title, const char 
     }
     
     PlayerRequest req = {0};
+    req.right_stick_seek = g_pref_seek_stick;
     req.item_id = itemId;
     req.session_id = 0; // Local ou arquivo direto
     req.title = stable_title;
@@ -1521,6 +1523,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
         }
 
         PlayerRequest req = {0};
+        req.right_stick_seek = g_pref_seek_stick;
         req.playback = src;
         req.item_id = itemId;
         req.session_id = src.session_id;
@@ -1815,6 +1818,7 @@ static void pump_catalog_fetch(void) {
             // So carrega dados pessoais depois de confirmar o ID salvo.
             g_profile_required = 0;
             store_select_profile(g_profile_id, g_user);
+            g_pref_seek_stick = store_load_seek_stick();
             load_favs(); g_screen = SC_MAIN; enter_tab(0);
         } else g_screen = SC_PROFILES;
         // A foto e parte principal do seletor. Nessa tela, consulte o catalogo
@@ -4863,6 +4867,13 @@ static void draw_player_diagnostics(void) {
                    252, 776, 614, C_TEXT, 0);
 }
 static void save_selected_preference(int direction) {
+    if (g_prefs_sel == 4) {
+        int enabled = !g_pref_seek_stick;
+        if (!store_save_seek_stick(enabled)) { toast("Nao foi possivel salvar na microSD"); return; }
+        g_pref_seek_stick = enabled;
+        toast(enabled ? "Analogico direito: segure, escolha o tempo e confirme com A" : "Busca pelo analogico desativada");
+        return; // Local only: never send an unsupported preference to the API.
+    }
     // An older account GET must not overwrite a newly saved audio preference.
     g_prefs_revision++;
     int old_hide = g_pref_hide_adult, old_auto = g_pref_autoplay, old_motion = g_pref_reduce_motion, old_audio = g_pref_audio;
@@ -4919,13 +4930,13 @@ static void format_subscription_period(cJSON *account, cJSON *subscription, char
 static const char *const SETTINGS_NAV[] = { "Meu perfil", "Reproducao", "Conta", "Aplicativo" };
 static const char *const SETTINGS_ROWS[4][6] = {
     { "Editar meu cartao", "Trocar perfil", "Adicionar perfil", NULL },
-    { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido", NULL },
+    { "Ocultar conteudo +18", "Proximo episodio automatico", "Reduzir animacoes", "Audio preferido", "Analogico direito: minutagem", NULL },
     { "Alterar senha", "E-mail de recuperacao", "Sair da conta", NULL },
     { "Buscar atualizacao", "Diagnostico do player", "Teste de internet", "Reiniciar Nplay", "Fechar Nplay", NULL }
 };
 static const char *const SETTINGS_DETAILS[4][6] = {
     { "Nome, avatar, cor e acesso infantil", "Escolha quem esta assistindo", "Crie outro espaco para favoritos e progresso", NULL },
-    { "Remove titulos adultos da descoberta", "Continua a serie apos o fim do episodio", "Para a rotacao automatica dos destaques", "Prioridade quando ha varias versoes", NULL },
+    { "Remove titulos adultos da descoberta", "Continua a serie apos o fim do episodio", "Para a rotacao automatica dos destaques", "Prioridade quando ha varias versoes", "Neste perfil/console: segure; A confirma, B cancela", NULL },
     { "Proteja o acesso com uma nova senha", "Para recuperar a conta se esquecer a senha", "Encerra o acesso neste Switch", NULL },
     { "Instale a versao mais recente pelo aplicativo", "Dados locais para investigar a reproducao", "Download e respostas: compare outro comodo", "Reabre o aplicativo", "Volta ao menu HOME", NULL }
 };
@@ -5144,12 +5155,12 @@ static void draw_settings(void) {
         if (i == g_settings_section && !g_settings_focus) ui_focus(53, y - 3, 198, 66);
         text_draw(gRen, SETTINGS_NAV[i], 72, y + 16, i == g_settings_section ? C_TEXT : C_MUT, 0);
     }
-    ui_panel(290, 202, 950, g_settings_section == 3 ? 418 : 406, C_ACC);
+    ui_panel(290, 202, 950, (g_settings_section == 1 || g_settings_section == 3) ? 418 : 406, C_ACC);
     const char *heading = g_settings_section == 0 ? "Seu perfil" : g_settings_section == 1 ? "Conteudo e reproducao" :
                           g_settings_section == 2 ? "Seguranca e acesso" : "Sobre o aplicativo";
     text_draw(gRen, heading, 320, 219, C_TEXT, 1);
     const char *intro = g_settings_section == 0 ? "Um perfil para cada pessoa, com historico e lista proprios." :
-                        g_settings_section == 1 ? "Escolhas sincronizadas com a sua conta Nplay." :
+                        g_settings_section == 1 ? "Preferencias da conta e controles locais deste perfil." :
                         g_settings_section == 2 ? "Cuide de sua conta e do acesso neste aparelho." :
                         "Atualizacao, suporte e controles do Nplay no Switch.";
     text_draw(gRen, intro, 320, 256, C_MUT, 0);
@@ -5183,11 +5194,12 @@ static void draw_settings(void) {
             static const char *audio[] = { "Dublado", "Legendado", "Tanto faz" };
             const char *value = i == 0 ? (g_pref_hide_adult ? "Ligado" : "Desligado") :
                                 i == 1 ? (g_pref_autoplay ? "Ligado" : "Desligado") :
-                                i == 2 ? (g_pref_reduce_motion ? "Ligado" : "Desligado") : audio[g_pref_audio];
+                                i == 2 ? (g_pref_reduce_motion ? "Ligado" : "Desligado") :
+                                i == 3 ? audio[g_pref_audio] : (g_pref_seek_stick ? "Ligado" : "Desligado");
             text_right(value, 1188, y + 14, C_ACC2, 0);
         }
     }
-    if (g_status[0]) text_clip(g_status, 48, g_settings_section == 3 ? 637 : 622, C_ACC2, 0, 1160);
+    if (g_status[0]) text_clip(g_status, 48, (g_settings_section == 1 || g_settings_section == 3) ? 637 : 622, C_ACC2, 0, 1160);
     ui_footer("Esquerda/direita Secao    Cima/baixo Navegar    A Confirmar    X Diagnostico    B Voltar");
     draw_player_diagnostics();
     draw_profile_editor();
@@ -5351,6 +5363,7 @@ static void input_profiles(int b) {
             g_profile_required = 0; g_profile_id = selected;
             net_set_profile_id(selected);
             store_select_profile(selected, g_user);
+            g_pref_seek_stick = store_load_seek_stick();
             load_favs(); g_screen = SC_MAIN; enter_tab(0);
         } else {
             // Finaliza as requisicoes do perfil antigo no encerramento. O novo

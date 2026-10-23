@@ -1,5 +1,33 @@
 # Continuidade para agentes
 
+## Controles de busca — 23/10/2026, candidata LOCAL .56
+
+- Base a4e55e9 (.55 local), checkout/branch autorizados inalterados. Usuario
+  pediu corrigir L/R/ZL/ZR e analogico DIREITO opcional OFF por padrao.
+- Botoes agora repetem450/150ms, acumulam10/60s, so aplicam apos soltar e
+  debounce700ms; B cancela, outra acao/modal cancela pendente. Sem SDL_PushEvent
+  para A; input real primeiro, exclusao de episodios/faixas/next e joystick
+  alheio. Touch captura origem atual. Arquitetura/limites/TLS intactos.
+- Configuracoes/Reproducao tem5linhas, geometria comum com touch. Preferencia
+  local por perfil seek_stick_ID.txt (1OFF/2ON, gravacao transacional existente),
+  defaultsOFF/malformadoOFF, sem novo campo backend. Req captura em2entradas.
+  Eixo direito2 confirmado no driver devkitPro SDL2.28; SDK local2.28.5.
+  Neutralizacao/550ms/Aconfirma/Bcancela; esquerdo nao abre mais busca.
+- Inclui .55 TorBox restart/R2/Range. Hot sequencial sem contrato nao ganha
+  seek por palpite. Relato de clientes sem titulo/trace nao tem causa unica
+  fisica comprovada. API latest publica confirmou .54 e remoto5ff7570.
+- Build completo ARM64-Werror + incremental final e validador COMPLETO sem
+  SkipMediaFixtures passaram. Teste novo obrigatorio test_seek_controls.mjs
+  extrai dispatcher/passos/cancel/pref/store C reais; SDL/HTTP/GPU simulados.
+  Harness antigo1000resolucoes estourava30s: instrumentado900em28s; concluido
+  em31.011s apos tetoexterno60s (assertions/carga/timeouts do app preservados).
+- FINAL .56 24291151B, SHA256
+  79e076184974431d3a4e765205809d7174f28551ee9698efe450314acce2d4d9.
+  Sem app/rebuild depois da bateria; sidecar local atualizado; nunca commitar
+  NRO/sidecar. docs/SEEK_CONTROLS_0_12_56.md e RELEASE_0_12_56.md detalham.
+- Sem push/release autorizado nesta rodada. Nenhum Switch/NVTEGRA, sessao
+  TorBox real, producao/backend ou reprocessamento. Validacao fisica pendente.
+
 ## Player TorBox/R2/direto — 15/10/2026, candidato LOCAL .55
 
 - Base5ff7570, checkout/branch autorizados inalterados. Usuario relatou

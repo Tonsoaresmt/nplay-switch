@@ -20,6 +20,10 @@ void store_save_pref_audio(const char *lang);
 int  store_load_pref_sub(char *out, size_t cap);
 void store_save_pref_sub(const char *lang);
 
+// Local to the selected profile on this Switch. Missing/invalid => disabled.
+int store_load_seek_stick(void);
+int store_save_seek_stick(int enabled);
+
 int  store_load_player_volume(int *volume);
 void store_save_player_volume(int volume);
 void store_save_player_stats(int width, int height, int decoded_frames,
