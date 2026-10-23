@@ -9,7 +9,10 @@ static inline double player_seek_target(double base, double duration, double del
     if (!isfinite(base) || base < 0) base = 0;
     double target = base + delta;
     if (!isfinite(target) || target < 0) target = 0;
-    if (isfinite(duration) && duration > 1 && target > duration - 1) target = duration - 1;
+    if (isfinite(duration) && duration > 0) {
+        double last = duration > 1 ? duration - 1 : 0;
+        if (target > last) target = last;
+    }
     return target;
 }
 // One repeat per poll, never catch up after a long stall. Opposing buttons do

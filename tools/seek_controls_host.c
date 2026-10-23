@@ -55,6 +55,29 @@ static void reset_poll(void){
  track_menu=episodes_menu=next_selected=timeline_seek=quick_seek_active=paused=audio_paused=0;
  quick_seek_deadline=0;
 }
+static uint32_t random_state=0x4e504c59;
+static uint32_t next_random(void){random_state^=random_state<<13;random_state^=random_state>>17;random_state^=random_state<<5;return random_state;}
+static void scenario_matrix(void){
+ const double lengths[]={0,0.5,1,60,1440,7200};
+ unsigned actions=0,commits=0,cancels=0,modals=0;
+ for(int test=0;test<20000;test++){
+  reset_poll();dur=lengths[next_random()%6];cur_pos=dur>0?dur*(next_random()%100)/100.0:3000;
+  paused=next_random()%2;ticks=next_random();double expected=cur_pos;
+  for(int step=0;step<10;step++){
+   int b=6+(int)(next_random()%4);double delta=b==6?-10:b==7?10:b==8?-60:60;
+   expected+=delta;if(expected<0)expected=0;
+   if(dur>0&&expected>(dur>1?dur-1:0))expected=dur>1?dur-1:0;
+   press_step(b);assert(quick_seek_active&&!timeline_seek&&quick_seek_target==expected);
+   ticks+=next_random()%90;actions++;
+  }
+  int outcome=test%4;
+  if(outcome==0){cancel_or_other(JOY_B);ticks+=1000;assert(poll_action()==-1&&!timeline_seek);cancels++;}
+  else if(outcome==1){episodes_menu=1;ticks+=1000;assert(poll_action()==-1&&!quick_seek_active&&!timeline_seek);episodes_menu=0;assert(poll_action()==-1);modals++;}
+  else if(outcome==2){seekable_stream=0;ticks+=1000;assert(poll_action()==-1&&!quick_seek_active&&!timeline_seek);modals++;}
+  else {int was_paused=paused;ticks+=701;assert(poll_action()==JOY_A&&timeline_seek_target==expected&&timeline_seek_was_paused==was_paused);commits++;}
+ }
+ printf("PASS deterministic controls matrix: %u real C steps, %u commits, %u cancels, %u modal/unsupported-source cases; short/unknown/2h durations, pause and wrapping clocks.\n",actions,commits,cancels,modals);
+}
 int main(void){
  PlayerSeekHold h={0};
  assert(player_seek_hold_tick(&h,2,0,1)==-1);
@@ -70,11 +93,12 @@ int main(void){
  assert(player_seek_hold_tick(&h,0,5001,1)==-1);assert(player_seek_hold_tick(&h,2,5002,1)==-1);assert(player_seek_hold_tick(&h,2,5452,1)==7);
  assert(player_seek_target(10,100,-60)==0);assert(player_seek_target(90,100,60)==99);
  assert(player_seek_target(100,0,60)==160);assert(player_seek_target(NAN,100,10)==10);
+ assert(player_seek_target(0,0.5,60)==0&&player_seek_target(0,1,60)==0);
  double middle=0;
  for(int i=0;i<60;i++) middle=player_seek_target(middle,7200,60);
  assert(middle==3600);for(int i=0;i<30;i++)middle=player_seek_target(middle,7200,-60);assert(middle==1800);
  puts("PASS held shoulders: four buttons, bounded 450/150ms repeats, no catch-up, wrap, conflicts, release after modal; targets bounded/unknown duration.");
- for(int x=-32768;x<=32767;x+=257){int lock=1,dir=0;Uint32 since=0;assert(!player_seek_stick_arm(0,1,x,0,&lock,&dir,&since));assert(!player_seek_stick_arm(0,1,x,1000,&lock,&dir,&since));}
+ for(int x=-32768;x<=32767;x++){int lock=1,dir=0;Uint32 since=0;assert(!player_seek_stick_arm(0,1,x,0,&lock,&dir,&since));assert(!player_seek_stick_arm(0,1,x,1000,&lock,&dir,&since));}
  int lock=1,dir=0;Uint32 since=0;
  assert(!player_seek_stick_arm(1,1,32767,0,&lock,&dir,&since));
  assert(!player_seek_stick_arm(1,1,0,1,&lock,&dir,&since));assert(!lock);
@@ -118,5 +142,6 @@ int main(void){
  remove("seek_stick_101.txt");remove("seek_stick_202.txt");
  for(int i=0;i<5;i++){int y=settings_row_y(1,i);assert(settings_row_at(1,5,500,y)==i);assert(settings_row_at(1,5,500,y+52)==-1);assert(y+52<=620);}
  puts("PASS actual persistence/settings: default OFF, local branch without HTTP, profile isolation, reload, OFF, malformed data, atomic save and five touch rows fit.");
+ scenario_matrix();
  return 0;
 }

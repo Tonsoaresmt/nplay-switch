@@ -1,5 +1,33 @@
 # Continuidade para agentes
 
+## Matriz ampliada/render — 23/10/2026, candidata LOCAL .57
+
+- Base4a53f67 (.56 local), checkout/branch autorizados inalterados. Usuario
+  pediu muitos cenarios/solucoes. Sem autorizacao nova de push/release.
+- Reproduzido no bloco C antigo:1080p->360p direto envia planos/stride menores
+  para textura1080p. Nova divergencia de dimensao normaliza por SWS ao tamanho
+  reservado. Nao e prova de causa do crash de um cliente especifico.
+- NV12 recusado fica memorizado por pipeline, evita nova textura por quadro.
+  Retangulo usa SAR/dimensoes atuais; letreiros acompanham. Falha/zero linhas
+  SWS termina explicitamente. Helper de busca limita duracao conhecida<=1s.
+- Novos testes obrigatorios: test_video_upload (C real,FFmpeg/SDL simulados,
+  1152transicoes, falhas/limpeza,100quadros sem repetir tentativa NV12) e
+  test_player_scenario_matrix (CLI8.1.1+HTTP local+trimmerHLS C real,
+  55casos/6perfis/118requests,360p/480p/720p/1080p/60fps/retrato,mono/2/6canais).
+  --baseline-056 do upload e negativo, deve falhar; nunca teste verde.
+- test_seek_controls ampliado200000passos/5000confirma/5000cancel/10000modal
+  ou sem busca; eixoOFF65536valores, xorshift fixo, duracao/pausa/tickwrap.
+- Servidor que ignoraRange reproduziu CLIexit0 SEMquadros. Nao aceitar exit0
+  como video valido; guards de preroll/EOF/primeiroquadro preservados/testados.
+- Build COMPLETO ARM64-Werror e validador FINAL completo SEMSkipMediaFixtures
+  passaram. FINAL .57 24291151B SHA256
+  85ade00f99127a22600fbdfd8e629d3df426629dc4af93d996dd264779e63e23.
+  Sem app/rebuild apos prova; sidecar atualizado, nunca commitar NRO/sidecar.
+- docs/PLAYER_SCENARIO_MATRIX_0_12_57.md detalha evidencias/fontes/limites.
+  Nenhum Switch/NVTEGRA, producao, sessao50min, HDR/HEVC real ou deploy.
+  Conversao de resolucao variavel tem custo CPU a medir no hardware; resolucao
+  constante conserva caminho direto. Nao garantir1080p60 pelo teste de PC.
+
 ## Controles de busca — 23/10/2026, candidata LOCAL .56
 
 - Base a4e55e9 (.55 local), checkout/branch autorizados inalterados. Usuario

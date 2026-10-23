@@ -49,6 +49,7 @@
 #include "player_lifecycle.h"
 #include "playback_restart.h"
 #include "player_seek_input.h"
+#include "player_video_layout.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -2727,13 +2728,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     transfer = av_frame_alloc();
     if (!transfer) PLAYER_SETUP_FAIL(-4);
     Uint32 texture_format = 0;
+    int nv12_unavailable = 0; // Probe unsupported renderer once per pipeline.
 
     // retangulo com letterbox (1280x720)
-    int dw = PWIN_W, dh = PWIN_H;
-    double ar = (double)vw / vh, dar = (double)dw / dh;
-    SDL_Rect dst;
-    if (ar > dar) { dst.w = dw; dst.h = (int)(dw / ar); } else { dst.h = dh; dst.w = (int)(dh * ar); }
-    dst.x = (dw - dst.w) / 2; dst.y = (dh - dst.h) / 2;
+    SDL_Rect dst = player_video_rect(vw, vh, vctx->sample_aspect_ratio.num,
+                                    vctx->sample_aspect_ratio.den);
     // Letreiros sao posicionados em % do quadro real, nao das tarjas.
     hud_base.video_x = dst.x; hud_base.video_y = dst.y;
     hud_base.video_w = dst.w; hud_base.video_h = dst.h;
@@ -4284,8 +4283,20 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         hardware_decode = 1;
                         u = transfer;
                     }
-                    int direct_nv12 = u->format == AV_PIX_FMT_NV12;
-                    if (!direct_nv12 && u->format != AV_PIX_FMT_YUV420P) {
+                    if (u->width <= 0 || u->height <= 0) {
+                        playback_error = -4; running = 0; break;
+                    }
+                    AVRational sar = frame->sample_aspect_ratio;
+                    if (sar.num <= 0 || sar.den <= 0) sar = vctx->sample_aspect_ratio;
+                    dst = player_video_rect(u->width, u->height, sar.num, sar.den);
+                    hud_base.video_x = dst.x; hud_base.video_y = dst.y;
+                    hud_base.video_w = dst.w; hud_base.video_h = dst.h;
+                    // SDL updates the WHOLE texture. Smaller direct planes
+                    // cannot fill its original dimensions safely. Normalize
+                    // changing resolutions to the existing allocation budget.
+                    int resize_frame = u->width != vw || u->height != vh;
+                    int direct_nv12 = u->format == AV_PIX_FMT_NV12 && !resize_frame && !nv12_unavailable;
+                    if (!direct_nv12 && (u->format != AV_PIX_FMT_YUV420P || resize_frame)) {
                         sws = sws_getCachedContext(sws, u->width, u->height, u->format,
                                                    vw, vh, AV_PIX_FMT_YUV420P,
                                                    SWS_BILINEAR, NULL, NULL, NULL);
@@ -4297,8 +4308,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             if (av_frame_get_buffer(yuv, 32) < 0) { playback_error = -4; running = 0; break; }
                         }
                         if (av_frame_make_writable(yuv) < 0) { playback_error = -4; running = 0; break; }
-                        sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
-                                  0, u->height, yuv->data, yuv->linesize);
+                        if (sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
+                                      0, u->height, yuv->data, yuv->linesize) <= 0) {
+                            playback_error = -4; running = 0; break;
+                        }
                         u = yuv;
                     }
                     Uint32 wanted_format = direct_nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV;
@@ -4309,6 +4322,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         // implementam. Nesse caso preserve a reproducao pelo
                         // conversor YUV420P em vez de transformar otimizacao em erro.
                         if (!next && direct_nv12) {
+                            nv12_unavailable = 1;
                             direct_nv12 = 0;
                             sws = sws_getCachedContext(sws, u->width, u->height, u->format,
                                                        vw, vh, AV_PIX_FMT_YUV420P,
@@ -4321,8 +4335,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                 if (av_frame_get_buffer(yuv, 32) < 0) { playback_error = -4; running = 0; break; }
                             }
                             if (av_frame_make_writable(yuv) < 0) { playback_error = -4; running = 0; break; }
-                            sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
-                                      0, u->height, yuv->data, yuv->linesize);
+                            if (sws_scale(sws, (const uint8_t * const *)u->data, u->linesize,
+                                          0, u->height, yuv->data, yuv->linesize) <= 0) {
+                                playback_error = -4; running = 0; break;
+                            }
                             u = yuv;
                             wanted_format = SDL_PIXELFORMAT_IYUV;
                             next = SDL_CreateTexture(ren, wanted_format,
