@@ -1,5 +1,12 @@
 # Player: matriz ampliada e protecoes de render — candidata .57
 
+Atualizacao26/10/2026: publicada como v0.12.57/latest apos repetir com sucesso
+a bateria completa no mesmo NRO. Tag/commit `3f0bae7dc3bfb90777cca4be0f4d936940067adf`.
+API publica e download integral sem autenticacao conferidos iguais ao digest
+abaixo. A publicacao habilita o atualizador, nao conclui teste fisico:
+[Release v0.12.57](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.57).
+O relato abaixo documenta o desenvolvimento local de23/10.
+
 Base local `4a53f67` (.56). Pedido: verificar muitos cenarios e solucoes para
 deixar o player o mais funcional/estavel possivel, sem publicacao solicitada.
 Checkout permanece `switch-access-expiry`, branch `codex/switch-player-hardening`.

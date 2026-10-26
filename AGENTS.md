@@ -1,5 +1,28 @@
 # Continuidade para agentes
 
+## Publicacao .57 — CONFIRMADA em 26/10/2026
+
+- Usuario autorizou subir a atualizacao apos conferir regressoes. Foi
+  explicitado que teste local nao garante ausencia de falhas no Switch fisico.
+- Validador COMPLETO reexecutado em26/10, sem SkipMediaFixtures, passou no
+  NRO exato da rodada anterior. Nenhuma mudanca do app/rebuild nesta publicacao.
+- Remoto hardening era ancestral0atras/3afrente; envio normal/atomico da
+  branch e tag, sem force e sem substituir main. Commit build/tag:
+  3f0bae7dc3bfb90777cca4be0f4d936940067adf.
+- Release v0.12.57 publicada/latest em26/10/2026 20:50:02UTC
+  (17:50:02Brasilia), nao draft/prerelease. URL:
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.57
+- Nplay.nro24291151B, SHA256
+  85ade00f99127a22600fbdfd8e629d3df426629dc4af93d996dd264779e63e23.
+  Sidecar76B enviado. Digests/size/state conferidos ainda em draft; tag remota
+  dereferenciada igual ao commit. Target_commitish tambem fixado no mesmo SHA.
+- API latest SEM autenticacao e download publico INTEGRAL NRO/sidecar
+  conferidos iguais. Atualizador pode detectar .57; nenhuma release .55/.56
+  separada. Documentos abaixo dessas candidatas sao historicos locais.
+- Nenhum NRO/sidecar commitado. Arquivo baixado para prova fica em
+  build/public-v0.12.57.nro, ignorado. Publicacao NAO e homologacao fisica;
+  sem backend/deploy/reprocessamento. Aguardar teste no console/60+min e logs.
+
 ## Matriz ampliada/render — 23/10/2026, candidata LOCAL .57
 
 - Base4a53f67 (.56 local), checkout/branch autorizados inalterados. Usuario
