@@ -240,6 +240,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Teste de internet com HTTPS/libcurl reais falh
 if ($LASTEXITCODE -ne 0) { throw 'Contexto de abas ou touch modal falhou.' }
 & node tools/test_seek_controls.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Controles de busca, analogico opt-in ou preferencia local falharam.' }
+& node tools/test_av_resume.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Audio perdeu continuidade/floor/backpressure apos retomada.' }
 & node tools/test_video_upload.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Upload de quadros, resolucoes variaveis ou fallback NV12 falharam.' }
 & node tools/test_app_navigation.mjs
@@ -399,6 +401,8 @@ if (-not $SkipMediaFixtures -and (Get-Command ffmpeg -ErrorAction SilentlyContin
     if ($LASTEXITCODE -ne 0) { throw 'Range, restart ou classificacao HTTP real regrediram.' }
     & node tools/test_player_scenario_matrix.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Matriz de resolucoes/formatos/fontes HTTP falhou.' }
+    & node tools/test_av_pts_fixture.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Timestamps AAC reais perderam continuidade na retomada.' }
 }
 $nm = $env:TARGET_NM
 if (-not $nm) {

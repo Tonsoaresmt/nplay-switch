@@ -1,5 +1,37 @@
 # Continuidade para agentes
 
+## A/V apos Continuar/seek — 30/10/2026, candidata LOCAL .58
+
+- Basead7f3e4/publica.57, checkout/branch autorizados inalterados. RelatoTBBT,
+  sem T/E/versao/trace; nao afirmar que incidente fisico foi reproduzido.
+- BlocoC da.57 reproduziu: cappreroll0.35s descartaPCM ja decodificado;
+  em2s guarda0.36/cria buraco1.64; piso deaudio some no primeirovideo e
+  aceitaPCM2999 apos alvo3000. Baselines negativos devem falhar, nao verde.
+- Novo player_audio_timeline.h: piso por seek, corte de amostras/overlap,
+  atrasoSWR descontado, continuidade/padding, gate de audio so apos imagem.
+  Menus/pausa preservam PTSfinal dafila e nao liberam som em preroll.
+  4 seeks inplace resetam timeline/SWR, reopens reinicializam naturalmente.
+- Agendador prioriza video comPCM350ms(preroll)/1000ms(normal), SEM descartar
+  audio comprimido; EOF drena. Terminal consultadoO(1) comlockcurto. Campo
+  interno audio_ahead agora inclui reorders de video, nao so de audio.
+- PCM<=4s (~768KB), lacuna>2s ou teto retornaerro-5/recuperacao mantendo
+  checkpoint; nao prometer suporte a todo atraso legitimo. Lacunas pequenas
+  comblocozeros4KiB. Sem aumentar512slots/4MiB/12MiB demux nem relaxarTLS.
+- Novos tests obrigatorios test_av_resume: C real/helper/agendador comSDL
+  simulado,400epocas/40000blocos, floor/overlap/gap/EOF/pausa/menus/errors.
+  test_av_pts_fixture:4arquivosAAC,1087blocos comPTS decodificado/reamostrado
+  realCLI8.1.1 alimentandoC;44.1/48kHz,origem0/37,offset0/120ms,alvo2.5s.
+- Build completoARM64-Werror+incrementais e bateriaFINAL completa SEM
+  SkipMediaFixtures passaram; nenhumapp/rebuildaposprova. Primeira bateria
+  parou emcompilador de flow_guards semstderr; repeticao isolada+FINAL passaram;
+  nao foi presumida causa. docs/AV_RESUME_SYNC_0_12_58.md tem limites/fontes.
+- FINAL .58 24299343B SHA256
+  9a7b052875d6fdc5ddac96b4bdccf39b10ecc9955b13a09109fe316a320c3cab.
+  Sidecar localatualizado; nunca commitarNRO/sidecar. Sem push/release ou
+  backend nesta rodada. Autorizacaoanterior era.57. Sem Switch/NVTEGRA/TBBT
+  real; pedir T/E,versao e logs novos. OrigemHLS posicionada desconhecida,
+  lacunaslegitimas>2s e latencia real SDL continuam pendentes de verificacao.
+
 ## Publicacao .57 — CONFIRMADA em 26/10/2026
 
 - Usuario autorizou subir a atualizacao apos conferir regressoes. Foi

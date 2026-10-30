@@ -50,6 +50,7 @@
 #include "playback_restart.h"
 #include "player_seek_input.h"
 #include "player_video_layout.h"
+#include "player_audio_timeline.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -638,6 +639,38 @@ static int apply_player_seek(AVFormatContext *fmt, int video_index, int is_hls,
     *last_ac = -1;
     *last_ac_wall = now;
     return 0;
+}
+
+static int player_queue_pcm(SDL_AudioDeviceID device, const uint8_t *pcm,
+                            int samples, int rate, int channels, double pts,
+                            double position, PlayerAudioTimeline *timeline,
+                            double *clock) {
+    if (!device || !pcm || !clock || !timeline) return -2;
+    PlayerAudioPlan plan;
+    int rc = player_audio_plan(timeline, pts, samples, rate, channels, position,
+                               SDL_GetQueuedAudioSize(device), &plan);
+    if (rc <= 0) {
+        if (rc == 0) timeline->trimmed += (unsigned)samples;
+        else timeline->rejected++;
+        return rc;
+    }
+    static const uint8_t silence[4096] = {0};
+    unsigned stride = (unsigned)channels * 2u;
+    unsigned padding = (unsigned)plan.silence * stride;
+    while (padding) {
+        unsigned part = padding > sizeof(silence) ? sizeof(silence) : padding;
+        part -= part % stride;
+        if (SDL_QueueAudio(device, silence, part) < 0) return -1;
+        padding -= part;
+    }
+    if (SDL_QueueAudio(device, pcm + (size_t)plan.skip * stride,
+                       (unsigned)plan.count * stride) < 0) return -1;
+    timeline->end = plan.end; timeline->valid = 1;
+    timeline->trimmed += (unsigned)plan.skip;
+    timeline->padded += (unsigned)plan.silence;
+    timeline->blocks++;
+    *clock = timeline->end;
+    return 1;
 }
 
 static int create_audio_dec(AVFormatContext *fmt, int aidx,
@@ -1813,6 +1846,13 @@ static void demux_worker_request_pause(DemuxWorker *worker) {
     SDL_UnlockMutex(worker->mutex);
 }
 
+static inline int demux_worker_terminal(DemuxWorker *worker) {
+    SDL_LockMutex(worker->mutex);
+    int terminal = worker->terminal;
+    SDL_UnlockMutex(worker->mutex);
+    return terminal;
+}
+
 typedef struct {
     int count, terminal;
     size_t bytes;
@@ -2748,6 +2788,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double bps = (double)ORATE * OCH * 2.0;
     double audio_clock = 0, wall_start = av_gettime_relative() / 1000000.0;
     double last_ac = -1, last_ac_wall = av_gettime_relative() / 1000000.0;  // detecta audio travado
+    PlayerAudioTimeline audio_timing;
+    player_audio_timeline_reset(&audio_timing, start_sec);
     double cur_pos = 0;
     int running = 1, paused = req->start_paused != 0, vol = 100, reached_end = 0, playback_error = 0;
     g_player_pause_intent = paused;
@@ -3288,6 +3330,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             resume_preroll = 1;
                             resume_preroll_frames = 0;
                             resume_target = target;
+                            player_audio_timeline_reset(&audio_timing, target);
+                            if (swr) swr_free(&swr);
                             post_resume_kind = PLAYER_RESTART_SEEK;
                             post_resume_started = 0;
                             audio_queue_ready = audio_queue_high = 0;
@@ -3302,7 +3346,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             notice_until = SDL_GetTicks() + 1500;
                             double resume_now = av_gettime_relative() / 1000000.0;
                             wall_start = resume_now - cur_pos;
-                            if (adev && !timeline_seek_was_paused)
+                            if (adev && player_audio_ready(timeline_seek_was_paused, logged_first_present, resume_preroll))
                                 SDL_PauseAudioDevice(adev, 0);
                         } else if (seek_rc == 3) {
                             running = 0;
@@ -3327,7 +3371,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                         snprintf(notice, sizeof(notice), "Busca cancelada");
                         notice_until = SDL_GetTicks() + 1500;
                     } else if ((b == JOY_UP || b == JOY_DOWN) && fmt->nb_chapters > 0) {
@@ -3363,7 +3407,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
                         last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                     }
                     continue;
                 }
@@ -3383,8 +3427,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         track_menu = 0;
                         double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
-                        audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        last_ac = -1; last_ac_wall = resume_now;
+                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                     } else if (b == JOY_A) {
                         if (track_menu == TRACK_MENU_AUDIO) {
                             if (track_sel == acur_ui) {
@@ -3450,6 +3494,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                             resume_preroll = 1;
                                             resume_preroll_frames = 0;
                                             resume_target = cur_pos;
+                                            player_audio_timeline_reset(&audio_timing, cur_pos);
+                                            if (swr) swr_free(&swr);
                                             post_resume_kind = PLAYER_RESTART_TRACK;
                                             post_resume_started = 0;
                                             audio_switch_pending = 1;
@@ -3481,7 +3527,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                     snprintf(notice, sizeof(notice), barrier == 1
                                              ? "Troca de audio cancelada"
                                              : "Nao consegui trocar o audio agora");
-                                    if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                                    if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                                 } else if (changed) {
                                     diag_player_event("tracks", "audio-inplace-applied",
                                         "stream=%d choice=%d pos=%.2f barrier=%ums",
@@ -3524,8 +3570,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                         track_menu = 0;
                                         double resume_now = av_gettime_relative() / 1000000.0;
                                         wall_start = resume_now - cur_pos;
-                                        audio_clock = cur_pos; last_ac = -1; last_ac_wall = resume_now;
-                                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                                        last_ac = -1; last_ac_wall = resume_now;
+                                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                                         continue;
                                     }
                                     subtitle_retry_failed(&subtitle_retry, next, SDL_GetTicks());
@@ -3624,6 +3670,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                 resume_preroll = 1;
                                                 resume_preroll_frames = 0;
                                                 resume_target = cur_pos;
+                                                player_audio_timeline_reset(&audio_timing, cur_pos);
+                                                if (swr) swr_free(&swr);
                                                 post_resume_kind = PLAYER_RESTART_TRACK;
                                                 post_resume_started = 0;
                                                 subtitle_switch_pending = 1;
@@ -3663,7 +3711,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                     snprintf(notice, sizeof(notice), barrier == 1
                                              ? "Troca de legenda cancelada"
                                              : "Nao consegui trocar a legenda agora");
-                                    if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                                    if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                                 } else if (changed) {
                                     diag_player_event("tracks", "subtitle-inplace-applied",
                                         "choice=%d pos=%.2f barrier=%ums",
@@ -3677,9 +3725,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (!audio_switch_pending && !subtitle_switch_pending) {
                             double resume_now = av_gettime_relative() / 1000000.0;
                             wall_start = resume_now - cur_pos;
-                            audio_clock = cur_pos; last_ac = -1;
+                            last_ac = -1;
                             last_ac_wall = resume_now;
-                            if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                            if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                         }
                     }
                     continue;
@@ -3712,7 +3760,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         last_ac = -1;
                         last_ac_wall = resume_now;
                     }
-                    if (adev) SDL_PauseAudioDevice(adev, paused || !logged_first_present);
+                    if (adev) SDL_PauseAudioDevice(adev, !player_audio_ready(paused, logged_first_present, resume_preroll));
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
                 }
                 else if (b == JOY_UP || b == JOY_DOWN) {
@@ -3818,7 +3866,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         last_ac = -1;
                         last_ac_wall = resume_now;
                     }
-                    if (adev) SDL_PauseAudioDevice(adev, paused);
+                    if (adev) SDL_PauseAudioDevice(adev, !player_audio_ready(paused, logged_first_present, resume_preroll));
                     if (hb && paused) SDL_AtomicSet(&hb->force_progress, 1);
                 } else if (ty >= 620 && tx >= 1090 && tx < 1195 &&
                            (naud_ui > 1 || nsub > 0 || hot_subtitle_session_valid(req->playback.hot_session_id))) {
@@ -3849,6 +3897,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         resume_preroll = 1;
                         resume_preroll_frames = 0;
                         resume_target = target;
+                        player_audio_timeline_reset(&audio_timing, target);
+                        if (swr) swr_free(&swr);
                         post_resume_kind = PLAYER_RESTART_SEEK;
                         post_resume_started = 0;
                         audio_queue_ready = audio_queue_high = 0;
@@ -3858,7 +3908,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     } else if (seek_rc == 1 || seek_rc == 5) {
                         double resume_now = av_gettime_relative() / 1000000.0;
                         wall_start = resume_now - cur_pos;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                         if (seek_rc == 5) {
                             snprintf(notice, sizeof(notice), "Fonte ocupada; tente avancar em instantes");
                             notice_until = SDL_GetTicks() + 3000;
@@ -3997,10 +4047,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 SDL_GetTicks() - buffering_since);
         }
         int take = 0;
-        if (!refill && aidx >= 0 && actx && adev && !resume_preroll &&
+        int video_first = adev && player_audio_video_first(audio_before_ms,
+                                      resume_preroll, 0) && !demux_worker_terminal(&demux);
+        if (!refill && video_first)
+            take = demux_worker_take_stream(&demux, vidx, pkt, &read_ms);
+        else if (!refill && aidx >= 0 && actx && adev && !resume_preroll &&
             demux_buffer_prefer_audio(audio_before_ms, paused))
             take = demux_worker_take_stream(&demux, aidx, pkt, &read_ms);
-        if (!take) take = refill ? 0 : demux_worker_take(&demux, pkt, &read_ms);
+        if (!take && !video_first) take = refill ? 0 : demux_worker_take(&demux, pkt, &read_ms);
         int ret = take == 1 ? 0 : take == 0 ? AVERROR(EAGAIN) : take;
         int drain_decoder = 0;
         if (open_watch.cancelled) {
@@ -4151,26 +4205,29 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     int bytes = av_samples_get_buffer_size(NULL, OCH, os, AV_SAMPLE_FMT_S16, 0);
                     if (bytes > 0) av_fast_malloc(&audio_buf, &audio_buf_cap, (size_t)bytes);
                     if (audio_buf) {
+                        int64_t audio_resample_delay = swr_get_delay(swr, ORATE);
                         int n = swr_convert(swr, &audio_buf, os, (const uint8_t **)frame->data, frame->nb_samples);
                         if (n > 0 && vol != 100) {   // aplica o volume nas amostras S16
                             int16_t *sm = (int16_t *)audio_buf; int cnt = n * OCH;
                             for (int i = 0; i < cnt; i++) { int v = sm[i] * vol / 100; sm[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v); }
                         }
                         double audio_pts = ats != AV_NOPTS_VALUE
-                            ? ats * av_q2d(atb) - timeline_origin : -1;
-                        int queue_during_resume = !resume_preroll ||
-                            (adev && audio_pts >= resume_target - 0.15 &&
-                             SDL_GetQueuedAudioSize(adev) < (unsigned)(bps * 0.35));
-                        if (n > 0 && adev && queue_during_resume) {
-                            if (SDL_QueueAudio(adev, audio_buf, n * OCH * 2) < 0) {
+                            ? ats * av_q2d(atb) - timeline_origin : NAN;
+                        if (isfinite(audio_pts)) audio_pts -= audio_resample_delay / (double)ORATE;
+                        if (n > 0 && adev) {
+                            int pcm_result = player_queue_pcm(adev, audio_buf, n, ORATE, OCH,
+                                                   audio_pts, cur_pos, &audio_timing, &audio_clock);
+                            if (pcm_result < 0) {
                                 audio_queue_failures++;
-                                diag_player_event("audio", "queue-fail", "count=%d error=%.80s",
-                                                  audio_queue_failures, SDL_GetError());
-                                player_error_message("Falha ao enviar audio para o console");
-                                playback_error = -4;
+                                diag_player_event("audio", "timeline-rejected", "rc=%d pts=%.3f pos=%.3f queued=%u",
+                                                  pcm_result, audio_pts, cur_pos, SDL_GetQueuedAudioSize(adev));
+                                player_error_message(pcm_result == -1 ? "Falha ao enviar audio para o console"
+                                                                     : "Audio perdeu a linha do tempo; recuperando o ponto");
+                                playback_error = pcm_result == -1 ? -4 : -5;
                                 running = 0;
                                 break;
                             }
+                            if (!pcm_result) continue;
                             if (audio_switch_pending) {
                                 unsigned switch_ms = SDL_GetTicks() - audio_switch_started;
                                 if (switch_ms > max_track_switch_ms)
@@ -4185,8 +4242,6 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                   switch_ms,
                                                   audio_pts, SDL_GetQueuedAudioSize(adev));
                             }
-                            if (audio_pts >= 0) audio_clock = audio_pts + n / (double)ORATE;
-                            else audio_clock += n / (double)ORATE;
                             unsigned queued = SDL_GetQueuedAudioSize(adev);
                             if (queued > max_audio_queue) max_audio_queue = queued;
                         }
@@ -4220,7 +4275,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         if (resume_preroll_frames == 0)
                             diag_player_event("seek", "preroll-first",
                                               "pts=%.2f target=%.2f", vpts, resume_target);
-                        if (vpts < resume_target - 0.15) {
+                        if (vpts < resume_target - 0.001) {
                             resume_preroll_frames++;
                             continue;
                         }
@@ -4237,7 +4292,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         // A fila permaneceu pausada durante a operacao. Libere-a
                         // somente quando o primeiro quadro da nova geracao ja
                         // estiver pronto, evitando audio antigo ou tela congelada.
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        // Sound is released only after SDL_RenderPresent below.
                     }
                     // Se o relogio de AUDIO parou de avancar (decode travando), o video
                     // NAO fica esperando: segue pelo relogio de parede (nao congela).
@@ -4247,6 +4302,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     double master = player_clock_master(now, vpts, audio_clock,
                                         audio_queued / bps, audio_ok,
                                         &wall_start, !logged_first_present || resume_first_frame);
+                    if (!logged_first_present || resume_first_frame)
+                        diag_player_event("sync", "anchor", "target=%.3f video=%.3f audioHead=%.3f audioEnd=%.3f origin=%.3f queue=%u",
+                            resume_target, vpts, audio_timing.valid ? audio_clock-audio_queued/bps : NAN,
+                            audio_clock, timeline_origin, audio_queued);
                     cur_pos = master;
                     double delay = vpts - master;
                     // Se ja perdeu o prazo por mais de 120 ms, converter e enviar
@@ -4384,6 +4443,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     }
                     if (SDL_GetTicks() < notice_until) draw_notice(ren, notice);
                     SDL_RenderPresent(ren);
+                    if (resume_first_frame && adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                     Uint32 present_tick = SDL_GetTicks();
                     if (last_present_tick) {
                         Uint32 gap_ms = present_tick - last_present_tick;
@@ -4416,7 +4476,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         logged_first_present = 1;
                         pui_set_loading_backdrop(NULL);
                         g_reopen_headline[0] = 0;
-                        if (adev && !paused) SDL_PauseAudioDevice(adev, 0);
+                        if (adev && player_audio_ready(paused, logged_first_present, resume_preroll)) SDL_PauseAudioDevice(adev, 0);
                     }
                 }
             }
@@ -4557,6 +4617,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     free(episode_watched);
 #undef SUB_EXTERNAL
 #undef SUB_HOT
+    diag_player_event("audio", "timeline-summary", "blocks=%u trimmed=%llu padded=%llu rejected=%u",
+        audio_timing.blocks, (unsigned long long)audio_timing.trimmed,
+        (unsigned long long)audio_timing.padded, audio_timing.rejected);
     return next_requested ? PLAYER_REQUEST_NEXT :
            controlled_restart ? controlled_restart :
            playback_error ? playback_error : reached_end;
