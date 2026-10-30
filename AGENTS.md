@@ -1,5 +1,28 @@
 # Continuidade para agentes
 
+## Publicacao .58 — CONFIRMADA em 30/10/2026
+
+- Usuario autorizou expressamente: "sobe a correcao". Checkout/branch
+  autorizados inalterados. Nenhuma mudanca do app ou rebuild nesta rodada.
+- Validador completo reexecutado SEM SkipMediaFixtures: primeira execucao
+  parou em test_subtitle_transport sem stderr/causa demonstrada. Isolado
+  passou e mais cinco execucoes do binario passaram; repeticao COMPLETA
+  passou, incluindo 55 cenarios de midia e 1087 blocos AAC reais.
+  Nao ocultar falha inicial nem atribuir causa ambiental sem evidencia.
+- Branch remota era ancestral 0 atras/1 a frente. Push atomico normal da
+  branch/tag, sem force/main. Build/tag: 93c4527b5b58fed4dbad227a5480cd5c9619d88e.
+- v0.12.58 latest publica em 30/10/2026 21:45:00 UTC (18:45 Brasilia),
+  nao draft/prerelease. Target_commitish/tag dereferenciada conferidos.
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.58
+- NRO 24299343 B, SHA256
+  9a7b052875d6fdc5ddac96b4bdccf39b10ecc9955b13a09109fe316a320c3cab.
+  NRO + sidecar76 B conferidos no draft e apos publicar. API latest anonima
+  e download publico INTEGRAL sem autenticacao iguais ao artefato validado.
+  Copia em build/public-v0.12.58.nro ignorada; nunca commitar NRO/sidecar.
+- Publicacao permite teste autorizado no console; NAO homologa TBBT,
+  NVTEGRA, latencia SDL ou origem HLS desconhecida. Sem backend/deploy.
+  Aguardar T/E, versao instalada e traces recentes do caso real.
+
 ## A/V apos Continuar/seek — 30/10/2026, candidata LOCAL .58
 
 - Basead7f3e4/publica.57, checkout/branch autorizados inalterados. RelatoTBBT,

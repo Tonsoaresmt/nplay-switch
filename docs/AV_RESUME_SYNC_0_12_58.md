@@ -118,3 +118,25 @@ avancar10/60s, ir ao meio, voltar, testar pausado/tocando e abrir/fechar faixas
 durante a retomada. Comparar dialogo/labios por pelo menos2min apos cada acao;
 testar episodio seguinte e HOME/repouso. Capturar versao, T/E e arquivos novos
 `nplay-player-trace.log`/`nplay-network-trace.log`, antes de abrir outra obra.
+
+## Publicacao autorizada — 30/10/2026
+
+O usuario autorizou "sobe a correcao". A bateria completa foi reexecutada
+sem SkipMediaFixtures no MESMO NRO. Uma primeira execucao parou no processo
+de test_subtitle_transport sem stderr/causa demonstrada. O teste isolado e
+cinco execucoes adicionais do executavel passaram; uma nova bateria COMPLETA
+passou, incluindo os 55 cenarios de midia e 1087 blocos AAC reais. Nenhuma
+alteracao do app, rebuild ou relaxamento de teste foi feito nesta publicacao.
+
+Branch/tag enviadas sem force, apos conferir ancestralidade remota. Build/tag
+`93c4527b5b58fed4dbad227a5480cd5c9619d88e`. Release
+[v0.12.58](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.58)
+publica/latest em 30/10/2026 21:45 UTC (18:45 Brasilia), sem prerelease.
+Os dois assets, digest/tamanho e tag foram conferidos antes de promover;
+API latest e download integral NRO/sidecar SEM autenticacao foram conferidos
+apos publicar, identicos ao hash/tamanho acima. Copia local ignorada:
+`build/public-v0.12.58.nro`. NRO e sidecar nao foram commitados.
+
+Esta publicacao habilita teste fisico autorizado; nao confirma o incidente
+TBBT nem remove os limites/pontos pendentes deste relatorio. Sem backend,
+deploy, conta de producao ou teste Switch/NVTEGRA nesta rodada.

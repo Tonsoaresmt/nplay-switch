@@ -1,4 +1,4 @@
-# Nplay Switch 0.12.58 — candidata local: sincronizacao na retomada
+# Nplay Switch 0.12.58 — sincronizacao na retomada
 
 - Corrige o descarte de trechos de audio durante o preparo apos Continuar/seek.
 - Conserva o ponto minimo de audio depois do primeiro quadro e corta amostras
@@ -17,7 +17,8 @@ reproduzidos antes da correcao; 400 epocas/40 mil blocos simulados e 1087
 blocos com timestamps AAC realmente decodificados testados. As suites
 anteriores de controle, legendas, rede e midia continuam passando.
 
-Ainda nao publicada. O episodio de The Big Bang Theory nao foi testado no
+Versao destinada a teste no console apos validacao local. O episodio de
+The Big Bang Theory nao foi testado no
 Switch fisico: faltam temporada/episodio, versao instalada e logs recentes.
 Nao afirmar resolucao definitiva desse incidente. Fontes com grandes lacunas
 legitimas de PTS ou origem HLS desconhecida continuam exigindo investigacao.
@@ -25,3 +26,7 @@ legitimas de PTS ou origem HLS desconhecida continuam exigindo investigacao.
 NRO: 24.299.343 bytes. SHA-256:
 `9a7b052875d6fdc5ddac96b4bdccf39b10ecc9955b13a09109fe316a320c3cab`.
 Relatorio: `docs/AV_RESUME_SYNC_0_12_58.md`.
+
+Publicada em 30/10/2026, 18:45 (Brasilia), como ultima versao do atualizador.
+Tag/build: `93c4527b5b58fed4dbad227a5480cd5c9619d88e`.
+Download publico integral e SHA-256 reconferidos apos a publicacao.
