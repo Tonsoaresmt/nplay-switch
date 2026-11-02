@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${ROOT_DIR}/.build-thirdparty/ffmpeg"
-SOURCE_DIR="${WORK_DIR}/ffmpeg-7.1"
+# Isolate each local TLS patch set; never delete build fixtures/crash symbols.
+PATCH_ID="$(cat "${ROOT_DIR}/tools/ffmpeg-libnx-tls-hostname.patch" "${ROOT_DIR}/tools/ffmpeg-libnx-tls-io.patch" "${ROOT_DIR}/tools/ffmpeg-libnx-tls-io.h" | sha256sum | cut -c1-12)"
+SOURCE_DIR="${WORK_DIR}/nplay-7.1-${PATCH_ID}"
 VENDOR_LIB="${ROOT_DIR}/vendor/ffmpeg-https/lib"
 FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz"
 PORT_URL="https://raw.githubusercontent.com/devkitPro/pacman-packages/master/switch/ffmpeg"
@@ -14,7 +16,7 @@ download() {
     local output="$1"
     local url="$2"
     if [[ ! -f "${output}" ]]; then
-        curl -L --fail --retry 3 -o "${output}" "${url}"
+        curl -L --fail --retry 3 --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 -o "${output}" "${url}"
     fi
 }
 
@@ -26,10 +28,6 @@ echo "40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6  ${WORK_D
 echo "1792380b992e3554a4abcddf0d7b395bfd8c118ac7c6e38c8f2fb0d39753a390  ${WORK_DIR}/ffmpeg-7.1.patch" | sha256sum -c -
 echo "57ea7ec8ed26d13d3172d0fd589b7883d22f0c180d50b7434fcc73fb2b3ab7d7  ${WORK_DIR}/tls.patch" | sha256sum -c -
 
-rm -rf "${SOURCE_DIR}"
-tar -C "${WORK_DIR}" -xf "${WORK_DIR}/ffmpeg-7.1.tar.xz"
-cd "${SOURCE_DIR}"
-
 PATCH_BIN="$(command -v patch || true)"
 if [[ -z "${PATCH_BIN}" && -x '/c/Program Files/Git/usr/bin/patch.exe' ]]; then
     PATCH_BIN='/c/Program Files/Git/usr/bin/patch.exe'
@@ -39,9 +37,22 @@ if [[ -z "${PATCH_BIN}" ]]; then
     exit 1
 fi
 
-"${PATCH_BIN}" -Np1 -i "${WORK_DIR}/ffmpeg-7.1.patch"
-"${PATCH_BIN}" -Np1 -i "${WORK_DIR}/tls.patch"
-"${PATCH_BIN}" -Np1 -i "${ROOT_DIR}/tools/ffmpeg-libnx-tls-hostname.patch"
+if [[ ! -f "${SOURCE_DIR}/.nplay-patched" ]]; then
+    if [[ -e "${SOURCE_DIR}" ]]; then
+        echo "Erro: arvore parcial existente; preserve-a e use um diretorio de trabalho novo." >&2
+        exit 1
+    fi
+    mkdir -p "${SOURCE_DIR}"
+    tar -C "${SOURCE_DIR}" --strip-components=1 -xf "${WORK_DIR}/ffmpeg-7.1.tar.xz"
+    cd "${SOURCE_DIR}"
+    "${PATCH_BIN}" --fuzz=0 -Np1 -i "${WORK_DIR}/ffmpeg-7.1.patch"
+    "${PATCH_BIN}" --fuzz=0 -Np1 -i "${WORK_DIR}/tls.patch"
+    "${PATCH_BIN}" --fuzz=0 -Np1 -i "${ROOT_DIR}/tools/ffmpeg-libnx-tls-hostname.patch"
+    "${PATCH_BIN}" --fuzz=0 -Np1 -i "${ROOT_DIR}/tools/ffmpeg-libnx-tls-io.patch"
+    cp "${ROOT_DIR}/tools/ffmpeg-libnx-tls-io.h" libavformat/nplay_tls_io.h
+    touch .nplay-patched
+fi
+cd "${SOURCE_DIR}"
 
 if [[ -f /opt/devkitpro/switchvars.sh ]]; then
     source /opt/devkitpro/switchvars.sh
@@ -70,13 +81,18 @@ fi
 make -j"${JOBS:-4}" libavformat/libavformat.a
 cp libavformat/libavformat.a "${VENDOR_LIB}/libavformat.a"
 
-if ! aarch64-none-elf-nm "${VENDOR_LIB}/libavformat.a" | grep -q 'ff_https_protocol'; then
+if ! aarch64-none-elf-nm "${VENDOR_LIB}/libavformat.a" | grep 'ff_https_protocol' >/dev/null; then
     echo "Erro: a biblioteca gerada nao contem ff_https_protocol." >&2
     exit 1
 fi
 
 if ! grep -q 'SslVerifyOption_HostName' libavformat/tls_libnx.c; then
     echo "Erro: validacao de hostname nao foi aplicada ao TLS libnx." >&2
+    exit 1
+fi
+
+if ! aarch64-none-elf-nm "${VENDOR_LIB}/libavformat.a" | grep 'ff_nplay_tls_guard_version' >/dev/null; then
+    echo "Erro: biblioteca sem o guard TLS nativo." >&2
     exit 1
 fi
 

@@ -137,6 +137,15 @@ int main(void) {
     assert(curl.cb(&curl,&ctx,NULL)==CURLE_OK && ctx.calls==1);
     assert(ctx.first_is_full && ctx.first_size==cacert_bin_size && g_tls_import_stage==1 && !g_tls_import_error);
     for(int i=0;i<1000;i++){ SslContext c={0}; assert(curl.cb(&curl,&c,NULL)==CURLE_OK && c.calls==1); }
+    // Execute the real native import path too, with the real embedded bundle.
+    assert(nplay_native_tls_configure(NULL)==CURLE_SSL_CACERT_BADFILE);
+    for(int i=0;i<1000;i++){
+      SslContext c={.reject_nul=1};assert(!nplay_native_tls_configure(&c));
+      assert(c.calls==1&&c.first_is_full&&c.first_size==cacert_bin_size);
+    }
+    { SslContext c={.max_certs=71};assert(!nplay_native_tls_configure(&c)&&g_tls_import_stage==2); }
+    { SslContext c={.single_only=1};assert(!nplay_native_tls_configure(&c)&&g_tls_import_stage==3); }
+    { SslContext c={.fail=0xBEEF};assert(nplay_native_tls_configure(&c)==77&&g_tls_import_error==0xBEEF); }
     // Regressao da 0.12.51: um servico que rejeita NUL final nao pode mais ser acionado.
     { SslContext c={.reject_nul=1}; assert(curl.cb(&curl,&c,NULL)==CURLE_OK && c.calls==1 && !g_tls_import_error); }
 
@@ -171,6 +180,7 @@ int main(void) {
 
     reset_ca();
     assert(curl.cb(&curl,&ctx,NULL)==CURLE_OUT_OF_MEMORY);
+    assert(nplay_native_tls_configure(&ctx)==CURLE_OUT_OF_MEMORY);
     assert(prepare_ca_memory()==0); reset_ca();
     puts("TLS CA: bundle real, E1 sem NUL, E2/E3 de fallback, limite de 71, 1000 contextos, 4 threads, falhas de alocacao e verificacao fail-closed passaram (stub do servico SSL).");
 }

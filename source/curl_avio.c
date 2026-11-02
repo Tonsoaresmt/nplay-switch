@@ -1,11 +1,10 @@
 // curl_avio.c - I/O do ffmpeg via libcurl (https com seek por Range) COM
 // PREFETCH em thread de fundo, pra reproducao fluida (sem travar o decode).
 //
-// Motivo: o switch-ffmpeg nao tem TLS; o libcurl tem (mbedtls). Antes a leitura
-// era bloqueante (cada bloco travava o player esperando a rede -> engasgos nos
-// animes). Agora uma THREAD produtora baixa blocos a frente e enche um ring
-// buffer; o ffmpeg (consumidor) le do buffer sem esperar a rede. Seek reposiciona
-// a thread. Usa a interface EASY do curl (a MULTI falhava no Switch).
+// HLS uses a producer/ring per media resource. Remote MP4/remux uses native
+// FFmpeg HTTPS instead (also libnx TLS, with bounded/cancelable callbacks).
+// The easy-handle pool below preserves idle connections; it is NOT a limit on
+// concurrently active downloads. No shared concurrent connection pool.
 #include "curl_avio.h"
 #include "net.h"
 #include "diag.h"

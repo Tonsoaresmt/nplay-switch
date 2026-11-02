@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -8,6 +9,7 @@ typedef uint32_t Uint32;
 typedef int SDL_AudioDeviceID;
 typedef struct {int num,den;} AVRational;
 #define AV_NOPTS_VALUE INT64_MIN
+#define AVERROR(x) (-(x))
 static const int OCH=2,ORATE=48000,adev=1;
 static const double bps=192000;
 static int resume_preroll,running=1,playback_error,audio_switch_pending,subtitle_switch_pending;
@@ -49,6 +51,7 @@ static void feed(double pts,int samples){
 }
 static int streams[16],stream_count,terminal;
 static int demux_worker_terminal(int*w){(void)w;return terminal;}
+static int demux_worker_video_lookahead(int*w,int index){(void)w;(void)index;return 0;}
 static int demux_worker_take_stream(int*w,int stream,int*pkt,Uint32*ms){(void)w;(void)ms;
  for(int i=0;i<stream_count;i++)if(streams[i]==stream){*pkt=stream;memmove(streams+i,streams+i+1,(stream_count-i-1)*sizeof(*streams));stream_count--;return 1;}
  return 0;}
@@ -122,7 +125,7 @@ static int trace(const char*path){
  return 0;
 }
 int main(int argc,char**argv){setvbuf(stdout,NULL,_IONBF,0);(void)argc;(void)cur_pos;
- (void)SDL_GetError;(void)resume_preroll;(void)demux_worker_terminal;
+ (void)SDL_GetError;(void)resume_preroll;(void)demux_worker_terminal;(void)demux_worker_video_lookahead;
  player_audio_timeline_reset(&audio_timing,resume_target);
  if(!strcmp(argv[1],"trace"))return argc==3?trace(argv[2]):2;
  if(!strcmp(argv[1],"matrix")){matrix();return 0;}

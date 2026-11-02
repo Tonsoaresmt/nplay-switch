@@ -1,0 +1,91 @@
+--- a/libavformat/tls_libnx.c
++++ b/libavformat/tls_libnx.c
+@@ -37,6 +37,8 @@ typedef struct TLSContext {
+     SslConnection conn;
+ } TLSContext;
+ 
++#include "nplay_tls_io.h"
++
+ static int tls_close(URLContext *h)
+ {
+     TLSContext *tls_ctx = h->priv_data;
+@@ -67,6 +69,10 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
+         goto fail;
+     }
+ 
++    ret = nplay_tls_trust(tls_ctx);
++    if (ret < 0)
++        goto fail;
++
+     rc = sslContextCreateConnection(&tls_ctx->context, &tls_ctx->conn);
+ 
+     if (R_SUCCEEDED(rc)) {
+@@ -102,24 +104,17 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
+     }
+ 
+     if (R_SUCCEEDED(rc)) {
+-        SslIoMode iomode = SslIoMode_Blocking;
+-        if (h->flags & AVIO_FLAG_NONBLOCK) iomode = SslIoMode_NonBlocking;
+-        rc = sslConnectionSetIoMode(&tls_ctx->conn, iomode);
++        /* A blocking Horizon IPC cannot consult FFmpeg's interrupt callback. */
++        rc = sslConnectionSetIoMode(&tls_ctx->conn, SslIoMode_NonBlocking);
+     }
+ 
+-    while (rc = sslConnectionDoHandshake(&tls_ctx->conn, NULL, NULL, NULL, 0)) {
+-        if (R_VALUE(rc) == MAKERESULT(123, 204)) { // PR_WOULD_BLOCK_ERROR
+-            av_usleep(10000);
+-            continue;
+-        }
+-        if (R_VALUE(rc) == MAKERESULT(123, 207)) {
+-            av_log(h, AV_LOG_ERROR, "The certificate is not correctly signed by the trusted CA.\n");
+-        } else {
+-            av_log(h, AV_LOG_ERROR, "sslConnectionDoHandshake returned: 0x%X\n", R_VALUE(rc));
+-        }
+-        ret = AVERROR(EIO);
++    if (R_FAILED(rc)) {
++        ret = nplay_tls_failure("configure", rc);
+         goto fail;
+     }
++    ret = nplay_tls_handshake(h);
++    if (ret < 0)
++        goto fail;
+     return 0;
+ 
+ fail:
+@@ -130,34 +125,12 @@ fail:
+ 
+ static int tls_read(URLContext *h, uint8_t *buf, int size)
+ {
+-    TLSContext *tls_ctx = h->priv_data;
+-    Result rc = 0;
+-    u32 out_size = 0;
+-    rc = sslConnectionRead(&tls_ctx->conn, buf, size, &out_size);
+-    if (R_SUCCEEDED(rc)) {
+-        return out_size; // return read length
+-    }
+-    if (R_VALUE(rc) == MAKERESULT(123, 204)) { // PR_WOULD_BLOCK_ERROR
+-        return AVERROR(EAGAIN);
+-    }
+-    av_log(h, AV_LOG_WARNING, "sslConnectionRead returned 0x%X\n", R_VALUE(rc));
+-    return AVERROR(EIO);
++    return nplay_tls_transfer(h, buf, size, 0);
+ }
+ 
+ static int tls_write(URLContext *h, const uint8_t *buf, int size)
+ {
+-    TLSContext *tls_ctx = h->priv_data;
+-    Result rc = 0;
+-    u32 out_size = 0;
+-    rc = sslConnectionWrite(&tls_ctx->conn, buf, size, &out_size);
+-    if (R_SUCCEEDED(rc)) {
+-        return out_size; // return written length
+-    }
+-    if (R_VALUE(rc) == MAKERESULT(123, 204)) { // PR_WOULD_BLOCK_ERROR 
+-        return AVERROR(EAGAIN);
+-    }
+-    av_log(h, AV_LOG_WARNING, "sslConnectionWrite returned 0x%X\n", R_VALUE(rc));
+-    return AVERROR(EIO);
++    return nplay_tls_transfer(h, (uint8_t *)buf, size, 1);
+ }
+ 
+ static int tls_get_file_handle(URLContext *h)

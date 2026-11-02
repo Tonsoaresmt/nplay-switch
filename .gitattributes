@@ -8,3 +8,11 @@ data/cacert.bin -text
 *.h whitespace=cr-at-eol
 *.ps1 whitespace=cr-at-eol
 Makefile whitespace=cr-at-eol
+
+# Shell scripts must also execute correctly on Linux. Unified diffs necessarily
+# contain single-space context lines; keep those bytes, not general C whitespace.
+tools/build_ffmpeg_https.sh text eol=lf whitespace=cr-at-eol
+tools/ffmpeg-libnx-tls-hostname.patch text eol=lf whitespace=cr-at-eol,-blank-at-eol
+tools/ffmpeg-libnx-tls-io.patch text eol=lf whitespace=cr-at-eol,-blank-at-eol
+tools/fixtures/devkitpro-ffmpeg-tls.patch -text whitespace=-blank-at-eol
+vendor/ffmpeg-https/README.md whitespace=cr-at-eol

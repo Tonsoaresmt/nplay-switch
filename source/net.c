@@ -1,5 +1,6 @@
 // net.c - implementacao da camada de HTTP (libcurl).
 #include "net.h"
+#include "diag.h"
 #include "subtitle_limits.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,13 +230,9 @@ static int prepare_ca_memory(void) {
     return 0;
 }
 
-static CURLcode switch_ca_context(CURL *curl, void *ssl_ctx, void *userdata) {
-    (void)curl; (void)userdata;
+static CURLcode switch_ca_import(void *ssl_ctx) {
     g_tls_import_error = 0;
     g_tls_import_stage = 0;
-    const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
-    if (!version || !version->ssl_version || strcmp(version->ssl_version, "libnx"))
-        return CURLE_SSL_CACERT_BADFILE; // never cast another backend's context
     if (!g_ca_pem) return CURLE_OUT_OF_MEMORY;
     if (!ssl_ctx) return CURLE_SSL_CACERT_BADFILE;
     SslContext *ctx = (SslContext *)ssl_ctx;
@@ -263,6 +260,21 @@ static CURLcode switch_ca_context(CURL *curl, void *ssl_ctx, void *userdata) {
         if (imported) { g_tls_import_error = 0; return CURLE_OK; }
     }
     return CURLE_SSL_CACERT_BADFILE;
+}
+
+static CURLcode switch_ca_context(CURL *curl, void *ssl_ctx, void *userdata) {
+    (void)curl; (void)userdata;
+    const curl_version_info_data *version = curl_version_info(CURLVERSION_NOW);
+    g_tls_import_error = g_tls_import_stage = 0;
+    if (!version || !version->ssl_version || strcmp(version->ssl_version, "libnx"))
+        return CURLE_SSL_CACERT_BADFILE; // never cast another backend's context
+    return switch_ca_import(ssl_ctx);
+}
+
+// Both backends receive an actual libnx SslContext. Same immutable bundle,
+// import stages and lifetime, with no SD I/O and no relaxed verification.
+int nplay_native_tls_configure(void *ssl_ctx) {
+    return (int)switch_ca_import(ssl_ctx);
 }
 #else
 static int g_ca_ready = 0;
@@ -330,6 +342,8 @@ static void share_unlock(CURL *h, curl_lock_data data, void *u) {
 int net_init(void) {
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) return -1;
 #ifdef __SWITCH__
+    extern int ff_nplay_tls_guard_version(void);
+    diag_player_event("native-tls", "guard", "version=%d", ff_nplay_tls_guard_version());
     prepare_ca_memory(); // callback fails closed with OUT_OF_MEMORY on failure
 #else
     g_ca_ready = provision_ca_bundle() == 0;
@@ -385,6 +399,16 @@ void net_configure_curl_isolated(CURL *curl) {
 #endif
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+}
+
+// Called by the native FFmpeg/libnx transport on terminal errors only.
+// Never pass endpoint/URL/SID/certificate text to this diagnostic boundary.
+void nplay_native_tls_event(const char *stage, unsigned result) {
+#ifdef __SWITCH__
+    diag_player_event("native-tls", stage, "result=0x%08X", result);
+#else
+    (void)stage; (void)result;
+#endif
 }
 
 void net_configure_curl(CURL *curl) {

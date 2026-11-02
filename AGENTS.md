@@ -1,5 +1,69 @@
 # Continuidade para agentes
 
+## TorBox endurecido — 01/11/2026, candidata LOCAL .59
+
+- Usuario autorizou corrigir sem logs; confirmou VisionQuest, sem episodio/
+  versao/fonte exata. Nao afirmar incidente fisico resolvido. Mesmo checkout
+  switch-access-expiry/branch hardening, base dec01ef. .58 segue publica.
+- TLS nativo FFmpeg7.1 agora NONBLOCK em SDK; read/write/handshake consultam
+  interrupt+tempo monotono, prazo rw_timeout ou30s, sleep10ms, EAGAIN para
+  NONBLOCK caller, EOF/partial preservados. Configure falho nao faz handshake.
+  Mesmo CA embutido do curl via switch_ca_import/nplay_native_tls_configure;
+  ausencia/importacao/OOM falham fechado. CA/hostname/data intactos, sem SDCA.
+- Biblioteca ARM64 vendorizada recompilada, nm confirma guard+clock+interrupt
+  e hooks. Guard/callbacks DEFINIDOS T no ELF. SHA libavformat.a
+  33f85e9b8dc8af67186ac18ba331e695cc9ee6760715c372d6d9dd3e0ddf2ecb.
+  Dependencia teve warnings SDK/RTMP preexistentes; app completo -Werror passou.
+- Fila heap64KiB de indices;512 ativos normais,1024/2048/4096 sob demanda
+  quando espera video/produtor cheio. Budget4/12MiB nao aumenta: payload
+  desconta indices+sizeofAVPacket para4096. Side_data/AVBuffer/allocator,
+  decoder/GPU/SSL e UM pending packet continuam fora desse subtotal.
+  Limite real -> aviso/erro-4 com checkpoint, nao renew infinito. Ring wrap,
+  geracoes, EOF e OOM seguros. Recheck sob lock evita corrida de video tardio
+  e flag de espaco obsoleto. Nao escanear fila inteira a cada audio recebido.
+- Novos tests TLS patchREAL/SDKfake:1000ciclos, timeouts/cancel/CAausente,
+  mesmafixtureoficialSHApin. CAreal por1000curl+1000native/E1/E2/E3. DemuxC
+  com pthreadreal:600/1800/3000audios,ringwrap,limites e2corridas. Audit
+  negativo historico exige --reproduce-058/carrega93c4527, nunca teste verde.
+- Build completo ARM64 -Werror + incrementalFINAL e bateriaFINAL COMPLETA
+  sem SkipMediaFixtures passaram, incluindo55casosmidia/1087blocosAAC eELF.
+  Preliminar parou no harnessEOF sem AVERROR/errno: foi adaptado e ampliado
+  paraassert erroENOBUFS; nao contado como verde. Nenhumapp/rebuildaposprova.
+- FINAL NRO.59LOCAL24299343B SHA256
+  deed0e30de6c6576ff2f0c10f481262c1cf1016f07a511b9c2213b4223e472b9.
+  Sidecar atualizado aposprova, nunca commitar NRO/sidecar. Sem backend,
+  conta, push/release ou teste fisico. Nenhum deploy/reprocessamento.
+- docs/TORBOX_FIXES_0_12_59.md e RELEASE_0_12_59.md tem evidencias/limites.
+  Publicacao exige nova autorizacao. Sem garantia de VisionQuest, NVTEGRA,
+  handshake Horizon/heap real/sessao60min; seguir roteiro fisico do relatorio.
+
+## Auditoria TorBox/CloudCard — 01/11/2026, SEM CORRECAO NO APP
+
+- Base dec01ef/.58 publica, checkout/branch autorizados inalterados. Usuario
+  pediu investigar falhas TorBox e avaliar pesquisa externa, nao publicar.
+  docs/TORBOX_CONSOLE_AUDIT_2026_11_01.md separa defeitos/hipoteses/medicoes.
+- Reproducao nova: scheduler .58 video-first400ms/preroll +512 audios na fila
+  impede produtor chegar ao video600;1000 polls retiram0, terminal0. WorkerC
+  real/pthread, fonte/SDL fake. Nao prova ordenacao de uma obra real.
+- TLS nativo FFmpeg usado por TorBox MP4/remux difere de curl/R2. Patch oficial
+  SHA57ea7ec8...7d7+hostname local: handshake/read sem deadline/cancel interno.
+  SDK fake70.06s/50s ultrapassa rw_timeout30s,0consultasinterrupt. Nao sao
+  tempos medidos no Horizon. nm do libavformat confirma referencias. Bundle
+  embutido do curl nao importado no TLS nativo; falha CA do relato NAO provada.
+- tools/audit_torbox_paths.mjs exige --reproduce-058 e patch oficial em build,
+  verificado por SHA. Exit0 = DEFEITOS REPRODUZIDOS, nunca teste verde/release.
+  Nao integrar como aprovacao; converter assertions ao implementar correcoes.
+- Testes positivos av_resume/restart/demux_worker/delivery_fixture passaram;
+  gitdiffcheck passou. Nenhum app/build/NRO/backend/conta/push/release alterado.
+  NRO.58 preservado24299343B/SHA9a7b0528...c3cab. Sem Switch fisico/handshake.
+- Proximo: TLS nao bloqueante com interrupt/prazo/erros seguros, fila sem
+  espera circular nem descarte PCM/aumento cego; depois medir SSL/BSD ativos
+  e codec real. RX1MiB/12sessoes sao A/B, nao ganhos comprovados no Nplay.
+  BSD3 != limite de3conexoes TLS; SSL1..4 e poolIPC, nao limite de contexts.
+  Nunca mutexglobal em legenda aberta, desativarTLS ou makeclean neste checkout.
+- Solicitados titulo/episodio/versao e traces recentes. Sem eles nao atribuir
+  incidente a Wi-Fi/TorBox/codec. Relato externo nao homologa limites universais.
+
 ## Publicacao .58 — CONFIRMADA em 30/10/2026
 
 - Usuario autorizou expressamente: "sobe a correcao". Checkout/branch

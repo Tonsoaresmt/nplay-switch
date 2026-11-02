@@ -1,6 +1,7 @@
 #include "cJSON.h"
 #include "player_completion.h"
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
 typedef uint32_t Uint32;
@@ -31,6 +32,7 @@ static int marked;
 static int api_mark_watched(int id){(void)id;marked++;return 0;}
 #include "flow_guards_finalize.inc"
 #define AVERROR_EOF (-541478725)
+#define AVERROR(x) (-(x))
 typedef struct {int stream_index;} AVPacket;
 static void av_packet_unref(AVPacket*p){(void)p;}
 static int SDL_GetQueuedAudioSize(int device){(void)device;return 0;}
@@ -77,6 +79,7 @@ int main(void){
     assert(terminal(AVERROR_EOF,300,0,1)==-5);
     assert(terminal(AVERROR_EOF,300,0,0)==1);
     assert(terminal(-5,1799,1800,0)==-5&&drains==0);
+    assert(terminal(AVERROR(ENOBUFS),300,1800,0)==-4&&drains==0);
     assert(!player_eof_complete(NAN,1800,0)&&!player_eof_complete(-1,1800,0));
     assert(player_eof_complete(9,10,0)&&!player_eof_complete(5,10,0));
     PlayerResult result={EXIT_REASON_NATURAL,1,300,1800};PlaybackSyncStatus sync={0};

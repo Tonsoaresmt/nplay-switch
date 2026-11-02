@@ -1,8 +1,12 @@
 #pragma once
 #include <stddef.h>
 // Pacotes de audio AAC tem poucas centenas de bytes: a contagem nao deve ser o
-// limite real. 512 slots deixam o teto em bytes decidir o tamanho da reserva.
+// limite real. 512 slots por padrao; lookahead limitado alcanca video depois
+// de rajadas de audio, sem aumentar o budget em bytes.
 #define DEMUX_QUEUE_PACKETS 512
+// Extra INDEX slots, not extra media bytes. Enabled only when the consumer
+// cannot reach video through an audio burst. Heap allocation, never stack.
+#define DEMUX_LOOKAHEAD_PACKETS 4096
 #define DEMUX_QUEUE_BYTES (4u * 1024u * 1024u)
 // Remux sequencial (MKV de torrent -> fMP4 frag_keyframe) grava um fragmento
 // por quadro-chave: 5-10 s so de video e depois o audio do mesmo trecho. A
@@ -14,6 +18,11 @@ static inline int demux_buffer_can_enqueue_cap(int count, size_t bytes, size_t i
                                                size_t cap) {
     return count >= 0 && count < DEMUX_QUEUE_PACKETS &&
         bytes <= cap && incoming <= cap - bytes;
+}
+static inline int demux_buffer_can_enqueue_slots(int count, size_t bytes,
+                                                size_t incoming, size_t cap, int slots) {
+    return count >= 0 && count < slots && slots <= DEMUX_LOOKAHEAD_PACKETS &&
+           bytes <= cap && incoming <= cap - bytes;
 }
 static inline int demux_buffer_can_enqueue(int count, size_t bytes, size_t incoming) {
     return demux_buffer_can_enqueue_cap(count, bytes, incoming, DEMUX_QUEUE_BYTES);

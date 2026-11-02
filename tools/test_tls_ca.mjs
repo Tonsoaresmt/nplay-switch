@@ -7,7 +7,7 @@ const net=readFileSync('source/net.c','utf8').replace(/\r\n/g,'\n');
 const section=(a,b)=>{const s=net.indexOf(a),e=net.indexOf(b,s);if(s<0||e<s)throw Error(a);return net.slice(s,e);};
 mkdirSync('build',{recursive:true});
 writeFileSync('build/tls_ca.inc',section('#ifdef __SWITCH__\n// devkitPro','static void share_lock('));
-writeFileSync('build/tls_config.inc',section('void net_configure_curl_isolated(', 'void net_configure_curl(CURL'));
+writeFileSync('build/tls_config.inc',section('void net_configure_curl_isolated(', 'void nplay_native_tls_event('));
 const ca=readFileSync('data/cacert.bin');
 writeFileSync('build/tls_bundle.inc',`static const unsigned char cacert_bin[]={${Array.from(ca).join(',')}};\nstatic const unsigned int cacert_bin_size=sizeof(cacert_bin);\n`);
 for(const marker of ['prepare_ca_memory();','free(g_ca_pem);','net_configure_curl_isolated(curl);'])
