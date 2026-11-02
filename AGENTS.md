@@ -1,5 +1,23 @@
 # Continuidade para agentes
 
+## Publicacao .59 — CONFIRMADA em 01/11/2026 (Brasilia)
+
+- Usuario autorizou: "manda pro git a atualizacao quando terminar". Bateria
+  COMPLETA reexecutada e aprovada SEM SkipMediaFixtures no MESMO NRO final;
+  nenhuma mudanca do app/rebuild nesta publicacao. Hardware ainda pendente.
+- Branch remota ancestral0atras/1afrente; push atomico normal branch/tag,
+  sem force/main. Build/tag d936f7a707ab9fd2da11fe47dd6faa851c08fed9.
+- v0.12.59 latest publica, nao draft/prerelease, em02/11/2026 02:39:47UTC
+  (=01/11/2026 23:39:47Brasilia). Target/tag dereferenciada conferidos.
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.59
+- NRO24299343B/SHA256
+  deed0e30de6c6576ff2f0c10f481262c1cf1016f07a511b9c2213b4223e472b9.
+  NRO+sidecar76B conferidos no draft antes de promover; API latest e download
+  INTEGRAL publico SEM autenticacao conferidos apos publicar, identicos.
+  Copia ignorada build/public-v0.12.59.nro. NRO/sidecar nunca commitados.
+- Publicacao habilita teste no console, NAO homologa VisionQuest, Horizon,
+  NVTEGRA, sono/rede reais ou sessao longa. Nenhum backend/conta/deploy mudou.
+
 ## TorBox endurecido — 01/11/2026, candidata LOCAL .59
 
 - Usuario autorizou corrigir sem logs; confirmou VisionQuest, sem episodio/

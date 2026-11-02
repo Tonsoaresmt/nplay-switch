@@ -124,3 +124,21 @@ continua publica. NRO/sidecar nao devem ser commitados. A biblioteca vendorizada
 e dependencia de build ja versionada, nao asset NRO.
 
 Fontes e auditoria anterior: docs/TORBOX_CONSOLE_AUDIT_2026_11_01.md.
+
+## Publicacao autorizada e confirmada
+
+Depois da implementacao, o usuario autorizou enviar a atualizacao ao GitHub.
+A bateria COMPLETA foi repetida com sucesso, SEM SkipMediaFixtures, no mesmo
+NRO final acima. Nenhuma mudanca de app ou recompilacao nesta publicacao.
+
+Branch remota ancestral, envio normal/atomico de branch e tag, sem force nem
+alteracao do main antigo. Tag/build `d936f7a707ab9fd2da11fe47dd6faa851c08fed9`.
+[Release v0.12.59](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.59)
+publica/latest, sem prerelease, em 02/11/2026 02:39:47 UTC
+(01/11/2026 23:39:47 Brasilia).
+
+Metadados de target/tag e os dois assets foram conferidos ainda em rascunho.
+Apos promover, API latest e download integral NRO/sidecar SEM autenticacao
+foram conferidos identicos ao tamanho/hash validados. Copia ignorada:
+`build/public-v0.12.59.nro`. NRO/sidecar nao foram commitados.
+Publicacao nao remove os limites de validacao fisica deste relatorio.

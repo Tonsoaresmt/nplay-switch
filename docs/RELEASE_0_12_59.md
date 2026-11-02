@@ -1,4 +1,4 @@
-# Nplay Switch 0.12.59 — candidata local: TorBox e estabilidade
+# Nplay Switch 0.12.59 — TorBox e estabilidade
 
 - HTTPS nativo com leitura, escrita e handshake cancelaveis e limitados por
   prazo; evita esperas internas sem retorno ao player.
@@ -12,8 +12,8 @@
 
 Build ARM64 completo -Werror + incremental final aprovados. Bateria FINAL
 completa aprovada, sem pular fixtures de midia: novos testes TLS/fila, 55
-cenarios de midia e 1087 blocos AAC reais. Ainda nao publicada ou homologada
-em um Switch real.
+cenarios de midia e 1087 blocos AAC reais. Disponibilizada para teste no
+console; ainda sem homologacao em um Switch real.
 
 Nao ha confirmacao do episodio de VisionQuest relatado. Ainda necessaria
 validacao fisica de R2/Range/remux, retomada, audio/legenda e HOME/sono.
@@ -21,3 +21,7 @@ validacao fisica de R2/Range/remux, retomada, audio/legenda e HOME/sono.
 NRO24.299.343B, SHA256:
 `deed0e30de6c6576ff2f0c10f481262c1cf1016f07a511b9c2213b4223e472b9`.
 Relatorio: docs/TORBOX_FIXES_0_12_59.md.
+
+Publicada/latest em 01/11/2026, 23:39:47 (Brasilia).
+Build/tag: `d936f7a707ab9fd2da11fe47dd6faa851c08fed9`.
+Download publico integral, tamanho e SHA-256 reconferidos apos publicar.
