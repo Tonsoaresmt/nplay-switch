@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include "cJSON.h"
 
 #define DIR_BASE "sdmc:/switch"
@@ -423,18 +424,45 @@ void store_save_token(const char *token) {
 }
 void store_clear_token(void) { remove(TOKEN_F); }
 
-int store_load_device_id(char *out, size_t cap) {
-    if (!out || cap == 0) return 0;
-    FILE *f = fopen(DEVICE_F, "rb");
-    if (!f) return 0;
-    size_t n = fread(out, 1, cap - 1, f); fclose(f); out[n] = '\0';
-    while (n > 0 && (out[n-1] == '\n' || out[n-1] == '\r' || out[n-1] == ' ' || out[n-1] == '\t')) out[--n] = '\0';
-    return out[0] != '\0';
+static int device_id_valid(const char *id) {
+    if (!id || strlen(id) != 45 || strncmp(id, "nplay-switch-", 13)) return 0;
+    for (int i = 13; i < 45; i++)
+        if (!((id[i] >= '0' && id[i] <= '9') ||
+              (id[i] >= 'a' && id[i] <= 'f') || (id[i] >= 'A' && id[i] <= 'F'))) return 0;
+    return 1;
 }
-void store_save_device_id(const char *id) {
-    if (!id || !id[0]) return;
-    FILE *f = fopen(DEVICE_F, "wb");
-    if (f) { fwrite(id, 1, strlen(id), f); fclose(f); }
+
+int store_load_device_id(char *out, size_t cap) {
+    if (!out || cap < 46) return -1;
+    out[0] = '\0';
+    FILE *f = fopen(DEVICE_F, "rb");
+    if (!f) return errno == ENOENT ? 0 : -1;
+    char buf[80];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    int extra = fgetc(f), failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    buf[n] = '\0';
+    if (failed || extra != EOF || memchr(buf, '\0', n)) return -1;
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ' || buf[n-1] == '\t')) buf[--n] = '\0';
+    if (!device_id_valid(buf)) return -1;
+    memcpy(out, buf, n + 1);
+    return 1;
+}
+int store_save_device_id(const char *id) {
+    if (!device_id_valid(id)) return 0;
+    char previous[80];
+    int state = store_load_device_id(previous, sizeof(previous));
+    if (state != 0) return state == 1 && !strcmp(previous, id);
+    // Immutable identity: publish only a fully written file, never truncate a
+    // previous identity or continue login with an ephemeral replacement.
+    const char *tmp = DEVICE_F ".tmp";
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return 0;
+    size_t n = strlen(id);
+    int ok = fwrite(id, 1, n, f) == n && fflush(f) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, DEVICE_F) != 0) { remove(tmp); return 0; }
+    return store_load_device_id(previous, sizeof(previous)) == 1 && !strcmp(previous, id);
 }
 
 static void trim_line(char *s) {

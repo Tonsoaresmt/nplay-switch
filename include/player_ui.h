@@ -59,6 +59,8 @@ typedef struct {
     const char *next_title;
     float next_card_alpha;    // 0..1
     float next_card_progress; // 0..1 (contagem regressiva)
+    int intro_visible;        // 1 opening, 2 ending; only validated metadata.
+    int intro_selected;
 
     // Feedback
     int flash;                // PuiFlash

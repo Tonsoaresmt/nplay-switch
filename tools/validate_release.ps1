@@ -248,6 +248,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Upload de quadros, resolucoes variaveis ou fal
 if ($LASTEXITCODE -ne 0) { throw 'Navegacao geral, textos ou cache de capas falhou.' }
 & node tools/test_tls_ca.mjs
 if ($LASTEXITCODE -ne 0) { throw 'CA em memoria e verificacao TLS do Switch falharam.' }
+& node tools/test_login_recovery.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Sessao recusada nao retorna ao login ou falha de rede apagou a sessao.' }
+& node tools/test_device_identity.mjs
+if ($LASTEXITCODE -ne 0) { throw 'QR/senha perderam identidade persistente ou SD falho gerou novo aparelho.' }
+& node tools/test_intro_skip.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Pular abertura perdeu validacao, cancelamento, controles ou geometria.' }
+& node tools/test_pairing_identity_api.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Candidato de pareamento perdeu reutilizacao, limite, isolamento ou revogacao.' }
 & node tools/test_native_tls.mjs
 if ($LASTEXITCODE -ne 0) { throw 'TLS nativo perdeu prazo, cancelamento ou verificacao.' }
 & node tools/test_media_list_sync.mjs

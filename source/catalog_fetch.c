@@ -28,9 +28,13 @@ static int fetch_worker(void *userdata) {
             const char *reason = jstr(failure, "reason");
             const char *message = jstr(failure, "error");
             fetch->access_expired = code == 401 && reason && !strcmp(reason, "expired");
+            fetch->authentication_required = code == 401 && fetch->bearer[0] &&
+                                             !SDL_AtomicGet(&fetch->cancel);
             if (code == 200) snprintf(fetch->error, sizeof(fetch->error), "Resposta invalida do catalogo");
             else if (fetch->access_expired)
                 snprintf(fetch->error, sizeof(fetch->error), "Acesso expirado. Entre novamente para renovar.");
+            else if (fetch->authentication_required)
+                snprintf(fetch->error, sizeof(fetch->error), "Sua sessao terminou. Entre novamente.");
             else if (message && message[0])
                 snprintf(fetch->error, sizeof(fetch->error), "HTTP %ld: %.150s", code, message);
             else if (transport_error && transport_error[0])
@@ -52,6 +56,7 @@ int catalog_fetch_start(CatalogFetch *fetch, const char *path, const char *beare
     snprintf(fetch->bearer, sizeof(fetch->bearer), "%s", bearer ? bearer : "");
     fetch->error[0] = '\0';
     fetch->access_expired = 0;
+    fetch->authentication_required = 0;
     SDL_AtomicSet(&fetch->done, 0);
     SDL_AtomicSet(&fetch->cancel, 0);
     fetch->thread = SDL_CreateThread(fetch_worker, "catalog-detail", fetch);

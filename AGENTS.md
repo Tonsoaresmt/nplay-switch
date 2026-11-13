@@ -1,5 +1,85 @@
 # Continuidade para agentes
 
+## Publicacao .60 autorizada — 13/11/2026, em andamento
+
+- Usuario respondeu "sim" a publicar servidor e NRO .60. Autorizacao posterior
+  substitui a restricao local-only das notas historicas abaixo.
+- Revalidar o MESMO NRO/hash com bateria completa e publicar na branch atual,
+  tag v0.12.60 e release latest com NRO/SHA lado a lado; nunca commitar binario.
+- Backend em backend-device-identity deve ir ao main por fast-forward, via
+  publicador normal. Conferir health/commit separado de push; nunca forcar
+  restart nem contornar adiamento por espectadores. Hardware segue pendente.
+
+## Porte backend autorizado — 13/11/2026, somente local
+
+- Usuario confirmou erro de quota ao aprovar QR no celular e autorizou portar
+  e validar no site SEM deploy. Porte concluido no worktree isolado
+  `C:/NplaySwitch/.codex-tmp/backend-device-identity`, branch
+  `codex/switch-device-reuse-20261113`, base origin/main d086dea2.
+- Servidor real: Fastify/HTTP/JWT/senha/billing/SQLite temporario. Suite geral
+  `npm test`, `npm run check`, pairing, admin, migracao, expiracao e billing
+  passaram. Reuso QR/senha no limite, quota nova/concorrente, ownership,
+  revogacao do codigo, rollback e cache verificados. Sem producao/hardware.
+- Aprovacao admin tambem compartilha reserva atomica. Coluna fingerprint entra
+  no migrador oficial, nao DDL de rota. Legados sem identidade nao sao fundidos.
+  Prototipo integration/nplay-device-identity e historico, nao aplicar por cima
+  do porte. README aponta relatorio completo no backend.
+- NRO .60 e seu binario/testes permanecem inalterados, hash0c1a5a62...87157.
+  Sem commit/push/deploy/release nesta rodada. .59 permanece latest.
+
+## Identidade/abertura — 13/11/2026, .60 LOCAL ampliada
+
+- Usuario confirmou entrada resolvida, atribuiu bloqueio a atualizacao Nintendo.
+  Nao atribuir ao JWT/TLS sem evidencia. Pediu rever limite em aparelho existente
+  e Pular abertura. Checkout/branch autorizados preservados, sem novo commit.
+- QR antigo nao manda fingerprint; servidor confere limite antes de reuso.
+  Rota atuald086dea identica fixturec9 (CR ignorado); SQLite real reproduz409
+  para mesmoSwitchnaunicavaga. Senha ja reutiliza fingerprint se houverregistro.
+- NRO QR/senha agora compartilham ensure_device_identity, save atomicoreleitura,
+  identidadeimutavel/validada. FalhaSD impedeidentidadeefemera e nao apaga arquivos.
+  Integra candidatebackend em integration/nplay-device-identity/ NAO implantado:
+  reusoporusuario+fp+approved, reserva na aprovacao, ownership/revogacao/cache.
+  Nao reusarporIP/nome nem apagarlegados. Pedidaautorizacaoportarbackend; semresposta.
+- NRO nao tinha Pular abertura. Novo intro_skip opcional/async depoisdequadro,
+  API32KiB/5s+fallbackTheIntroDBfixosemauth3s/janela8s, TLS/cancelproprios.
+  Ranges/identidade/duracao estritos, resposta aposjoin; nada bloqueiaPlay.
+  Botao380x68 centrado640 acima timeline, reserva de falas, Direita/A/B/touch.
+  Usa timeline existente, pausa preservada; semseek naoexibe; final deixa1s.
+- Tests10kidentity,212pthreadintro+geometria/input e SQLite30QR passam, simulam
+  rede/SDL/Fastify/billing/JWT. Sem Switch/GPU/SD/producao. Nativeffmpeginalterado.
+- Build ARM64COMPLETO-Werror+incrementalFINAL passou. Primeira suite terminou
+  duranteajusteEOF, NAO provaFINAL; bateria FINAL COMPLETA SEMSkipMediaFixtures
+  PASSOU aposrebuild, commidia55casos/1087blocosAAC eELF, no binarioimutavel
+  no NRO24311631B SHA0c1a5a6208109ec97e21abc13f7ea80370c25f58a6e58a1e3cf4cf3c9ff87157.
+  Nenhumapp/rebuildaposprova; sidecar atualizadoaposprova. Nao commitarNRO/sidecar.
+- docs/DEVICE_IDENTITY_INTRO_0_12_60.md/RELEASE detalham. .59 continua latest.
+  Sem push/release/deploy. Autorizacao anterior .59 NAO equivale a publicar .60.
+
+## Entrada no app — 12/11/2026, candidata LOCAL .60
+
+- Relato novo: nao consegue acessar; ainda sem frase/foto/versao/logs. Nao
+  afirmar causa fisica confirmada. Health/home200, modo normal, TLS1.2 e
+  User-Agent do NRO funcionaram publicamente. Bundle exato validou no PC;
+  NAO e handshake Horizon. Producao d086dea, latest.59 hash correto.
+- Defeito .59 demonstrado: CatalogFetch so retornava ao login em reasonexpired;
+  JWT recusado401/Naoautenticado ficava nos perfis repetindo mesma sessao.
+  .60 adiciona authentication_required apenas401 autenticado/nao cancelado;
+  resultado aceito aposjoin retorna login, limpa so sessao/usuario/perfilativo.
+  TLS/rede/403/429/5xx conservam conta; resultado descartado/tela antiga nao
+  desconecta. Autoavanco pendente e invalidado. Sem mudar TLS/player/backend.
+- Novo test_login_recovery obrigatorio: worker/despacho/limpezaC reais,
+  HTTP/storage/SDLfake+pthreadsreal,2200requests/join. Baseline.59 falha na
+  assertion de retorno ao login; positivo passa. TLSCA/parserpairing passaram.
+- Build ARM64 COMPLETO -Werror e validador FINAL COMPLETO SEM SkipMediaFixtures
+  passaram, incluindo midia/simbolos ELF. Sem app/rebuild depois da prova.
+  NRO.60LOCAL24299343B/SHA256
+  3c16d14d4847ba89e1ad0c2cc67be57b063cf5e5c1202705ff1ff843a813e662.
+  Sidecar local atualizado; NRO/sidecar nunca commitar. Sem Switch fisico ou
+  login autenticado de producao. docs/LOGIN_RECOVERY_0_12_60.md tem limites.
+  Sem teste da conta nao atribuir relato a JWT/certificado/Wi-Fi. Pedida foto.
+- Nenhum commit/push/release/deploy nesta rodada. Perguntado se publica .60;
+  ainda sem resposta. .59 continua latest. Nao afirmar .60 no atualizador.
+
 ## Publicacao .59 — CONFIRMADA em 01/11/2026 (Brasilia)
 
 - Usuario autorizou: "manda pro git a atualizacao quando terminar". Bateria

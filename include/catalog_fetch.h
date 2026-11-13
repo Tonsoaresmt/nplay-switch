@@ -14,6 +14,7 @@ typedef struct {
     char bearer[640];
     char error[192];
     int access_expired;
+    int authentication_required; // Accepted API 401, not a TLS/network failure.
     cJSON *result;
 } CatalogFetch;
 

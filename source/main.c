@@ -75,6 +75,7 @@ typedef struct {
     DevicePairingCode code;
     DevicePairingToken token;
     char status[192];
+    char fingerprint[80]; // Stable installation identity, shared by QR/password.
     int result;
     int restart_requested;
     Uint32 expires_at;
@@ -1243,9 +1244,10 @@ static int resolve_open_thread(void *userdata) {
     return 0;
 }
 
-// Um token JWT pode durar mais que uma assinatura. Quando a API devolve
-// reason=expired, descarte somente a sessao local e mostre o login de novo.
-static void access_expired_to_login(void) {
+// Um token JWT pode durar mais que uma assinatura ou ser recusado pelo servidor.
+// Descarte somente a sessao local em uma negativa de autenticacao confirmada;
+// erros de transporte/TLS nunca chamam esta rotina.
+static void session_invalid_to_login(const char *message) {
     store_clear_token();
     store_clear_user();
     store_clear_profile_id();
@@ -1254,8 +1256,12 @@ static void access_expired_to_login(void) {
     g_profile_id = 0;
     g_profile_required = 0;
     net_set_profile_id(0);
-    toast("Seu acesso expirou. Entre novamente para renovar.");
+    toast(message);
     g_screen = SC_LOGIN;
+}
+
+static void access_expired_to_login(void) {
+    session_invalid_to_login("Seu acesso expirou. Entre novamente para renovar.");
 }
 
 // O remux em tempo real nao oferece Range. Se a pessoa voltar antes de o R2
@@ -1761,11 +1767,13 @@ static void pump_catalog_fetch(void) {
         g_fetch_discard = 0;
         return;
     }
-    if (g_fetch.access_expired) {
+    if (g_fetch.access_expired || g_fetch.authentication_required) {
         if (result) cJSON_Delete(result);
         g_fetch_current.kind = FETCH_NONE;
         g_fetch_discard = 0;
-        access_expired_to_login();
+        g_episode_pending.active = 0;
+        if (g_fetch.access_expired) access_expired_to_login();
+        else session_invalid_to_login("Sua sessao terminou. Entre novamente.");
         return;
     }
     int applied = 0;
@@ -3699,6 +3707,25 @@ static void draw_downloads(void) {
 }
 
 // ------------------------------------------------------------- login
+static int ensure_device_identity(char *out, size_t cap) {
+    int state = store_load_device_id(out, cap);
+    if (state == 1) return 0;
+    if (state < 0) {
+        snprintf(g_status, sizeof(g_status), "Nao consigo ler a identidade do Switch no SD. Verifique o cartao.");
+        return -1;
+    }
+    unsigned char random_id[16];
+    randomGet(random_id, sizeof(random_id));
+    char candidate[80] = "nplay-switch-";
+    for (int i = 0; i < 16; i++) snprintf(candidate + 13 + i * 2, sizeof(candidate) - (size_t)(13 + i * 2), "%02x", random_id[i]);
+    if (!store_save_device_id(candidate) || store_load_device_id(out, cap) != 1 || strcmp(candidate, out)) {
+        if (out && cap) out[0] = '\0';
+        snprintf(g_status, sizeof(g_status), "Nao consigo salvar a identidade do Switch no SD. Verifique o cartao.");
+        return -1;
+    }
+    return 0;
+}
+
 static void pair_set_stage(LoginPairStage stage, const char *status) {
     if (!g_pair.mutex) return;
     SDL_LockMutex(g_pair.mutex);
@@ -3718,7 +3745,8 @@ static int login_pairing_thread(void *unused) {
     (void)unused;
     char url[512];
     snprintf(url, sizeof(url), "%s/api/device/code", BASE);
-    const char *body = "{\"device_name\":\"Nintendo Switch\",\"device_type\":\"console\"}";
+    char body[240];
+    snprintf(body, sizeof(body), "{\"device_name\":\"Nintendo Switch\",\"device_type\":\"console\",\"device_fingerprint\":\"%s\"}", g_pair.fingerprint);
     struct membuf response = {0};
     const char *net_error = NULL;
     long http = net_request_timeout_cancel(url, "POST", body, NULL, &response, &net_error,
@@ -3835,6 +3863,11 @@ static void start_login_pairing(void) {
     if (g_pair.thread) return;
     if (!g_pair.mutex) g_pair.mutex = SDL_CreateMutex();
     if (!g_pair.mutex) { snprintf(g_status, sizeof(g_status), "Memoria insuficiente para conectar"); return; }
+    char fingerprint[80];
+    if (ensure_device_identity(fingerprint, sizeof(fingerprint)) != 0) {
+        pair_set_stage(LOGIN_PAIR_ERROR, g_status);
+        return;
+    }
     SDL_AtomicSet(&g_pair.cancel, 0);
     SDL_AtomicSet(&g_pair.done, 0);
     SDL_LockMutex(g_pair.mutex);
@@ -3842,6 +3875,7 @@ static void start_login_pairing(void) {
     memset(&g_pair.token, 0, sizeof(g_pair.token));
     g_pair.result = 0;
     g_pair.stage = LOGIN_PAIR_REQUESTING;
+    snprintf(g_pair.fingerprint, sizeof(g_pair.fingerprint), "%s", fingerprint);
     snprintf(g_pair.status, sizeof(g_pair.status), "Criando uma conexao segura...");
     SDL_UnlockMutex(g_pair.mutex);
     g_pair.thread = SDL_CreateThread(login_pairing_thread, "device-pair", NULL);
@@ -3888,17 +3922,11 @@ static void pump_login_pairing(void) {
 }
 
 static int do_login(void) {
+    char fingerprint[80] = {0};
+    if (ensure_device_identity(fingerprint, sizeof(fingerprint)) != 0) return -1;
     char user[128] = { 0 }, pass[128] = { 0 };
     if (prompt_text("Usuario Nplay", user, sizeof(user), 0) != 0) return -1;
     if (prompt_text("Senha", pass, sizeof(pass), 1) != 0) return -1;
-    char fingerprint[80] = {0};
-    if (!store_load_device_id(fingerprint, sizeof(fingerprint))) {
-        unsigned char random_id[16]; randomGet(random_id, sizeof(random_id));
-        strcpy(fingerprint, "nplay-switch-");
-        int off = (int)strlen(fingerprint);
-        for (int i = 0; i < 16; i++) snprintf(fingerprint + off + i * 2, sizeof(fingerprint) - (size_t)(off + i * 2), "%02x", random_id[i]);
-        store_save_device_id(fingerprint);
-    }
     cJSON *request = cJSON_CreateObject();
     if (!request) { memset(pass, 0, sizeof(pass)); snprintf(g_status, sizeof(g_status), "Memoria insuficiente para entrar"); return -1; }
     cJSON_AddStringToObject(request, "username", user);

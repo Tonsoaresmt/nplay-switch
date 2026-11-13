@@ -6,6 +6,7 @@
 #include "text.h"
 #include "ui.h"
 #include "subtitle_utf8.h"
+#include "intro_skip.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -619,6 +620,8 @@ static void draw_subtitle(SDL_Renderer *r, const PlayerHud *h) {
     // Sobe quando a barra aparece, para nunca ficar embaixo dos controles.
     float raise = clamp01(h->hud_alpha);
     int bottom = (int)(668 - raise * 130);
+    if (h->intro_visible && !h->scrubbing && !h->panel_open && !h->episodes_open && bottom > INTRO_BUTTON_Y - 12)
+        bottom = INTRO_BUTTON_Y - 12;
     // Com o cartao de proximo episodio na tela, a legenda sobe acima dele.
     if (h->has_next && h->next_card_alpha > 0.01f) {
         int above_card = 420;
@@ -794,6 +797,19 @@ static void draw_episodes(SDL_Renderer *r, const PlayerHud *h) {
            x + 40, PUI_H - 56, K_DIM, ST_SMALL, 1.0f, w - 80);
 }
 
+static void draw_intro_skip(SDL_Renderer *r, const PlayerHud *h) {
+    if (!h->intro_visible || h->panel_open || h->episodes_open || h->scrubbing || h->buffering) return;
+    rrect(r, INTRO_BUTTON_X, INTRO_BUTTON_Y, INTRO_BUTTON_W, INTRO_BUTTON_H, 12,
+          h->intro_selected ? K_ACC : K_PANEL, .96f);
+    if (h->intro_selected)
+        rrect(r, INTRO_BUTTON_X + 6, INTRO_BUTTON_Y + INTRO_BUTTON_H - 5,
+              INTRO_BUTTON_W - 12, 3, 1.5f, K_WHITE, 1);
+    text_center_a(r, h->intro_visible == 2 ? "Pular encerramento" : "Pular abertura",
+                  INTRO_BUTTON_X + INTRO_BUTTON_W / 2, INTRO_BUTTON_Y + 10, K_WHITE, ST_NORMAL, 1);
+    text_center_a(r, h->intro_selected ? "A  Pular    B  Cancelar" : "Direita  Selecionar  |  Toque  Pular",
+                  INTRO_BUTTON_X + INTRO_BUTTON_W / 2, INTRO_BUTTON_Y + 42, K_MUTED, ST_SMALL, 1);
+}
+
 void pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
     if (!r || !h) return;
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
@@ -807,6 +823,7 @@ void pui_draw(SDL_Renderer *r, const PlayerHud *h, Uint32 now) {
         draw_volume_popup(r, h);
     }
     draw_next_card(r, h);
+    draw_intro_skip(r, h);
     draw_flash(r, h);
     draw_buffering(r, h, now);
     draw_notice(r, h);

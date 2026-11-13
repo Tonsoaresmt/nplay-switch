@@ -51,6 +51,7 @@
 #include "player_seek_input.h"
 #include "player_video_layout.h"
 #include "player_audio_timeline.h"
+#include "intro_skip.h"
 
 #define JOY_A 0
 #define JOY_B 1
@@ -553,7 +554,7 @@ static void draw_hud(SDL_Renderer *ren, const PlayerHud *base,
 
 static void draw_subtitle_overlay(SDL_Renderer *ren, const PlayerHud *base,
                                   const char *subtitle_text) {
-    if ((!subtitle_text || !subtitle_text[0]) && base->next_card_alpha <= 0.01f &&
+    if ((!subtitle_text || !subtitle_text[0]) && !base->intro_visible && base->next_card_alpha <= 0.01f &&
         (!base->signs || base->signs->count == 0)) return;
     PlayerHud hud = *base;
     hud.hud_alpha = 0;
@@ -2891,6 +2892,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int logged_first_read = 0, logged_first_video_packet = 0;
     int logged_first_video_frame = 0, logged_first_present = 0;
     int track_menu = 0, track_sel = 0;
+    IntroSkip intro_skip = {0};
+    int intro_selected = 0, intro_touch_active = 0;
+    SDL_FingerID intro_touch_finger = 0;
     int hot_probe_retry = 0;
     SubtitleDiscovery *discovery = NULL;
     unsigned discovery_attempts = 0;
@@ -3207,6 +3211,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             }
         }
 
+        if (logged_first_present && (req->episode > 0 || !strcmp(req->playback.kind, "episode")))
+            intro_skip_poll(&intro_skip, req->item_id, req->source_id, dur, g_token);
+        const IntroSegment *skip_range = intro_skip_current(&intro_skip, cur_pos, dur,
+            logged_first_present && have_video_frame && seekable_stream && !resume_preroll &&
+            !track_menu && !timeline_seek && !episodes_menu && !next_selected && !quick_seek_active && !buffering_since);
+        if (!skip_range) intro_selected = 0;
+        hud_base.intro_visible = skip_range ? skip_range->type : 0;
+        hud_base.intro_selected = intro_selected;
         PlayerNextUi next_ui = {0};
         player_next_ui(hud_base.has_next, cur_pos, dur,
                        next_selected || paused || hud_pinned, &next_ui);
@@ -3338,6 +3350,27 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     }
                 }
             }
+            // Pular abertura is a real touch button: capture one finger and
+            // activate only on release inside the same still-valid target.
+            if (intro_touch_active && e.type == SDL_FINGERDOWN) continue;
+            if (intro_touch_active && (e.type == SDL_FINGERUP || e.type == SDL_FINGERMOTION)) {
+                if (e.tfinger.fingerId != intro_touch_finger) continue;
+                if (e.type == SDL_FINGERMOTION) {
+                    if (!intro_skip_hit((int)(e.tfinger.x * PWIN_W), (int)(e.tfinger.y * PWIN_H))) intro_touch_active = 0;
+                    continue;
+                }
+                intro_touch_active = 0;
+                if (skip_range && !track_menu && !timeline_seek && !episodes_menu && !next_selected &&
+                    intro_skip_hit((int)(e.tfinger.x * PWIN_W), (int)(e.tfinger.y * PWIN_H))) {
+                    intro_selected = 1;
+                    touch_track_button = JOY_A;
+                } else continue;
+            }
+            if (e.type == SDL_FINGERDOWN && skip_range && !track_menu && !timeline_seek && !episodes_menu &&
+                !next_selected && intro_skip_hit((int)(e.tfinger.x * PWIN_W), (int)(e.tfinger.y * PWIN_H))) {
+                if (!intro_touch_active) { intro_touch_active = 1; intro_touch_finger = e.tfinger.fingerId; }
+                continue;
+            }
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_JOYBUTTONDOWN || touch_track_button >= 0) {
                 if (touch_track_button < 0 && joy &&
@@ -3372,6 +3405,17 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         notice_until = SDL_GetTicks() + 1500;
                     }
                     continue;
+                }
+                if (intro_selected && !track_menu && !timeline_seek && !episodes_menu) {
+                    intro_selected = 0;
+                    if (b == JOY_B || b == JOY_DLEFT) continue;
+                    if (b == JOY_A && skip_range) {
+                        timeline_seek = 1;
+                        timeline_seek_from = cur_pos;
+                        timeline_seek_target = intro_skip_target(skip_range, dur);
+                        timeline_seek_was_paused = paused;
+                        diag_player_event("intro", "skip-confirmed", "kind=%d target=%.2f", skip_range->type, timeline_seek_target);
+                    }
                 }
                 if (timeline_seek) {
                     if (b == JOY_A) {
@@ -3800,6 +3844,10 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     episodes_was_paused = paused;
                     paused = 1;
                     if (adev) SDL_PauseAudioDevice(adev, 1);
+                }
+                else if (b == JOY_DRIGHT && skip_range) {
+                    intro_selected = 1;
+                    hud_until = SDL_GetTicks() + 4000;
                 }
                 else if (b == JOY_DRIGHT && hud_base.has_next) {
                     next_selected = 1;
@@ -4595,6 +4643,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         av_packet_unref(pkt);
     }
 
+    intro_skip_stop(&intro_skip);
     if (demux_started) {
         demux_worker_stop(&demux);
         diag_player_event("demux", "worker-stop", "restart=%d", controlled_restart);

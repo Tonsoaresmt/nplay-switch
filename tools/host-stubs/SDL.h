@@ -1,15 +1,18 @@
 #pragma once
 typedef unsigned int Uint32;
+typedef long long SDL_FingerID;
 typedef struct SDL_Texture SDL_Texture;
 typedef struct SDL_Renderer SDL_Renderer;
 typedef struct SDL_Thread SDL_Thread;
 typedef struct { unsigned char r, g, b, a; } SDL_Color;
 typedef struct { int x, y, w, h; } SDL_Rect;
 typedef struct { unsigned type; struct { unsigned char button; } jbutton;
-    struct { float x, y; } tfinger; } SDL_Event;
+    struct { float x, y; SDL_FingerID fingerId; } tfinger; } SDL_Event;
 #define SDL_QUIT 1
 #define SDL_JOYBUTTONDOWN 2
 #define SDL_FINGERDOWN 3
+#define SDL_FINGERUP 4
+#define SDL_FINGERMOTION 5
 typedef struct { int value; } SDL_atomic_t;
 Uint32 SDL_GetTicks(void);
 int SDL_AtomicSet(SDL_atomic_t *, int);

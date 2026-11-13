@@ -74,8 +74,9 @@ int  store_load_user(char *out, size_t cap);
 void store_save_user(const char *user);
 void store_clear_user(void);
 
+// 1=valid, 0=absent, -1=unreadable/malformed. Never rotate on an I/O error.
 int  store_load_device_id(char *out, size_t cap);
-void store_save_device_id(const char *id);
+int  store_save_device_id(const char *id);
 
 int  store_load_update_seen(char *out, size_t cap);
 void store_save_update_seen(const char *tag);
