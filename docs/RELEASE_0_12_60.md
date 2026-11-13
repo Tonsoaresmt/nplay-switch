@@ -1,5 +1,8 @@
 # Nplay Switch 0.12.60 — Entrada e Pular abertura
 
+Publicada em 13/11/2026, 09:01:19 Brasilia, como versao mais recente.
+NRO e checksum publicos conferidos por download integral sem autenticacao.
+
 - Corrige o retorno ao login quando o servidor recusa uma sessao antiga.
   Antes, o app podia ficar na tela de perfis repetindo `Nao autenticado`.
 - Distingue sessao encerrada de acesso vencido da conta.
@@ -29,3 +32,9 @@ no artefato acima. Nenhuma alteracao do app/rebuild apos a prova. Sem teste no
 Switch fisico. Backend passou `npm run check`, `npm test` completo e testes de
 QR/senha/admin com HTTP/JWT/billing/SQLite reais em banco temporario. Push e
 deploy do servidor sao conferidos separadamente da release do NRO.
+
+Servidor: correcao enviada ao main em `45a968594ca3ec4c981b2c2c03348fec13da0eb3`.
+No momento desta publicacao, o timer reconheceu o commit, mas adiou o deploy
+por reproducoes ativas. A API ainda respondia com `d086dea2`. Nao foi forcado
+reinicio. O reuso QR no limite depende da conclusao desse deploy e do primeiro
+vinculo dos cadastros legados. O NRO pode ser atualizado independentemente.

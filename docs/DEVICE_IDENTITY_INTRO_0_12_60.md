@@ -139,6 +139,23 @@ nesta rodada. NRO/hash/testes acima nao mudaram; .60 continua local, .59 publica
 Registros QR legados sem identidade ainda precisam de primeiro vinculo explicito
 ou liberacao manual da vaga; atualizar somente o servidor nao corrige o QR .59.
 
+## Publicacao autorizada e verificada (13/11/2026)
+
+NRO .60 latest publico em 2026-11-13 12:01:19 UTC, tag/target
+`2ebb064a6645b17c25b769e484988eaddee1ca42`. Download integral sem auth,
+API latest e sidecar conferidos:24311631B, mesmo SHA256 acima. NRO nao foi
+commitado. Bateria completa de publicacao passou novamente sem pular fixtures;
+uma tentativa preliminar parou na ferramenta nm ausente do PATH, e a repeticao
+FINAL com caminho ARM64 explicito terminou exit0 incluindo ELF/midia. Sem rebuild.
+
+Backend passou novamente check/test completos e foi enviado sem force ao main,
+commit `45a968594ca3ec4c981b2c2c03348fec13da0eb3`. A VPS reconheceu o remoto,
+mas ainda nao implantou: guard acusou reproducoes ativas e timer segue ativo.
+Health publico as12:01:50UTC continua d086dea2, banco ok e worker recente.
+Nao foi forcado restart, deploy ou alterado Actions. **Servidor ainda enfileirado**,
+nao declarar reuso QR em producao antes de confirmar o commit novo no health.
+Hardware fisico e primeiro vinculo de QR legado continuam pendentes.
+
 ## Fontes
 
 - Site: `docs/INTRO_SKIP_PLAYER.md`, `public/js/player/intro-skip.js`,

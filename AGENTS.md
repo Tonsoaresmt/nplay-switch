@@ -1,5 +1,25 @@
 # Continuidade para agentes
 
+## .60 PUBLICADA / backend enfileirado — 13/11/2026
+
+- Usuario autorizou servidor e .60. NRO publicado latest, nao draft/prerelease,
+  em 2026-11-13 12:01:19 UTC (09:01:19 Brasilia):
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.60
+- Tag anotada dereferenciada/target: 2ebb064a6645b17c25b769e484988eaddee1ca42.
+  Push atomico branch/tag sem force. NRO nao commitado; NRO e sidecar76B nas
+  releases. Download INTEGRAL publico sem auth e API latest conferidos:
+  24311631B, SHA256 0c1a5a6208109ec97e21abc13f7ea80370c25f58a6e58a1e3cf4cf3c9ff87157.
+- Bateria COMPLETA reexecutada SEM SkipMediaFixtures no mesmo NRO, exit0,
+  55 casosmidia/1087blocosAAC/ELF. Tentativa preliminar parou SO no nm ausente
+  do PATH apos midia passar; repeticao final com TARGET_NM ARM64 passou inteira.
+  Nenhuma mudanca app/rebuild apos prova; hardware permanece pendente.
+- Backend check/test COMPLETOS repetidos exit0, commit45a968594ca3ec4c981b2c2c03348fec13da0eb3
+  enviado a main por fast-forward. VPS ja reconhece origin/main45a96859,
+  mas checkout/API continuam d086dea2: guard informa reproducoes ativas e adia.
+  Timer ativo2min, SSH somente LEITURA, sem forcar deploy/restart nem mexer Actions.
+  Health12:01:50UTC ok/databaseok/worker recente. NAO afirmar backend em producao.
+  QR .60 no limite depende desse deploy e primeiro vinculo para legado sem ID.
+
 ## Publicacao .60 autorizada — 13/11/2026, em andamento
 
 - Usuario respondeu "sim" a publicar servidor e NRO .60. Autorizacao posterior
