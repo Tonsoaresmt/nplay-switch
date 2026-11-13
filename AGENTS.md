@@ -19,6 +19,13 @@
   Timer ativo2min, SSH somente LEITURA, sem forcar deploy/restart nem mexer Actions.
   Health12:01:50UTC ok/databaseok/worker recente. NAO afirmar backend em producao.
   QR .60 no limite depende desse deploy e primeiro vinculo para legado sem ID.
+- Rechecagem13/11 16:29–16:30UTC: backend ainda d086dea2, remoto45a96859,
+  timerativo, nova tentativa16:29:54 adiada. Guard action=check retornou409,
+  viewers3/requests0. SQLite somente leitura confirmou3heartbeats recentes
+  (16:28:11–16:28:58 as16:29:05), play_sessions recentes0. Sem PII/segredos,
+  writes, encerramento de sessao, lease acquire/release ou bypass do guard.
+  Nao e prova de3pessoas fisicas, mas ha atividade recente protegida; aguardar
+  janela segura. Nenhuma mudanca no NRO/publicacao adicional do aplicativo.
 
 ## Publicacao .60 autorizada — 13/11/2026, em andamento
 
