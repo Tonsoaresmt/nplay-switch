@@ -1225,19 +1225,25 @@ static int hot_subtitle_wait(SDL_Renderer *ren, const char *title, HotSubtitleJo
     if (SDL_AtomicGet(&job->cancel)) { external_subtitle_clear(&job->loaded); return -2; }
     return job->result;
 }
-static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *url,
-                              ExternalSubtitleStore *store, double offset) {
+static ProgressiveSubtitle *start_hot_subtitle(const char *url, double offset) {
     ProgressiveSubtitle *stream = calloc(1, sizeof(*stream));
-    if (!stream) return -1;
-    if (!url || strlen(url) >= sizeof(stream->url)) { free(stream); return -1; }
+    if (!stream) return NULL;
+    if (!url || strlen(url) >= sizeof(stream->url)) { free(stream); return NULL; }
     int written = offset > 0
         ? snprintf(stream->url,sizeof(stream->url),"%s%cfrom=%.3f",url,strchr(url,'?')?'&':'?',offset)
         : snprintf(stream->url,sizeof(stream->url),"%s",url);
-    if (written < 0 || (size_t)written >= sizeof(stream->url)) { free(stream); return -1; }
+    if (written < 0 || (size_t)written >= sizeof(stream->url)) { free(stream); return NULL; }
     stream->mutex = SDL_CreateMutex();
     vtt_stream_init(&stream->parser, progressive_subtitle_block, stream);
     if (stream->mutex) stream->thread = SDL_CreateThread(progressive_subtitle_worker, "subtitle-stream", stream);
-    if (!stream->thread) { progressive_subtitle_stop(stream); return -1; }
+    if (!stream->thread) { progressive_subtitle_stop(stream); return NULL; }
+    return stream;
+}
+
+static int load_hot_subtitle(SDL_Renderer *ren, const char *title, const char *url,
+                              ExternalSubtitleStore *store, double offset) {
+    ProgressiveSubtitle *stream = start_hot_subtitle(url, offset);
+    if (!stream) return -1;
     Uint32 started = SDL_GetTicks(); int quit = 0;
     while (!SDL_AtomicGet(&stream->ready) && !SDL_AtomicGet(&stream->done) && !SDL_AtomicGet(&stream->cancel)) {
         SDL_Event event;
@@ -1878,10 +1884,20 @@ static inline int demux_worker_terminal(DemuxWorker *worker) {
 
 // Called only after take_stream(video) found nothing. If the producer is
 // blocked behind audio, expand indexing inside the SAME media byte budget.
-// 1=producer released, 0=network still reading/terminal, -1=bounded limit.
+// 1=producer released, 0=wait/retry video, 2=terminal without buffered video,
+// -1=bounded limit. Terminal and queue must be checked under the SAME lock.
 static int demux_worker_video_lookahead(DemuxWorker *worker, int video_index) {
     int result = 0;
     SDL_LockMutex(worker->mutex);
+    if (worker->terminal) {
+        result = 2;
+        for (int i = 0; i < worker->count; ++i)
+            if (worker->queue[(worker->head + i) % worker->queue_slots].packet->stream_index == video_index) {
+                result = 0;
+                break;
+            }
+        goto unlocked;
+    }
     if (worker->space_blocked && !worker->terminal) {
         // Recheck under this lock: a video packet can arrive AFTER the caller's
         // take_stream() scan. Never report a limit when that video is now here.
@@ -2475,13 +2491,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         for (int i = 0; i < count; i++)
             subtitle_catalog_add(manifest_subtitles, sidxs, subtitle_origins, &nsub,
                                  &probed[i], -1, SUBTITLE_HOT);
+        int has_full_pt = hls_subtitle_has_full_pt(probed, count);
         free(probed);
         if (count == -2) {
             avformat_close_input(&fmt); nplay_curl_avio_close(avio);
             player_error_message("Abertura cancelada"); return -11;
         }
         hot_probe_duration = job.duration;
-        discovery_retry = subtitle_discovery_retryable(job.http_code, count);
+        discovery_retry = subtitle_discovery_retryable(job.http_code, has_full_pt);
         if (open_watch.deadline_us > 0) open_watch.deadline_us += av_gettime_relative() - before_subtitles;
         diag_player_event("subtitle", "hot-probe", "tracks=%d duration=%.1f", count, job.duration);
     }
@@ -2525,6 +2542,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             audio_tracks[i].language = language ? language->value : NULL;
             audio_tracks[i].title = stream_track_title(stream);
             audio_tracks[i].is_default = !!(stream->disposition & AV_DISPOSITION_DEFAULT);
+            audio_tracks[i].is_commentary = !!(stream->disposition &
+                (AV_DISPOSITION_COMMENT | AV_DISPOSITION_VISUAL_IMPAIRED));
+            audio_tracks[i].is_original = !!(stream->disposition & AV_DISPOSITION_ORIGINAL);
         }
         const char *norm = audio_language_normalize(audio_tracks[i].language, audio_tracks[i].title);
         if (norm[0]) known_audio++;
@@ -2583,29 +2603,30 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         if (!strcasecmp(pref_sub, "off")) sub_chosen = 1;
         else {
             const char *want_sub = lang_norm(pref_sub);
-            for (int i = 0; want_sub[0] && i < nsub; i++) {
-                const char *candidate = SUB_EXTERNAL(i)
-                    ? audio_language_normalize(manifest_subtitles[i].language,
-                                               manifest_subtitles[i].name)
-                    : stream_norm(fmt, sidxs[i]);
-                if (!strcmp(candidate, want_sub)) { scur = i; sub_chosen = 1; break; }
-            }
+            int preferred = subtitle_choice_preferred(subtitle_keys, nsub, want_sub);
+            if (preferred >= 0) { scur = preferred; sub_chosen = 1; }
         }
     }
     if (!sub_chosen && naud > 0) {
         const char *audio_norm = stream_norm(fmt, aidxs[acur]);
         if ((audio_norm[0] && strcmp(audio_norm, "pt")) ||
             (req->audio_pref == 1 && pt_audio < 0 && known_audio > 0)) {
-            for (int i = 0; i < nsub; i++) {
-                const char *candidate = SUB_EXTERNAL(i)
-                    ? audio_language_normalize(manifest_subtitles[i].language,
-                                               manifest_subtitles[i].name)
-                    : stream_norm(fmt, sidxs[i]);
-                if (!strcmp(candidate, "pt")) { scur = i; break; }
-            }
+            scur = subtitle_choice_preferred(subtitle_keys, nsub, "pt");
         }
     }
 
+    char subtitle_auto_language[8] = "";
+    if (scur < 0 && !sub_chosen &&
+        (!req->subtitle_choice || !req->subtitle_choice->valid)) {
+        const char *wanted = lang_norm(pref_sub);
+        if (wanted[0]) snprintf(subtitle_auto_language, sizeof(subtitle_auto_language), "%s", wanted);
+        else if (naud > 0) {
+            const char *audio_norm = stream_norm(fmt, aidxs[acur]);
+            if ((audio_norm[0] && strcmp(audio_norm, "pt")) ||
+                (req->audio_pref == 1 && pt_audio < 0 && known_audio > 0))
+                snprintf(subtitle_auto_language, sizeof(subtitle_auto_language), "pt");
+        }
+    }
     int aidx = naud ? aidxs[acur] : -1;
     // Desired selection survives an early decoder/network failure. No streams
     // in a fallback source must not silently overwrite it with deliberate OFF.
@@ -2626,6 +2647,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SubtitleQueue subtitles;
     subtitle_queue_reset(&subtitles);
     ExternalSubtitleStore external_subtitles = {0};
+    ProgressiveSubtitle *pending_hot_subtitle = NULL;
+    int pending_hot_choice = -1;
+    Uint32 pending_hot_started = 0;
     SubtitleFetch subtitle_fetch;
     memset(&subtitle_fetch, 0, sizeof(subtitle_fetch));
     if (scur >= 0 && !SUB_EXTERNAL(scur) &&
@@ -2649,6 +2673,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
             open_watch.deadline_us += av_gettime_relative() - before_subtitles;
         if (sub_result != 0) {
             diag_player_event("subtitle", "manifest-load-fail", "choice=%d rc=%d", scur + 1, sub_result);
+            if (sub_result != -2) subtitle_retry_failed(&subtitle_retry, scur, SDL_GetTicks());
             scur = -1;
         }
     }
@@ -2755,6 +2780,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (actx) avcodec_free_context(&actx); \
     if (sctx) avcodec_free_context(&sctx); \
     subtitle_fetch_stop(&subtitle_fetch); \
+    progressive_subtitle_stop(pending_hot_subtitle); \
     if (scur >= 0 && SUB_EXTERNAL(scur) && !SUB_HOT(scur)) \
         subtitle_session_keep(manifest_subtitles[scur].uri, &external_subtitles); \
     external_subtitle_clear(&external_subtitles); \
@@ -3066,11 +3092,23 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 snprintf(notice, sizeof(notice), "Novas legendas disponiveis  |  X para escolher");
                 notice_until = now_ticks + 5000;
             }
+            if (subtitle_auto_language[0] && scur < 0 && subtitle_retry.desired < 0) {
+                int preferred = subtitle_choice_preferred(subtitle_keys, nsub, subtitle_auto_language);
+                if (preferred >= 0) {
+                    subtitle_auto_language[0] = 0;
+                    subtitle_retry_select(&subtitle_retry, preferred);
+                    subtitle_retry.pending = 1;
+                    subtitle_retry.deadline = now_ticks;
+                    subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                                            preferred, req->source_id);
+                }
+            }
             if (sequential_stream && discovery->job.duration > 0) {
                 dur = discovery->job.duration;
                 if (out_dur) *out_dur = dur;
             }
-            discovery_retry = subtitle_discovery_retryable(discovery->job.http_code, count);
+            discovery_retry = subtitle_discovery_retryable(discovery->job.http_code,
+                hls_subtitle_has_full_pt(manifest_subtitles, nsub));
             discovery_due = now_ticks + (discovery_attempts < 2 ? 5000u : 10000u);
             diag_player_event("subtitle", "discovery", "code=%ld count=%d total=%d attempt=%u",
                               discovery->job.http_code, count, nsub, discovery_attempts);
@@ -3137,9 +3175,44 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 }
             }
         }
+        // Late remux tracks start without a modal or a video/network restart.
+        // A live progressive worker owns its store until ready; changing/off
+        // cancels only that worker. Joining happens only after done (or teardown).
+        if (pending_hot_subtitle) {
+            ProgressiveSubtitle *pending = pending_hot_subtitle;
+            if (subtitle_retry.desired != pending_hot_choice)
+                SDL_AtomicSet(&pending->cancel, 1);
+            if (now_ticks - pending_hot_started >= 15000u)
+                SDL_AtomicSet(&pending->cancel, 1);
+            int done = SDL_AtomicGet(&pending->done);
+            if (!SDL_AtomicGet(&pending->cancel) && SDL_AtomicGet(&pending->ready) &&
+                (!done || pending->result == 0)) {
+                external_subtitle_clear(&external_subtitles);
+                external_subtitles.progressive = pending;
+                external_subtitles.time_offset = restart_base;
+                pending_hot_subtitle = NULL;
+                scur = pending_hot_choice;
+                g_player_subtitle_index = scur + 1;
+                avcodec_free_context(&sctx);
+                subtitle_queue_reset(&subtitles);
+                subtitle_retry_succeeded(&subtitle_retry, scur);
+                snprintf(notice, sizeof(notice), "Legenda carregada");
+                notice_until = now_ticks + 2200;
+            } else if (done) {
+                progressive_subtitle_stop(pending);
+                pending_hot_subtitle = NULL;
+                if (subtitle_retry.desired == pending_hot_choice)
+                    subtitle_retry_failed(&subtitle_retry, pending_hot_choice, now_ticks);
+            }
+        }
         if (!subtitle_fetch.thread) {
             int choice = subtitle_retry_due(&subtitle_retry, now_ticks);
-            if (choice >= 0 && choice < nsub && SUB_EXTERNAL(choice) && !SUB_HOT(choice)) {
+            if (choice >= 0 && choice < nsub && SUB_HOT(choice) && !pending_hot_subtitle) {
+                pending_hot_subtitle = start_hot_subtitle(manifest_subtitles[choice].uri, restart_base);
+                pending_hot_choice = choice;
+                pending_hot_started = now_ticks;
+                if (!pending_hot_subtitle) subtitle_retry_failed(&subtitle_retry, choice, now_ticks);
+            } else if (choice >= 0 && choice < nsub && SUB_EXTERNAL(choice) && !SUB_HOT(choice)) {
                 if (subtitle_fetch_start(&subtitle_fetch, manifest_subtitles[choice].uri, choice) == 0)
                     diag_player_event("subtitle", "retry", "choice=%d attempt=%u",
                                       choice + 1, subtitle_retry.attempts + 1);
@@ -3641,6 +3714,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             }
                         } else {
                             int next = track_sel - 1;
+                            subtitle_auto_language[0] = 0; // manual OFF/track wins over discovery
+                            if (pending_hot_subtitle) SDL_AtomicSet(&pending_hot_subtitle->cancel, 1);
                             if (next < 0 || SUB_HOT(next)) {
                                 subtitle_fetch_cancel(&subtitle_fetch);
                                 subtitle_retry_select(&subtitle_retry, -1);
@@ -4156,11 +4231,14 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         }
         int take = 0;
         int video_first = adev && player_audio_video_first(audio_before_ms,
-                                      resume_preroll, 0) && !demux_worker_terminal(&demux);
+                                      resume_preroll, 0);
         if (!refill && video_first) {
             take = demux_worker_take_stream(&demux, vidx, pkt, &read_ms);
-            if (!take && demux_worker_video_lookahead(&demux, vidx) < 0)
-                take = AVERROR(ENOBUFS);
+            if (!take) {
+                int lookahead = demux_worker_video_lookahead(&demux, vidx);
+                if (lookahead < 0) take = AVERROR(ENOBUFS);
+                else if (lookahead == 2) video_first = 0;
+            }
         } else if (!refill && aidx >= 0 && actx && adev && !resume_preroll &&
             demux_buffer_prefer_audio(audio_before_ms, paused))
             take = demux_worker_take_stream(&demux, aidx, pkt, &read_ms);
@@ -4711,6 +4789,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (actx) avcodec_free_context(&actx);
     if (sctx) avcodec_free_context(&sctx);
     subtitle_fetch_stop(&subtitle_fetch);
+    progressive_subtitle_stop(pending_hot_subtitle);
     if (scur >= 0 && SUB_EXTERNAL(scur) && !SUB_HOT(scur))
         subtitle_session_keep(manifest_subtitles[scur].uri, &external_subtitles);
     external_subtitle_clear(&external_subtitles);

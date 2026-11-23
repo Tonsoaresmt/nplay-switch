@@ -137,6 +137,24 @@ int main(void) {
     assert(hls_manifest_resolve_like_ffmpeg("https://cdn.example/a/b/v.m3u8",
                                             "https://r2.example/x.mp4?sig=1", resolved, sizeof(resolved)) == 1);
     assert(!strcmp(resolved, "https://r2.example/x.mp4?sig=1"));
-    puts("hls manifest: ok");
+    // Pre-publication overflow: keep PT dialogue even after 16 other tracks;
+    // preserve the hard cap; both PT variants replace foreign entries, not
+    // each other. This roster has NOT been published to the UI yet.
+    char many[8192]="#EXTM3U\n",row[256];
+    for(int i=0;i<18;i++){
+        snprintf(row,sizeof(row),"#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",LANGUAGE=\"%s\",FORCED=%s,URI=\"s%d.vtt\"\n",
+                 i>=16?"PT-br":"en",i==16?"YES":"NO",i);
+        strncat(many,row,sizeof(many)-strlen(many)-1);
+    }
+    HlsManifestTrack selected[HLS_MANIFEST_TRACK_CAP];
+    assert(hls_manifest_subtitle_tracks(many,strlen(many),selected,16)==16);
+    assert(!strcmp(selected[14].uri,"s17.vtt")&&!selected[14].forced);
+    assert(!strcmp(selected[15].uri,"s16.vtt")&&selected[15].forced);
+    for(int i=0;i<14;i++){snprintf(row,sizeof(row),"s%d.vtt",i);assert(!strcmp(selected[i].uri,row));}
+    assert(hls_subtitle_has_full_pt(selected,16));
+    assert(hls_manifest_subtitle_tracks(many,strlen(many),selected,1)==1);
+    assert(!strcmp(selected[0].uri,"s17.vtt"));
+    for(int i=0;i<8;i++)assert(hls_manifest_subtitle_tracks(many,strlen(many),selected,16)==16);
+    puts("hls manifest: ok; bounded overflow prefers full PT before forced/default without growing capacity");
     return 0;
 }

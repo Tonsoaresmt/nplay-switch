@@ -1,5 +1,62 @@
 # Continuidade para agentes
 
+## .62 autorizada — 23/11/2026, validacao/publicacao em andamento
+
+- FINAL local aprovado: make-B integral-Werror APOS guardcancel e bateria
+  COMPLETA SEMSkipMediaFixtures exit0, build/validate-0.12.62-final2.log.
+  NRO24315727B/SHA2899776a1ec2e1a620a0b971b4890a9312fcc06a2ab3dd0a089a25914ba48d31.
+  55casos/6perfis/118HTTP/1087AAC e simbolosELF; diffcheck passou. Nenhum
+  app/rebuild apos essa prova. Execucao integral anterior nao usada comoFINAL.
+  Sidecar76B atualizado, nao commitar. Publicacao autorizada ainda em andamento.
+
+- Usuario autorizou corrigir e PUBLICAR no GitHub para atualizar console.
+  Mesmo checkout switch-access-expiry / codex/switch-player-hardening.
+- App agora preserva dispositions de audio, remap sem comentario, PT completo
+  antes de forced; descoberta bounded espera PT, auto tardio respeita OFF e
+  carrega hot em worker sem modal (startup/manual permanecem modal legado).
+  EOF do produtor nao desliga video-first com video em fila; lock decidecauda.
+- Parsers HLS/hot priorizam PT antes de publicar, sem subir16. Catalogo vivo
+  cheio ainda pode rejeitar acrescimo, nao anunciar ilimitado. Budgets/TLS e
+  guards de checkpoint mantidos. Nenhum backend/conta/deploy alterado.
+- audit_player_paths --reproduce-061 e NEGATIVO, --verify-current e POSITIVO
+  com assertions corrigidas (agora integrado). Dependencias antigas exportadas
+  no negativo. Nova factory/poll testados com OOM/cancel/prazo e6000cenarios;
+  decoder/rede/SDL fake, ordemfMP4real, worker demuxpthreadreal. Linux ausente.
+- Build integral-Werror e incremental final passaram. Bateria completa sendo
+  reexecutada apos links dos testes host ajustados; NAO publicar ate terminar.
+  Docs PLAYER_FIXES_0_12_62.md e RELEASE_0_12_62.md; registrar hash/resultado
+  e disponibilidade PUBLICA depois. Nao commitar NRO nem sidecar. Sem hardware.
+
+## Auditoria aprofundada .61 — 23/11/2026, SEM correcao/publicacao
+
+- Usuario pediu estudo profundo TorBox/R2/series/anime/PT/legendas e riscos da
+  .61. Base publicada e684b28, checkout/branch autorizados inalterados. Nenhum
+  app/NRO/backend/conta/rebuild/push/release alterado nesta rodada.
+- tools/audit_player_paths.mjs --reproduce-061 --media-fixture e NEGATIVO:
+  exit0 significa oito falhas REPRODUZIDAS, nunca gate verde/homologacao.
+  Extrai C publicado; helpers locais iguais a base auditada. Novos hosts
+  deep_player_tracks_host.c e stress_track_policy.c; outputs so em build.
+- Remux real gerado:455pacotes/590459B, pipe nao seekable entrega300audios
+  (~6.4s) antesdevideo; arquivo seekable47. Replay scheduling/PCM real atinge
+  cap4s apos188blocos quando produtorEOF, videonaofora drenado. Decoder/SDL
+  simulados, CLI8.1.1 != SDK7.1. Nao atribuir incidente concreto semtrace.
+- Mais sete: mappingAVStream perdeCOMMENT; continuityPT aceita comentario;
+  Original prefereJA emfilmeEN; autoPT prefereforcedprimeiro; PTtardio nao
+  autoativa; probeENpositivo encerraretry; PT17fora do catalogo16. Nao subir
+  tetos nem retirarTLS. Detalhes/plano docs/PLAYER_DEEP_AUDIT_2026_11_23.md.
+- Saudaveis:8800layouts/50248policycalls,200kcue/2088890Btexto preservados;
+  fanalyzer5modulossemwarning. UBSan indisponivel(-lubsan); WSL nao instalado,
+  nenhum harnessLinuxintegrado/consolefisico. Mutex/copia de texto/letreiros
+  progressivos inspecionados, sem UAF demonstrado nesse caminho.
+- Regressoes de legendas/AVresume/seek/HLS/VTT/HTTP reais passaram novamente.
+  Resolution/entry.61 tambem:1000transicoes+1000ownership, mocksAPI/SDLplayer,
+  pthreadreal. Diffcheckpassou; diffsource/include/Makefilevazio. Nao houve
+  novaexecucao de TODObateriarelease nem build, nao e novocandidatovalidado.
+  Nao confundir com toda pipeline noHorizon. NRO conserva24311631B/SHAa3df1de2
+  ...aacb292c9. Diff.60→.61 nao muda osmodulos destes oitoachados, preexistentes.
+  Sem correcao de app nesta auditoria; proximo implementar cada causa com
+  negativo convertido empositivo, suiteinteira e hardware, sem promessa total.
+
 ## .61 PUBLICADA — 23/11/2026
 
 - Implementacao apos pedido de trabalhar e manter episodios sem intervencao.

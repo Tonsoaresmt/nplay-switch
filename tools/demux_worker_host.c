@@ -168,6 +168,14 @@ int main(void) {
     w.queue[w.head].packet->stream_index=0;SDL_UnlockMutex(w.mutex);
     assert(demux_worker_video_lookahead(&w,0)==0);
     SDL_LockMutex(w.mutex);w.queue[w.head].packet->stream_index=1;
+    // Producer EOF cannot override video already queued, even if it arrived
+    // after the consumer's earlier take_stream scan. Only NO-video tail drains.
+    int previous_terminal=w.terminal;w.terminal=-541478725; // FFmpeg EOF (SDK mocked here)
+    SDL_UnlockMutex(w.mutex);
+    assert(demux_worker_video_lookahead(&w,0)==2);
+    SDL_LockMutex(w.mutex);w.queue[w.head].packet->stream_index=0;SDL_UnlockMutex(w.mutex);
+    assert(demux_worker_video_lookahead(&w,0)==0);
+    SDL_LockMutex(w.mutex);w.terminal=previous_terminal;w.queue[w.head].packet->stream_index=1;
     w.space_blocked=old_blocked;w.pending_bytes=old_pending;SDL_UnlockMutex(w.mutex);
     for(int i=124;i<512;i++)assert(demux_worker_take(&w,&out,NULL)==1&&out.pts==i);
     demux_worker_stop(&w);assert(!atomic_load(&live_packets)&&!worker_allocation);

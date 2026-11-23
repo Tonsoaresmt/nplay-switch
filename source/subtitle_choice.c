@@ -1,6 +1,16 @@
 #include "subtitle_choice.h"
 #include <string.h>
 #include <strings.h>
+int subtitle_choice_preferred(const SubtitleTrackKey *tracks, int count, const char *language) {
+    if (!tracks || !language || !language[0]) return -1;
+    int forced = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(tracks[i].language, language)) continue;
+        if (!tracks[i].forced) return i;
+        if (forced < 0) forced = i;
+    }
+    return forced;
+}
 static int auth_parameter(const unsigned char *name, size_t len) {
     const char *keys[] = { "token", "signature", "expires", "X-Amz-Algorithm",
         "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-SignedHeaders",

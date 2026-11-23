@@ -37,7 +37,6 @@ int hot_subtitle_tracks(const cJSON *probe, const char *base, const char *sid,
     if (!cJSON_IsArray(list)) return 0;
     int count = 0, seen[101] = {0};
     cJSON_ArrayForEach(entry, list) {
-        if (count == capacity) break;
         const cJSON *idx = cJSON_GetObjectItemCaseSensitive(entry, "index");
         if (!cJSON_IsNumber(idx) || !isfinite(idx->valuedouble) || idx->valuedouble < 0 ||
             idx->valuedouble > 100 || floor(idx->valuedouble) != idx->valuedouble || seen[idx->valueint]) continue;
@@ -53,7 +52,7 @@ int hot_subtitle_tracks(const cJSON *probe, const char *base, const char *sid,
         track.is_default = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(entry, "default"));
         track.forced = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(entry, "forced"));
         seen[idx->valueint] = 1;
-        tracks[count++] = track;
+        hls_subtitle_insert(tracks, &count, capacity, &track);
     }
     return count;
 }

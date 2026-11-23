@@ -51,7 +51,9 @@ static void feed(double pts,int samples){
 }
 static int streams[16],stream_count,terminal;
 static int demux_worker_terminal(int*w){(void)w;return terminal;}
-static int demux_worker_video_lookahead(int*w,int index){(void)w;(void)index;return 0;}
+static int demux_worker_video_lookahead(int*w,int index){(void)w;
+ for(int i=0;i<stream_count;i++)if(streams[i]==index)return 0;
+ return demux_worker_terminal(w)?2:0;}
 static int demux_worker_take_stream(int*w,int stream,int*pkt,Uint32*ms){(void)w;(void)ms;
  for(int i=0;i<stream_count;i++)if(streams[i]==stream){*pkt=stream;memmove(streams+i,streams+i+1,(stream_count-i-1)*sizeof(*streams));stream_count--;return 1;}
  return 0;}

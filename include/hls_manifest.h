@@ -16,6 +16,12 @@ typedef struct {
     int forced;
 } HlsManifestTrack;
 
+// Bounded pre-publication selection; never reorder a live UI catalog.
+int hls_subtitle_rank(const HlsManifestTrack *track);
+void hls_subtitle_insert(HlsManifestTrack *tracks, int *count, int capacity,
+                          const HlsManifestTrack *track);
+int hls_subtitle_has_full_pt(const HlsManifestTrack *tracks, int count);
+
 // Fallback equivalente ao usado pelo player web: le as renditions de legenda
 // diretamente do master mesmo quando o demuxer nao cria AVStreams para elas.
 int hls_manifest_subtitle_tracks(const char *body, size_t len,

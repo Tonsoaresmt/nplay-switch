@@ -126,12 +126,14 @@ static int continuity_choice(const AudioTrackInfo *tracks, int count,
     const char *continued = audio_language_normalize(continuity_language, NULL);
     if (continued[0]) {
         for (int i = 0; i < count; i++)
-            if (!strcmp(audio_language_normalize(tracks[i].language, tracks[i].title),
+            if (!track_is_commentary(&tracks[i]) &&
+                !strcmp(audio_language_normalize(tracks[i].language, tracks[i].title),
                         continued)) return i;
     } else if (continuity_language && (!strcmp(continuity_language, "und") ||
                                        !strcmp(continuity_language, "unknown"))) {
         for (int i = 0; i < count; i++)
-            if (audio_language_kind(tracks[i].language, tracks[i].title) ==
+            if (!track_is_commentary(&tracks[i]) &&
+                audio_language_kind(tracks[i].language, tracks[i].title) ==
                 AUDIO_KIND_UNKNOWN) return i;
     }
     if (continuity_index > 0 && continuity_index <= count) {
@@ -140,7 +142,7 @@ static int continuity_choice(const AudioTrackInfo *tracks, int count,
         for (int i = 0; i < count; i++)
             if (audio_language_kind(tracks[i].language, tracks[i].title) !=
                 AUDIO_KIND_UNKNOWN) all_unknown = 0;
-        if (all_unknown &&
+        if (all_unknown && !track_is_commentary(&tracks[candidate]) &&
             audio_language_kind(tracks[candidate].language, tracks[candidate].title) ==
                 AUDIO_KIND_UNKNOWN) return candidate;
     }
@@ -196,6 +198,10 @@ int audio_policy_choose(const AudioTrackInfo *tracks, int count, int account_pre
             if (english >= 0 && unknown >= 0) return unknown;
         }
     } else if (account_pref == 1) { // Legendado / original
+        // Explicit metadata wins over the fallback for untagged anime.
+        for (int i = 0; i < count; i++)
+            if (!track_is_commentary(&tracks[i]) &&
+                (tracks[i].is_original || title_has(&tracks[i], "original"))) return i;
         for (int i = 0; i < count; i++)
             if (!track_is_commentary(&tracks[i]) &&
                 (audio_language_kind(tracks[i].language, tracks[i].title) == AUDIO_KIND_JAPANESE ||

@@ -16,6 +16,7 @@ typedef struct {
     const char *title;
     int is_default;
     int is_commentary;
+    int is_original;
 } AudioTrackInfo;
 
 // Retorna um identificador curto estatico (pt/en/ja/es/...) ou "".

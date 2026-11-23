@@ -12,3 +12,5 @@ void subtitle_choice_capture(SubtitleChoice *out, const SubtitleTrackKey *tracks
 // -2: missing/ambiguous identity; -1: deliberate OFF.
 int subtitle_choice_resolve(const SubtitleChoice *choice, const SubtitleTrackKey *tracks,
                             int count, int source_id);
+// Keys already carry normalized languages. Full dialogue before forced signs.
+int subtitle_choice_preferred(const SubtitleTrackKey *tracks, int count, const char *language);

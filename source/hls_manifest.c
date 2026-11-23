@@ -37,12 +37,35 @@ static int attr_copy(const char *line, size_t len, const char *key,
     return 0;
 }
 
+int hls_subtitle_rank(const HlsManifestTrack *track) {
+    const char *s = track->language;
+    int pt = !strcasecmp(s, "por") || !strcasecmp(s, "pob") ||
+        (!strncasecmp(s, "pt", 2) && (!s[2] || s[2] == '-' || s[2] == '_'));
+    return pt ? (track->forced ? 2 : 3) : (track->is_default ? 1 : 0);
+}
+
+void hls_subtitle_insert(HlsManifestTrack *tracks, int *count, int capacity,
+                          const HlsManifestTrack *track) {
+    if (capacity > HLS_MANIFEST_TRACK_CAP) capacity = HLS_MANIFEST_TRACK_CAP;
+    if (capacity <= 0) return;
+    if (*count < capacity) { tracks[(*count)++] = *track; return; }
+    int worst = capacity - 1;
+    for (int i = capacity - 2; i >= 0; i--)
+        if (hls_subtitle_rank(&tracks[i]) < hls_subtitle_rank(&tracks[worst])) worst = i;
+    if (hls_subtitle_rank(track) > hls_subtitle_rank(&tracks[worst])) tracks[worst] = *track;
+}
+
+int hls_subtitle_has_full_pt(const HlsManifestTrack *tracks, int count) {
+    for (int i = 0; i < count; i++) if (hls_subtitle_rank(&tracks[i]) == 3) return 1;
+    return 0;
+}
+
 int hls_manifest_subtitle_tracks(const char *body, size_t len,
                                  HlsManifestTrack *tracks, int capacity) {
     if (!body || !tracks || capacity <= 0) return 0;
     int count = 0;
     const char *end = body + len, *line = body;
-    while (line < end && count < capacity) {
+    while (line < end) {
         const char *next = memchr(line, '\n', (size_t)(end - line));
         if (!next) next = end;
         size_t line_len = (size_t)(next - line);
@@ -54,8 +77,7 @@ int hls_manifest_subtitle_tracks(const char *body, size_t len,
         }
         if (line_len > 13 && !strncasecmp(line, "#EXT-X-MEDIA:", 13) &&
             line_contains(line + 13, line_len - 13, "TYPE=SUBTITLES")) {
-            HlsManifestTrack *track = &tracks[count];
-            memset(track, 0, sizeof(*track));
+            HlsManifestTrack parsed = {0}, *track = &parsed;
             if (attr_copy(line, line_len, "URI", track->uri, sizeof(track->uri)) &&
                 track->uri[0]) {
                 attr_copy(line, line_len, "NAME", track->name, sizeof(track->name));
@@ -66,7 +88,7 @@ int hls_manifest_subtitle_tracks(const char *body, size_t len,
                                               sizeof(flag)) && !strcasecmp(flag, "YES");
                 track->forced = attr_copy(line, line_len, "FORCED", flag,
                                           sizeof(flag)) && !strcasecmp(flag, "YES");
-                count++;
+                hls_subtitle_insert(tracks, &count, capacity, track);
             }
         }
         line = next < end ? next + 1 : end;

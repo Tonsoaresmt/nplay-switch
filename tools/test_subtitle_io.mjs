@@ -14,9 +14,9 @@ writeFileSync('build/subtitle_io_test.inc',
   section(net,'typedef struct { struct membuf *out;', 'long net_get_text_limited')+
   section(player,'typedef struct {\n    const char *url, *sid;', 'static int hot_subtitle_worker')+
   section(player,'static int hot_subtitle_worker', 'static int load_external_subtitle(const char *url, ExternalSubtitleStore *store,\n                                  int direct, SDL_atomic_t *cancel) {')+
-  section(player,'static int hot_subtitle_wait', 'static int load_hot_subtitle'));
+  section(player,'static int hot_subtitle_wait', 'static ProgressiveSubtitle *start_hot_subtitle'));
 const exe=resolve('build/test_subtitle_io'+(process.platform==='win32'?'.exe':''));
-const built=spawnSync(process.env.HOST_CC||'gcc',['-std=c11','-Wall','-Wextra','-Werror','-Itools/host-stubs','-Iinclude','-Ibuild','tools/subtitle_io_host.c','source/hot_subtitles.c','source/cJSON.c','-lm','-o',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
+const built=spawnSync(process.env.HOST_CC||'gcc',['-std=c11','-Wall','-Wextra','-Werror','-Itools/host-stubs','-Iinclude','-Ibuild','tools/subtitle_io_host.c','source/hot_subtitles.c','source/hls_manifest.c','source/cJSON.c','-lm','-o',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
 if(built.status!==0) throw Error(built.stderr||built.error?.message||'compile failed');
 const run=spawnSync(exe,[],{encoding:'utf8',windowsHide:true,timeout:15000});
 if(run.status!==0) throw Error(run.stderr||run.error?.message||'test failed');

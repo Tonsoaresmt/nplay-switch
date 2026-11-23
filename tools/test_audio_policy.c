@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 static AudioTrackInfo t(const char *lang, const char *title, int def) {
-    AudioTrackInfo track = { lang, title, def, 0 };
+    AudioTrackInfo track = { lang, title, def, 0, 0 };
     return track;
 }
 
