@@ -63,8 +63,14 @@ Fixtures CLI usam FFmpeg8.1.1 no PC; NRO conserva FFmpeg7.1/SDK. Nao sao execuca
 do NRO/Horizon/GPU fisicos. Nenhuma fonte/app ou rebuild depois dessa prova.
 Sidecar atualizado apenas apos a conclusao. NRO/sidecar nao entram no commit.
 
-Artefato candidato:24311631bytes; SHA256
+Artefato publicado:24311631bytes; SHA256
 `a3df1de296145f9f9b4e1f45382ab92cbead22ba0aebcdd8adc6683aacb292c9`.
+
+Release v0.12.61 latest publica em23/11/2026 17:59:04UTC (14:59:04Brasilia),
+nao draft/prerelease. Tag/target `e684b2825cb4faf12dbf2a3790ede10d6debb7d3`.
+NRO e sidecar76B conferidos no draft e por download integral publico SEM auth
+apos promover; API latest confirma .61. Binarios nao foram commitados.
+Nao houve rebuild ou mudanca de fonte/app apos a prova final.
 
 Sem trace novo, nao atribuir o incidente relatado a esta lacuna com certeza.
 Fontes inexistentes, problemas permanentes e perda ambigua de POST ainda podem

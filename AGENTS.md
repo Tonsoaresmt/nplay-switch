@@ -1,5 +1,22 @@
 # Continuidade para agentes
 
+## .61 PUBLICADA — 23/11/2026
+
+- Implementacao apos pedido de trabalhar e manter episodios sem intervencao.
+  Release v0.12.61 latest publica, nao draft/prerelease, em17:59:04UTC
+  (=14:59:04Brasilia). Tag dereferenciada/targete684b2825cb4faf12dbf2a3790ede10d6debb7d3.
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.61
+- BuildARM64integral-Werror make-B e bateriaFINALCOMPLETA SEMSkipMediaFixtures
+  exit0 no MESMO NRO:24311631B/SHAa3df1de296145f9f9b4e1f45382ab92cbead22ba0aebcdd8adc6683aacb292c9.
+  APIlatest e download INTEGRAL publico semauth/sidecar76B conferidos identicos.
+  Branch/tag enviadosatomicamente semforce; NRO/sidecarnaocommitados.
+- Zero input na contagem5s comprovado emCextraido; GETcheckpoint retryautomatico
+  e503server_restartingpre-admissao automaticolimitado. Falha persistente conserva
+  destino com escolha; cancel/auth/quit nao viram erro. Preferenciaautoplaymantida.
+- Sem backend/deploy/conta/SD/GPU/console fisico. Nao chamar conserto definitivo
+  de crash semtracedoaparelho. Nenhuma alteracao do app/rebuild aposvalidacao.
+  Docs EPISODE_RECOVERY_0_12_61.md e RELEASE detalham limites.
+
 ## Implementacao .61 — 23/11/2026, candidata LOCAL
 
 - Usuario pediu implementar apos auditoria e esclareceu maratona SEM apertar A.

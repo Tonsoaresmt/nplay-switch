@@ -1,5 +1,7 @@
 # Nplay Switch 0.12.61 — Continuidade de episodios
 
+Publicada em23/11/2026,14:59:04Brasilia. Download publico e checksum conferidos.
+
 - O proximo episodio continua iniciando automaticamente: com **Configuracoes >
   Reproducao > Proximo episodio automatico** ligado, a contagem de cinco segundos
   avanca sem apertar A. B/toque em cancelar continuam interrompendo.
