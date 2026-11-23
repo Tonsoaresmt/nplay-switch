@@ -1,5 +1,23 @@
 # Continuidade para agentes
 
+## .62 PUBLICADA — 23/11/2026
+
+- v0.12.62 latest publica, nao draft/prerelease, em22:33:52UTC
+  (=19:33:52Brasilia). Tag dereferenciada/build563245ff1a96a3b412d116b0bc7347b530d2bc48.
+  https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.62
+- FINAL make-B integral-Werror + bateriaFINALCOMPLETA SEMSkipMediaFixtures
+  exit0 no MESMO NRO24315727B/SHA256
+  2899776a1ec2e1a620a0b971b4890a9312fcc06a2ab3dd0a089a25914ba48d31.
+  Logignorado build/validate-0.12.62-final2.log. Nenhumapp/rebuildaposprova.
+- Branch/tag pushatomico semforce. AssetsNRO/sidecar76B conferidos emdraft
+  por downloadcompleto; APIlatest e downloadINTEGRALpublico SEMauth apos
+  publicar identicos. ReleaseID456076313. ConsultaRESTporTAGdraft deu404,
+  listagem/view e consulta porID confirmaramowner/estado; sem mudarpermissoes.
+- Codigoevidencias/docs enviados. NRO/sidecar nao commitados; sidecarlocal
+  untracked e esperado. Nenhumbackend/deploy/conta/SD/producao de midia mudou.
+  Testeshost/CLI NAO homologam Horizon/GPU/sono/Wi-Fi/60min/obras reais.
+  Roteiro e limites em docs/PLAYER_FIXES_0_12_62.md. Aguardar teste do console.
+
 ## .62 autorizada — 23/11/2026, validacao/publicacao em andamento
 
 - FINAL local aprovado: make-B integral-Werror APOS guardcancel e bateria

@@ -97,7 +97,16 @@ do aplicativo/rebuild após a prova FINAL. `git diff --check` passou.
 Artefato final: 24.315.727 bytes; SHA-256
 `2899776a1ec2e1a620a0b971b4890a9312fcc06a2ab3dd0a089a25914ba48d31`.
 Sidecar atualizado somente após a validação. NRO e sidecar não entram em Git;
-serão assets da release. Não usar `make clean`, que apagaria fixtures/logs.
+são assets da release. Não usar `make clean`, que apagaria fixtures/logs.
+
+Publicada como latest, sem draft/prerelease, em 23/11/2026 22:33:52 UTC
+(19:33:52 Brasília): [v0.12.62](https://github.com/Tonsoaresmt/nplay-switch/releases/tag/v0.12.62).
+Tag remota dereferenciada/build: `563245ff1a96a3b412d116b0bc7347b530d2bc48`.
+Branch/tag enviados atomicamente sem force. Digest/tamanho e download integral
+do draft conferidos antes de promover; API latest e download integral público
+de NRO e sidecar SEM autenticação reconferidos após promover, idênticos ao
+artefato validado. Consulta REST de draft por tag deu 404; listagem e consulta
+pelo ID confirmado 456076313 funcionaram, sem mudança de permissões.
 
 Sem teste físico de Switch, rede de cliente, VisionQuest/TBBT de produção,
 sessão de 60+ min, GPU, Home/sono ou todas as resoluções/codecs. A publicação
