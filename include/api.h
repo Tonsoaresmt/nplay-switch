@@ -22,6 +22,8 @@ int arr_len(cJSON *a);
 // rede permite voltar ao login, sem repetir reconexoes impossiveis.
 int api_last_error_access_expired(void);
 long api_last_error_http_code(void);
+// Explicit pre-admission rejection: unlike timeout, no session was created.
+int api_last_error_admission_deferred(void);
 
 typedef enum {
     DELIVERY_UNKNOWN = 0,

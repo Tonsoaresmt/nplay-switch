@@ -128,5 +128,17 @@ static void controls(void){
  PlayerHud h={.intro_visible=1};draw_intro_skip(NULL,&h);assert(shapes==1&&labels==2);
  h.panel_open=1;draw_intro_skip(NULL,&h);assert(shapes==1);h.panel_open=0;h.scrubbing=1;draw_intro_skip(NULL,&h);assert(shapes==1);
  h.scrubbing=0;h.intro_selected=1;draw_intro_skip(NULL,&h);assert(shapes==3&&labels==4);
+ // Overlay visibility must not expose a hit target behind other modals.
+ h.episodes_open=1;draw_intro_skip(NULL,&h);assert(shapes==3);
+ h.episodes_open=0;h.buffering=1;draw_intro_skip(NULL,&h);assert(shapes==3);
+ h.buffering=0;h.intro_visible=0;draw_intro_skip(NULL,&h);assert(shapes==3);
+ // Compare actual 720p geometry with the native timeline (y600) and Next
+ // card (x872,y432,360x118). Both can appear near credits, without overlap.
+ assert(INTRO_BUTTON_X>=48&&INTRO_BUTTON_X+INTRO_BUTTON_W<=1280-48);
+ assert(INTRO_BUTTON_Y+INTRO_BUTTON_H<=600-12);
+ assert(INTRO_BUTTON_X+INTRO_BUTTON_W<=872 || INTRO_BUTTON_Y>=550);
+ // The four-line dialogue reserved at bottom496 starts344 and ends496;
+ // the button starts508, leaving12px, independent of HUD opacity.
+ assert(INTRO_BUTTON_Y-12-4*38>=96);
 }
 int main(void){owner=pthread_self();parsing();metadata();controls();printf("Intro skip: %d joined pthread requests; strict ranges, bounded optional API/provider, cancellation/stale results, pause-preserving confirmation, touch capture and centered draw geometry passed. No physical Switch/pixel/provider test.\n",created);return 0;}

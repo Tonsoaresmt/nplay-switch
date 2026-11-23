@@ -10,6 +10,7 @@ static int g_next_audio_pref_explicit, g_next_audio_hint, g_pref_audio, g_last_a
 static char g_next_audio_language[8], g_last_audio_language[8];
 void *gRen;
 static int cancelled_request, requests, plays, jump, expected_next;
+static int natural, fail_at, choices, expected_explicit;
 static int g_playback_chain, landing_reloads, chain_seen_during_play;
 static int jint(const cJSON *j, const char *key) {
     const cJSON *v = cJSON_GetObjectItem(j, key); return cJSON_IsNumber(v) ? v->valueint : 0;
@@ -39,6 +40,10 @@ static int resolve_and_play_details(int id, const char *title, const char *subti
     if (plays < 8) played_ids[plays] = id;
     plays++;
     if (g_playback_chain > 0) chain_seen_during_play++;
+    // A resolver/progress/opening failure is injected at the boundary, not
+    // represented as clean EOF. This models the sequence's error contract;
+    // it is not a test of actual network/FFmpeg failure or physical crash.
+    if (fail_at == plays) return 0;
     // Painel Episodios: o player devolve o episodio escolhido (ex.: o anterior).
     if (choose_target && plays == 1) { g_play_chosen_item = choose_target; return 2; }
     if (plays == 1) {
@@ -46,11 +51,13 @@ static int resolve_and_play_details(int id, const char *title, const char *subti
         if (has_next) assert(next_title && next_title[0]);
     }
     assert(subtitle);
-    return jump && plays == 1 ? 2 : 0;
+    return plays == 1 ? (natural ? 1 : jump ? 2 : 0) : 0;
 }
 static int choose_next_episode(int sid, int current, int first, int refresh, int explicit_next,
                                char *title, size_t cap) {
-    (void)sid; (void)first; (void)refresh; assert(explicit_next);
+    (void)sid; (void)first; (void)refresh;
+    choices++;
+    assert(explicit_next == expected_explicit);
     EpisodeNext next = episode_after(g_ser, current);
     const cJSON *ep = episode_find(g_ser, next.item_id);
     if (!ep) return 0;
@@ -63,6 +70,7 @@ static void playback_memory_leave(void) { if (g_playback_chain == 0) landing_rel
 static void reset(void) {
     if (g_ser) cJSON_Delete(g_ser);
     g_ser = NULL; plays = requests = cancelled_request = jump = choose_target = built_for = 0;
+    natural = fail_at = choices = 0; expected_explicit = 1;
     g_series_audio_explicit = 0; g_running = 1;
 }
 int main(void) {
@@ -72,7 +80,7 @@ int main(void) {
         "{\"id\":102,\"season\":1,\"episode\":2,\"title\":\"Ep 2\"}]}}");
     assert(api_detail);
     // Cached detail: actual chronological order, not the visible season.
-    g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; jump = 1;
+    g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; jump = 1; expected_explicit = 1;
     play_episode_sequence(101, 10, "Anime", NULL);
     assert(plays == 2 && !requests);
     // Dois episodios seguidos: nenhum recarregamento da Home entre eles, um so
@@ -97,6 +105,29 @@ int main(void) {
     reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; choose_target = 101;
     play_episode_sequence(102, 10, "Anime", NULL);
     assert(plays == 2 && played_ids[0] == 102 && played_ids[1] == 101 && built_for == 101);
+    // Natural EOF and explicit Next must reach the same chronological target,
+    // including the season boundary, and remain a single playback chain.
+    reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1;
+    natural = 1; expected_explicit = 0;
+    play_episode_sequence(101, 10, "Anime", NULL);
+    assert(plays == 2 && played_ids[0] == 101 && played_ids[1] == 102 && choices == 1);
+    reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1;
+    natural = 1; expected_explicit = 0;
+    play_episode_sequence(102, 10, "Anime", NULL);
+    assert(plays == 2 && played_ids[1] == 201 && choices == 1);
+    // Document current failure behavior, NOT a claim that retry UX is fixed:
+    // once the next episode fails, the real loop exits and does not jump over
+    // that episode, mark an artificial EOF, retry POST or try another episode.
+    for (int explicit = 0; explicit < 2; explicit++) {
+        reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1;
+        jump = explicit; natural = !explicit; expected_explicit = explicit; fail_at = 2;
+        play_episode_sequence(101, 10, "Anime", NULL);
+        assert(plays == 2 && played_ids[1] == 102 && choices == 1 && g_playback_chain == 0);
+    }
+    reset(); g_ser = cJSON_Duplicate(api_detail, 1); expected_next = 1; fail_at = 1;
+    play_episode_sequence(101, 10, "Anime", NULL);
+    assert(plays == 1 && choices == 0 && g_playback_chain == 0);
+    puts("handoff boundary: natural/manual next, season crossing, first/next failure contracts observed; failures currently exit the chain, no automatic retry or fake EOF");
     reset(); cJSON_Delete(api_detail);
     puts("actual episode sequence OK: anime, direct context, cancel, chronological next, season boundary, grouped season, finale, explicit jump, episodes panel choice, Home reload deferred to chain end");
 }

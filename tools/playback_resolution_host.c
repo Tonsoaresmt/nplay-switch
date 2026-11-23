@@ -2,6 +2,7 @@
 #include "api.h"
 #include "net.h"
 #include "diag.h"
+#include "playback_entry.h"
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
@@ -32,6 +33,8 @@ static pthread_t renderer;
 static int active,created,joined,draws,choice,chosen,source_calls,fail_source,fail_progress;
 static int cancel_source,fail_thread,expired,allocations,release_events;
 static int input_type;
+static int progress_calls, progress_error_code, admission_failures, generic_503;
+static int deferred_waiting, cancel_deferred;
 static const char *progress_fixture="{\"progress\":null}";
 struct SDL_Thread {pthread_t id;int(*fn)(void*);void*arg;int rc;};
 static void nap(unsigned ms){struct timespec t={ms/1000,(long)(ms%1000)*1000000};nanosleep(&t,NULL);}
@@ -50,8 +53,8 @@ void SDL_WaitThread(SDL_Thread*t,int*out){assert(!pthread_join(t->id,NULL));if(o
 void SDL_Delay(Uint32 ms){(void)ms;nap(1);}
 static int in_retry;
 int SDL_PollEvent(SDL_Event*e){
- if(!chosen && (in_retry || cancel_source)){
-  memset(e,0,sizeof(*e));chosen=1;e->type=SDL_JOYBUTTONDOWN;e->jbutton.button=cancel_source?JOY_B:choice;
+ if(!chosen && (in_retry || cancel_source || (cancel_deferred && deferred_waiting))){
+  memset(e,0,sizeof(*e));chosen=1;e->type=SDL_JOYBUTTONDOWN;e->jbutton.button=(cancel_source||cancel_deferred)?JOY_B:choice;
   if(input_type>=1 && input_type<=3){e->type=SDL_FINGERDOWN;e->tfinger.x=(input_type==1?300.f:input_type==2?700.f:1100.f)/1280.f;e->tfinger.y=(input_type==3?50.f:450.f)/720.f;}
   if(input_type==4)e->type=SDL_QUIT;
   return 1;
@@ -70,7 +73,7 @@ static void text_center_at(const char*s,int a,int b,int c,SDL_Color d,int e){(vo
 static void text_center(const char*s,int a,SDL_Color b,int c){(void)s;(void)a;(void)b;(void)c;}
 static void text_clip(const char*s,int a,int b,SDL_Color c,int d,int e){(void)s;(void)a;(void)b;(void)c;(void)d;(void)e;}
 static void fill_rect(int a,int b,int c,int d,SDL_Color e){(void)a;(void)b;(void)c;(void)d;(void)e;}
-void diag_set_boot_stage(const char*s){assert(pthread_equal(pthread_self(),renderer));in_retry=!strcmp(s,"00 aguardando escolha apos falha de fonte");}
+void diag_set_boot_stage(const char*s){assert(pthread_equal(pthread_self(),renderer));in_retry=!strcmp(s,"00 aguardando escolha apos falha de fonte");deferred_waiting=!strcmp(s,"00 reconectando antes de admitir");}
 void diag_player_event(const char*a,const char*b,const char*fmt,...){(void)a;(void)fmt;if(!strcmp(b,"joined"))release_events++;}
 void diag_network_event(const char*m,const char*p,long code,unsigned ms,size_t bytes){(void)ms;(void)bytes;(void)code;assert(!strcmp(m,"GET")||!strcmp(m,"POST"));assert(!strchr(p,'?'));}
 static void *json_alloc(size_t n){void*p=malloc(n);if(p)__atomic_add_fetch(&allocations,1,__ATOMIC_SEQ_CST);return p;}
@@ -95,13 +98,19 @@ long net_request_timeout_cancel(const char*u,const char*m,const char*b,const cha
  struct membuf*out,const char**err,long connect,long total,SDL_atomic_t*cancel){
  assert(!pthread_equal(pthread_self(),renderer));assert(!strcmp(t,"fixture-token"));(void)b;
  int is_progress=!strcmp(m,"GET");
+ if(is_progress)__atomic_add_fetch(&progress_calls,1,__ATOMIC_SEQ_CST);
  assert(!strcmp(u,is_progress?"https://nplay.test/api/sync/progress/42":"https://nplay.test/api/stream/42"));
  assert(connect==(is_progress?2:8) && total==(is_progress?5:20));
  if(!is_progress){assert(out->limit==64u*1024u);__atomic_add_fetch(&source_calls,1,__ATOMIC_SEQ_CST);}
  nap(cancel_source?15:2);*err=NULL;
  if(cancel && SDL_AtomicGet(cancel))return -42;
  int count=__atomic_load_n(&source_calls,__ATOMIC_SEQ_CST);
- if((is_progress && fail_progress)||(!is_progress && count<=fail_source)){*err="Operation timed out";return -28;}
+ if(is_progress && progress_error_code){const char*s="{\"error\":\"fixture denial\"}";assert(write_cb((char*)s,1,strlen(s),out)==strlen(s));return progress_error_code;}
+ if((is_progress && (fail_progress<0||__atomic_load_n(&progress_calls,__ATOMIC_SEQ_CST)<=fail_progress))||(!is_progress && count<=fail_source)){*err="Operation timed out";return -28;}
+ if(!is_progress && (count<=admission_failures||generic_503)){
+  const char*s=generic_503?"{\"error\":\"temporarily unavailable\"}":"{\"code\":\"server_restarting\",\"error\":\"fixture admission rejected\"}";
+  assert(write_cb((char*)s,1,strlen(s),out)==strlen(s));return 503;
+ }
  if(!is_progress && expired){const char*s="{\"reason\":\"expired\"}";assert(write_cb((char*)s,1,strlen(s),out)==strlen(s));return 401;}
  const char*s=is_progress?progress_fixture:"{\"session_id\":9,\"source_id\":7,\"container\":\"mp4\",\"play_url\":\"/api/play/42\"}";
  assert(write_cb((char*)s,1,strlen(s),out)==strlen(s));return 200;
@@ -119,13 +128,14 @@ static int progress_guard(cJSON**prefetched_progress,int progress_fetched,double
 #include "playback_progress_guard.inc"
  *position=start;*done=completed;return 1;
 }
-static void reset(void){assert(!active && created==joined && !allocations);g_running=1;g_screen=SC_SERIES;chosen=in_retry=0;source_calls=fail_source=fail_progress=cancel_source=fail_thread=expired=release_events=input_type=0;draws=0;choice=JOY_B;progress_fixture="{\"progress\":null}";}
+static void reset(void){assert(!active && created==joined && !allocations);g_running=1;g_screen=SC_SERIES;chosen=in_retry=0;source_calls=fail_source=fail_progress=cancel_source=fail_thread=expired=release_events=input_type=0;progress_calls=progress_error_code=admission_failures=generic_503=deferred_waiting=cancel_deferred=0;draws=0;choice=JOY_B;progress_fixture="{\"progress\":null}";}
 int main(void){
  setvbuf(stdout,NULL,_IONBF,0);
  renderer=pthread_self();cJSON_Hooks hooks={json_alloc,json_free};cJSON_InitHooks(&hooks);
- reset();fail_progress=1;ResolvePoll p={.item_id=42};
+ reset();fail_progress=-1;ResolvePoll p={.item_id=42};
  SDL_Thread*pt=SDL_CreateThread(resolve_progress_thread,"resolve-progress",&p);SDL_WaitThread(pt,NULL);
  assert(!p.progress_fetched && !p.progress); // Published .53 fails this assertion.
+ assert(progress_calls==3);
  puts("PASS: timed-out progress is UNKNOWN, not position zero.");
  const char*bad[]={"{}","[]","{\"progress\":[]}","{\"progress\":{}}","{\"progress\":{\"position_seconds\":-1}}","{\"progress\":{\"position_seconds\":1e999}}","{\"progress\":{\"position_seconds\":20,\"completed\":2}}"};
  for(unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++){cJSON*j=cJSON_Parse(bad[i]);assert(!playback_progress_valid(j));cJSON_Delete(j);}
@@ -133,6 +143,24 @@ int main(void){
  for(unsigned i=0;i<sizeof(good)/sizeof(*good);i++){cJSON*j=cJSON_Parse(good[i]);assert(playback_progress_valid(j));cJSON_Delete(j);}
  PlaybackSource out={0};cJSON*progress=NULL;int fetched=0;
  reset();assert(!resolve_open_with_animation(42,"Anime",&out,&progress,&fetched));assert(out.session_id==9 && fetched && progress && source_calls==1 && release_events==1);cJSON_Delete(progress);
+ for(int failures=1;failures<=2;failures++){
+  reset();fail_progress=failures;progress_fixture="{\"progress\":{\"position_seconds\":123,\"completed\":false}}";
+  assert(!resolve_open_with_animation(42,"Anime",&out,&progress,&fetched));
+  assert(source_calls==1&&progress_calls==failures+1&&fetched&&progress&&!chosen);
+  assert(jint(cJSON_GetObjectItem(progress,"progress"),"position_seconds")==123);cJSON_Delete(progress);
+ }
+ for(int i=0;i<5;i++){
+  const int codes[]={401,403,404,429,-60};reset();progress_error_code=codes[i];ResolvePoll q={.item_id=42};
+  SDL_Thread*t=SDL_CreateThread(resolve_progress_thread,"resolve-progress",&q);SDL_WaitThread(t,NULL);
+  assert(progress_calls==1&&!q.progress_fetched&&!q.progress);
+ }
+ puts("PASS automatic checkpoint recovery: one/two failed GETs resume without input or repeated admission; auth/plan/rate/TLS denials do not retry.");
+ reset();admission_failures=2;assert(!resolve_open_with_animation(42,"Anime",&out,&progress,&fetched));
+ assert(source_calls==3&&fetched&&progress&&!chosen);cJSON_Delete(progress);
+ reset();admission_failures=10;assert(resolve_open_with_animation(42,"Anime",&out,&progress,&fetched)==-2);assert(source_calls==4&&!progress);
+ reset();admission_failures=10;cancel_deferred=1;assert(resolve_open_with_animation(42,"Anime",&out,&progress,&fetched)==-2);assert(source_calls==1&&!progress);
+ reset();generic_503=1;assert(resolve_open_with_animation(42,"Anime",&out,&progress,&fetched)==-2);assert(source_calls==1&&!progress);
+ puts("PASS automatic admission recovery: exact server_restarting only, bounded attempts, cancel during wait; generic503/timeout never repeat POST without confirmation.");
  reset();fail_source=1;assert(resolve_open_with_animation(42,"Anime",&out,&progress,&fetched)==-2);assert(source_calls==1 && !active && !progress);
  puts("PASS: source timeout returns a cancellable choice, no automatic POST retry.");
  reset();fail_source=1;choice=JOY_A;assert(!resolve_open_with_animation(42,"Anime",&out,&progress,&fetched));assert(source_calls==2 && release_events==2 && fetched);cJSON_Delete(progress);
@@ -147,8 +175,9 @@ int main(void){
  reset();cancel_source=1;input_type=4;assert(resolve_open_with_animation(42,"Anime",&out,&progress,&fetched)==-2);assert(!g_running && !active);
  puts("PASS: touch retry/back/header, quit while waiting, missing progress thread; owned workers always joined.");
  reset();double position=-1;int done=-1;guard_cancel=stop_calls=guard_queries=0;progress=NULL;progress_fixture=NULL;
- assert(!progress_guard(&progress,0,&position,&done));assert(position==-1 && done==-1 && stop_calls==1 && guard_queries==1);
- progress_fixture="[]";assert(!progress_guard(&progress,0,&position,&done));assert(position==-1);
+ assert(progress_guard(&progress,0,&position,&done)==PLAYBACK_ENTRY_FAILED);assert(position==-1 && done==-1 && stop_calls==1 && guard_queries==1);
+ progress_fixture="[]";assert(progress_guard(&progress,0,&position,&done)==PLAYBACK_ENTRY_FAILED);assert(position==-1);
+ guard_cancel=1;assert(progress_guard(&progress,0,&position,&done)==0);guard_cancel=0;
  progress_fixture="{\"progress\":{\"position_seconds\":1200,\"completed\":0}}";
  assert(progress_guard(&progress,0,&position,&done));assert(position==1200 && !done);
  progress_fixture="{\"progress\":null}";assert(progress_guard(&progress,0,&position,&done));assert(position==0);

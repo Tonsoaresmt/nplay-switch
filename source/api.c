@@ -10,13 +10,20 @@
 static _Thread_local char g_api_last_error[192] = "";
 static _Thread_local int g_api_last_access_expired = 0;
 static _Thread_local long g_api_last_http_code = 0;
+static _Thread_local int g_api_admission_deferred = 0;
 
 const char *api_last_error(void) { return g_api_last_error; }
 int api_last_error_access_expired(void) { return g_api_last_access_expired; }
 long api_last_error_http_code(void) { return g_api_last_http_code; }
+int api_last_error_admission_deferred(void) {
+    return g_api_last_http_code == 503 && g_api_admission_deferred;
+}
 
 static void api_set_error(long code, const char *transport, cJSON *json) {
     g_api_last_http_code = code;
+    const char *error_code = jstr(json, "code");
+    g_api_admission_deferred = code == 503 && error_code &&
+                              !strcmp(error_code, "server_restarting");
     const char *message = jstr(json, "error");
     const char *reason = jstr(json, "reason");
     g_api_last_access_expired = code == 401 && reason && !strcmp(reason, "expired");

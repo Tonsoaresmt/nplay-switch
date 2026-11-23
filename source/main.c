@@ -37,6 +37,7 @@
 #include "cover_policy.h"
 #include "connection_test_ui.h"
 #include "settings_layout.h"
+#include "playback_entry.h"
 
 #define WIN_W 1280
 #define WIN_H 720
@@ -1183,6 +1184,7 @@ static int play_with_progress_details(int itemId, const char *title, const char 
 typedef struct {
     int item_id, rc;
     int access_expired;
+    int admission_deferred;
     PlaybackSource source;
     char error[192];
     SDL_atomic_t done, cancel;
@@ -1213,15 +1215,22 @@ static int playback_progress_valid(cJSON *json) {
 static int resolve_progress_thread(void *userdata) {
     ResolvePoll *poll = (ResolvePoll *)userdata;
     char path[96]; snprintf(path, sizeof(path), "/api/sync/progress/%d", poll->item_id);
-    poll->progress = api_get_timeout_cancel(path, 2L, 5L, &poll->progress_cancel);
-    poll->progress_fetched = playback_progress_valid(poll->progress) &&
-                              !SDL_AtomicGet(&poll->progress_cancel);
-    if (!poll->progress_fetched) {
+    // Only repeat the read-only checkpoint, never POST /stream. Brief API
+    // outages between episodes should not require a button or start at zero.
+    for (int attempt = 0; attempt < 3 && !SDL_AtomicGet(&poll->progress_cancel); attempt++) {
+        poll->progress = api_get_timeout_cancel(path, 2L, 5L, &poll->progress_cancel);
+        poll->progress_fetched = playback_progress_valid(poll->progress) &&
+                                  !SDL_AtomicGet(&poll->progress_cancel);
+        if (poll->progress_fetched) break;
+        long code = api_last_error_http_code();
         const char *error = api_last_error();
         snprintf(poll->progress_error, sizeof(poll->progress_error), "%s",
                  error && error[0] ? error : "Resposta de progresso invalida");
         cJSON_Delete(poll->progress);
         poll->progress = NULL;
+        if (!playback_checkpoint_retryable(code) || attempt == 2) break;
+        for (int slice = 0; slice < (attempt + 1) * 20 &&
+             !SDL_AtomicGet(&poll->progress_cancel); slice++) SDL_Delay(10);
     }
     return 0;
 }
@@ -1234,6 +1243,7 @@ static int resolve_open_thread(void *userdata) {
                                             &poll->cancel, &poll->source);
     if (poll->rc != 0) {
         poll->access_expired = api_last_error_access_expired();
+        poll->admission_deferred = api_last_error_admission_deferred();
         snprintf(poll->error, sizeof(poll->error), "%s", api_last_error());
         SDL_AtomicSet(&poll->progress_cancel, 1); // erro aparece sem esperar
     }
@@ -1360,7 +1370,7 @@ static int resolve_open_once_with_animation(int itemId, const char *title, Playb
             return -1;
         }
         toast(poll.error[0] ? poll.error : "Falha ao abrir a fonte");
-        return -1;
+        return poll.admission_deferred ? -3 : -1;
     }
     *out = poll.source;
     if (progress_out) *progress_out = poll.progress;
@@ -1406,13 +1416,44 @@ static int prompt_playback_retry(const char *title) {
     return 0;
 }
 
+static int wait_playback_reconnect(const char *title, Uint32 delay) {
+    Uint32 began = SDL_GetTicks();
+    diag_set_boot_stage("00 reconectando antes de admitir");
+    while (g_running && SDL_GetTicks() - began < delay) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) { g_running = 0; return 0; }
+            if ((event.type == SDL_JOYBUTTONDOWN &&
+                 (event.jbutton.button == JOY_B || event.jbutton.button == JOY_MINUS)) ||
+                (event.type == SDL_FINGERDOWN && ui_header_action_hit(
+                    (int)(event.tfinger.x * WIN_W), (int)(event.tfinger.y * WIN_H)))) return 0;
+        }
+        SDL_SetRenderDrawColor(gRen, C_BG.r, C_BG.g, C_BG.b, 255); SDL_RenderClear(gRen);
+        ui_header("NPLAY", "Conectando seu video", "B Cancelar");
+        ui_popcorn_draw(gRen, WIN_W / 2, 220, 96);
+        text_center_at(title && title[0] ? title : "Video", 150, WIN_W - 300, 360, C_TEXT, 1);
+        text_center("Reconectando automaticamente...", 410, C_MUT, 0);
+        SDL_RenderPresent(gRen); SDL_Delay(16);
+    }
+    return g_running;
+}
+
 static int resolve_open_with_animation(int itemId, const char *title, PlaybackSource *out,
                                        cJSON **progress_out, int *progress_fetched) {
-    int rc;
+    int rc, deferred_tries = 0;
     do {
         rc = resolve_open_once_with_animation(itemId, title, out, progress_out, progress_fetched);
-        if (rc != -1 || !g_running || g_screen == SC_LOGIN) break;
+        if ((rc != -1 && rc != -3) || !g_running || g_screen == SC_LOGIN) break;
+        // This exact 503 code is rejected by the server's admission gate BEFORE
+        // creating a session. Generic 503, timeout and lost responses do NOT
+        // qualify. Keep every other POST retry explicitly user-confirmed.
+        if (rc == -3 && deferred_tries < 3) {
+            deferred_tries++;
+            if (!wait_playback_reconnect(title, 1000u * (Uint32)deferred_tries)) { rc = -2; break; }
+            continue;
+        }
         if (!prompt_playback_retry(title)) { rc = -2; break; }
+        deferred_tries = 0;
         diag_player_event("resolve", "retry-confirmed", "item=%d", itemId);
     } while (g_running);
     g_playback_ui_return_item = itemId;
@@ -1433,18 +1474,25 @@ int resolve_and_play_details(int itemId, const char *title, const char *subtitle
     snprintf(stable_subtitle, sizeof(stable_subtitle), "%s", subtitle ? subtitle : "");
     snprintf(stable_overview, sizeof(stable_overview), "%s", overview ? overview : "");
     snprintf(stable_next, sizeof(stable_next), "%s", next_title ? next_title : "");
-    PlaybackSource src = {0};
-    cJSON *prefetched_progress = NULL;
-    int progress_fetched = 0;
-    int resolved = resolve_open_with_animation(itemId, stable_title, &src,
-                                               &prefetched_progress, &progress_fetched);
-    if (resolved == -2) return 0;
-    if (resolved < 0) return 0;
-    int rc = resolve_and_play_resolved(itemId, stable_title, stable_subtitle,
+    while (g_running) {
+        PlaybackSource src = {0};
+        cJSON *prefetched_progress = NULL;
+        int progress_fetched = 0;
+        int resolved = resolve_open_with_animation(itemId, stable_title, &src,
+                                                   &prefetched_progress, &progress_fetched);
+        if (resolved < 0) { cJSON_Delete(prefetched_progress); return 0; }
+        int rc = resolve_and_play_resolved(itemId, stable_title, stable_subtitle,
                                        stable_overview, stable_next, has_next, &src,
                                        &prefetched_progress, progress_fetched);
-    cJSON_Delete(prefetched_progress);
-    return rc;
+        cJSON_Delete(prefetched_progress);
+        if (rc != PLAYBACK_ENTRY_FAILED || !g_running || g_screen == SC_LOGIN) return rc == PLAYBACK_ENTRY_FAILED ? 0 : rc;
+        diag_player_event("episodes", "opening-failed", "item=%d", itemId);
+        // Automatic checkpoint/transport/supervisor budgets are exhausted.
+        // Keep this exact destination visible; a fresh admission now needs A.
+        if (!prompt_playback_retry(stable_title)) return 0;
+        diag_player_event("episodes", "opening-retry", "item=%d", itemId);
+    }
+    return 0;
 }
 
 static int resolve_and_play_resolved(int itemId, char *stable_title, char *stable_subtitle,
@@ -1474,7 +1522,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
         if (hot == 2) {
             if (api_reresolve_playback(itemId, NULL, &src) < 0 || !src.play_url[0]) {
                 toast("Video preparado, mas a fonte R2 nao abriu");
-                return 0;
+                return PLAYBACK_ENTRY_FAILED;
             }
         } else if (hot == -2) {
             // Instalacoes antigas sem hot-stream mantem a preparacao existente.
@@ -1484,7 +1532,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             };
             return accel_wait_and_play(itemId, stable_title, &presentation);
         } else if (hot != 1) {
-            return 0;
+            return hot == 0 ? 0 : PLAYBACK_ENTRY_FAILED;
         }
     }
     if (src.container[0] && !strcmp(src.container, "embed")) {
@@ -1508,7 +1556,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
                     ui_send(p, "POST", "{}");
                 }
                 if (!cancelled) toast("Nao consegui consultar seu ponto salvo. Tente novamente.");
-                return 0;
+                return cancelled ? 0 : PLAYBACK_ENTRY_FAILED;
             }
         }
         if (pr) {
@@ -1582,7 +1630,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
 
         if (g_tab == TAB_DOWNLOADS) load_history();
         
-        if (run_rc < 0) {
+        if (run_rc < 0 && res.reason != EXIT_REASON_USER) {
             if (player_last_error_access_expired()) {
                 access_expired_to_login();
                 return 0;
@@ -1591,7 +1639,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             if (detail && detail[0]) snprintf(m, sizeof(m), "%s", detail);
             else snprintf(m, sizeof(m), "Reproducao interrompida (erro %d)", run_rc);
             toast(m); 
-            rc = 0;
+            rc = PLAYBACK_ENTRY_FAILED;
         } else {
             rc = res.reason == EXIT_REASON_NEXT_EPISODE ? 2 :
                  res.reason == EXIT_REASON_NATURAL ? 1 : 0;

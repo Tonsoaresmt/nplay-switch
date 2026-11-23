@@ -232,6 +232,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Ciclo HOME/suspensao ou readmissao segura falh
 if ($LASTEXITCODE -ne 0) { throw 'Historico/EOF/pausa perderam os guards de fluxo.' }
 & node tools/test_playback_resolution.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Resolucao de episodio/timeout/progresso desconhecido falhou.' }
+& node tools/test_playback_entry.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Recuperacao da abertura perdeu episodio, cancelamento ou ownership.' }
 & node tools/test_connection_test.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Teste de internet, memoria, TLS ou cancelamento falhou.' }
 & node tools/test_connection_probe.mjs
@@ -373,6 +375,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou ao compilar.' }
 if ($LASTEXITCODE -ne 0) { throw 'Simulacao de episodios falhou.' }
 & node tools/test_episode_sequence.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Sequencia real de episodios perdeu contexto ou proximo episodio.' }
+& node tools/test_episode_countdown.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Contagem nativa exige confirmacao indevida ou ignora cancelamento.' }
 & node tools/test_episode_rewatch.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Reassistir uma temporada antiga perdeu a escolha explicita ou a ordem.' }
 Assert-True ($sources -match 'next_selected \|\| paused \|\| hud_pinned') 'Proximo episodio voltou a ficar escondido durante a pausa.'

@@ -1,5 +1,44 @@
 # Continuidade para agentes
 
+## Implementacao .61 — 23/11/2026, candidata LOCAL
+
+- Usuario pediu implementar apos auditoria e esclareceu maratona SEM apertar A.
+  Autoplay segueautomatico5s quando ligado; cancel e preferencia conservados.
+- Worker de progresso agora3GETsbounded com200/400ms cancelaveis; checkpoint
+  desconhecido jamais vira0. Auth/plan/rate/TLS/missing nao recebemretry.
+- POST so repeteautomatico em503 code=server_restarting (guard pre-admissao),
+  apos join e espera1/2/3s cancelavel, max3. Timeout/generic503 NAO repetem.
+- PLAYBACK_ENTRY_FAILED interno separa falha de cancel; apos recuperacoes
+  esgotadas, mesmoepisodio/copiastitulo visiveis com retryexplicito. Cancel -11
+  reasonUSER nao virafalha. Sem fakeEOF, skipdeepisodio, alteracaodebackend/TLS.
+- Tests C reais + rede/SDLfake: GET1/2falhas sem input/POSTextra,503exato,
+  negacoes/cancel/limites,1000transicoes/1000ownership e countdownZEROinput.
+  Passaram isolados. -Werror buildintegral make-B passou sem apagardiretorios;
+  bateriaFINALCOMPLETA no NRO .61 exit0 SEMSkipMediaFixtures,55casosmidia,
+  1087AAC, TLS/legendas/ELF e novos testes integrados. Pode seguirpublicacao.
+- Candidato24311631B SHAa3df1de296145f9f9b4e1f45382ab92cbead22ba0aebcdd8adc6683aacb292c9.
+  Fonte/appnaomudadosdepoisdobuild; docs EPISODE_RECOVERY_0_12_61.md eRELEASE.
+  Sem console/conta/midia deproducao. Sem commit/push/release ateagora.
+
+## Auditoria episodios/intro — 23/11/2026, SEM mudanca no app
+
+- Pedido atual: verificar fechamento ao trocar episodio e posicao Pular abertura.
+  Checkout/branch permanecem switch-access-expiry / switch-player-hardening,
+  base3b3184e, remoto igual e latest.60. Sem novos logs/obra do incidente.
+- Site/health1e59abdf inclui45a96859 (QR nao esta mais apenas enfileirado).
+  Web29a6b6f7/c8180952 alteram playerJS/focoTV, NAO o NRO SDL.
+- Loop C real com stub de play confirma: falha na abertura do proximo retorna0
+  e termina sequencia. Resultado cancela/falha e colapsado; fallback de progresso
+  indisponivel so tem toast. Isso NAO prova causa do incidente/erro de rede/crash.
+  Nao remover guard de progresso nem fabricar EOF/repetir POST automaticamente.
+- Posicao intro450/508/380/68, centro640, gap24atebarra600, legenda12acima e
+  Proximo emx872 nao colidem. Tests ampliados de ocultacao/margens/controle
+  passam, nao sao pixels/GPU/TV reais. Sem mudanca visual arbitraria.
+- Harness Linux nao compilava intro_skip.c na lista: adicionado, bash-n passou.
+  WSL ausente; nao afirmar Linux integrado passou. Testes ampliados somente,
+  NRO/app permanecem identicos; nenhum rebuild, versao, commit/push/release/deploy.
+  Relatorio docs/AUDIT_EPISODE_TRANSITION_INTRO_2026_11_23.md tem limites e plano.
+
 ## .60 PUBLICADA / backend enfileirado — 13/11/2026
 
 - Usuario autorizou servidor e .60. NRO publicado latest, nao draft/prerelease,
