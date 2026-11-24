@@ -87,12 +87,16 @@ const routes = [
   ['Player', '/api/stream/%d/variants', 'stream', 'get', '/stream/:itemId/variants'],
   ['Player', '/api/stream/session/%d/heartbeat', 'stream', 'post', '/stream/session/:sessionId/heartbeat'],
   ['Player', '/api/stream/session/%d/refresh', 'stream', 'post', '/stream/session/:sessionId/refresh'],
-  ['Player', '/api/stream/session/%d/fail', 'stream', 'post', '/stream/session/:sessionId/fail'],
-  ['Player', '/api/stream/%d/stop', 'stream', 'post', '/stream/:itemId/stop'],
+  ['Player', 'exclude_source_ids', 'stream', 'post', '/stream/:itemId'],
+  ['Player', '/api/stream/session/%d/stop', 'stream', 'post', '/stream/session/:sessionId/stop'],
 ];
+assert.ok(!client.includes('/api/stream/session/%d/fail'), 'Client must not use the legacy source-mutating fail route');
 for (const [area, needle, module, method, route] of routes) {
   assert.ok(client.includes(needle), `${area}: cliente nao usa ${needle}`);
-  assert.ok(sources[module].includes(`app.${method}('${route}'`),
+  const controlledPost = module === 'hot' && method === 'post' &&
+    sources[module].includes('const controlPost = (...args) => { if (!deliveryOnly) app.post(...args); };') &&
+    sources[module].includes(`controlPost('${route}'`);
+  assert.ok(sources[module].includes(`app.${method}('${route}'`) || controlledPost,
     `${area}: backend nao registra ${method.toUpperCase()} ${route}`);
 }
 

@@ -4,6 +4,12 @@
 
 #define PLAYER_PCM_LIMIT_SECONDS 4
 #define PLAYER_PCM_GAP_SECONDS 2
+static inline double player_audio_presented(double previous, double end,
+                                             unsigned queued, double bytes_per_second) {
+    if (!isfinite(end) || !isfinite(bytes_per_second) || bytes_per_second <= 0) return previous;
+    double audible = end - queued / bytes_per_second;
+    return isfinite(audible) && audible > previous ? audible : previous;
+}
 static inline int player_audio_ready(int paused, int presented, int preroll) {
     return !paused && presented && !preroll;
 }

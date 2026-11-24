@@ -122,13 +122,14 @@ run('selection-publication',String.raw`
 #include <stdio.h>
 static SubtitleChoice g_player_subtitle_choice;
 static void publish(int scur,int sub_chosen,int nsub){
+  int manual_subtitle = sub_chosen && scur < 0;
   struct {int source_id;} r={2},*req=&r;
   SubtitleTrackKey subtitle_keys[2]={{"pt","PT",0,0},{"en","EN",0,0}};
 `+section(player,'    // Desired selection survives','    g_player_audio_index = naud ?')+String.raw`
 }
 int main(void){
   publish(-1,0,2);assert(!g_player_subtitle_choice.valid);
-  publish(0,0,2);assert(g_player_subtitle_choice.valid&&g_player_subtitle_choice.index==0);
+  publish(0,0,2);assert(g_player_subtitle_choice.valid&&g_player_subtitle_choice.index==0&&g_player_subtitle_choice.automatic);
   g_player_subtitle_choice.valid=0;publish(-1,1,0);
   assert(g_player_subtitle_choice.valid&&g_player_subtitle_choice.index==-1);
   puts("PASS: automatic absence is not deliberate OFF; selected track and explicit OFF are published.");

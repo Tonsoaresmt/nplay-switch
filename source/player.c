@@ -1419,7 +1419,7 @@ static void external_subtitle_labels(PlayerHud *hud, char names[17][96],
 
 // Renditions de audio do master quando o FFmpeg abre somente a escolhida
 // (hls_manifest_keep_audio). O painel lista todas; trocar reabre a fonte.
-typedef struct { char name[96]; char language[24]; int is_default; } MasterAudioTrack;
+typedef struct { char name[96]; char language[24]; int is_default, is_commentary; } MasterAudioTrack;
 
 static const char *master_audio_norm(const MasterAudioTrack *track) {
     return audio_language_normalize(track->language[0] ? track->language : NULL,
@@ -1433,6 +1433,7 @@ static void master_audio_info(const MasterAudioTrack *tracks, int count,
         info[i].language = tracks[i].language[0] ? tracks[i].language : NULL;
         info[i].title = tracks[i].name[0] ? tracks[i].name : NULL;
         info[i].is_default = tracks[i].is_default;
+        info[i].is_commentary = tracks[i].is_commentary;
         if (*best < 0 && tracks[i].is_default) *best = i;
     }
     if (*best < 0) *best = 0;
@@ -1462,6 +1463,7 @@ static int player_hls_choose_audio(const PlayerRequest *req, AVIOContext *avio,
         snprintf(tracks[i].name, sizeof(tracks[i].name), "%s", parsed[i].name);
         snprintf(tracks[i].language, sizeof(tracks[i].language), "%s", parsed[i].language);
         tracks[i].is_default = parsed[i].is_default;
+        tracks[i].is_commentary = parsed[i].is_commentary;
     }
     free(parsed);
     AudioTrackInfo info[AUDIO_POLICY_MAX_TRACKS] = {0};
@@ -2616,9 +2618,13 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     }
 
     char subtitle_auto_language[8] = "";
-    if (scur < 0 && !sub_chosen &&
-        (!req->subtitle_choice || !req->subtitle_choice->valid)) {
-        const char *wanted = lang_norm(pref_sub);
+    int manual_subtitle = (req->subtitle_choice && req->subtitle_choice->valid &&
+                           !req->subtitle_choice->automatic) ||
+        (!req->subtitle_choice && req->subtitle_hint_priority) || !strcasecmp(pref_sub, "off");
+    if (!manual_subtitle) {
+        const char *wanted = req->subtitle_choice && req->subtitle_choice->valid &&
+                              req->subtitle_choice->automatic
+            ? req->subtitle_choice->key.language : lang_norm(pref_sub);
         if (wanted[0]) snprintf(subtitle_auto_language, sizeof(subtitle_auto_language), "%s", wanted);
         else if (naud > 0) {
             const char *audio_norm = stream_norm(fmt, aidxs[acur]);
@@ -2630,9 +2636,11 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     int aidx = naud ? aidxs[acur] : -1;
     // Desired selection survives an early decoder/network failure. No streams
     // in a fallback source must not silently overwrite it with deliberate OFF.
-    if (scur >= 0 || (sub_chosen && scur < 0))
-        subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
-                                scur, req->source_id);
+    if (scur >= 0 || (sub_chosen && scur < 0)) {
+        if (scur >= 0 && !manual_subtitle)
+            subtitle_choice_capture_auto(&g_player_subtitle_choice, subtitle_keys, nsub, scur, req->source_id);
+        else subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub, scur, req->source_id);
+    }
     g_player_audio_index = naud ? acur_ui + 1 : 0;
     snprintf(g_player_audio_language, sizeof(g_player_audio_language), "%s",
              naud ? (stream_norm(fmt, aidx)[0] ? stream_norm(fmt, aidx) : "und") : "");
@@ -2768,7 +2776,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     SDL_AudioDeviceID adev = 0;
     SDL_Texture *tex = NULL;
     struct SwsContext *sws = NULL;
-    AVFrame *yuv = NULL, *frame = NULL, *transfer = NULL;
+    AVFrame *yuv = NULL, *frame = NULL, *transfer = NULL, *pending_video = NULL;
+    int video_frame_held = 0, video_receive_pending = 0;
+    double held_video_pts = 0;
     AVPacket *pkt = NULL;
 #define PLAYER_SETUP_FAIL(code) do { \
     diag_player_event("setup", "fail", "rc=%d", (code)); \
@@ -2776,6 +2786,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     if (sws) sws_freeContext(sws); \
     if (yuv) av_frame_free(&yuv); \
     if (transfer) av_frame_free(&transfer); \
+    av_frame_free(&pending_video); \
     if (swr) swr_free(&swr); \
     if (actx) avcodec_free_context(&actx); \
     if (sctx) avcodec_free_context(&sctx); \
@@ -2876,6 +2887,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
     double last_ac = -1, last_ac_wall = av_gettime_relative() / 1000000.0;  // detecta audio travado
     PlayerAudioTimeline audio_timing;
     player_audio_timeline_reset(&audio_timing, start_sec);
+    av_frame_free(&pending_video); video_frame_held = video_receive_pending = 0;
     double cur_pos = 0;
     int running = 1, paused = req->start_paused != 0, vol = 100, reached_end = 0, playback_error = 0;
     g_player_pause_intent = paused;
@@ -3092,14 +3104,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 snprintf(notice, sizeof(notice), "Novas legendas disponiveis  |  X para escolher");
                 notice_until = now_ticks + 5000;
             }
-            if (subtitle_auto_language[0] && scur < 0 && subtitle_retry.desired < 0) {
+            if (subtitle_auto_language[0]) {
                 int preferred = subtitle_choice_preferred(subtitle_keys, nsub, subtitle_auto_language);
-                if (preferred >= 0) {
-                    subtitle_auto_language[0] = 0;
+                int previous = subtitle_retry.desired >= 0 ? subtitle_retry.desired : scur;
+                if (preferred >= 0 && (previous < 0 ||
+                    (previous < nsub && subtitle_keys[previous].forced && !subtitle_keys[preferred].forced))) {
                     subtitle_retry_select(&subtitle_retry, preferred);
                     subtitle_retry.pending = 1;
                     subtitle_retry.deadline = now_ticks;
-                    subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
+                    subtitle_choice_capture_auto(&g_player_subtitle_choice, subtitle_keys, nsub,
                                             preferred, req->source_id);
                 }
             }
@@ -3137,8 +3150,9 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 int was_switch = scur != choice;
                 scur = choice;
                 g_player_subtitle_index = scur + 1;
-                subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub,
-                                        scur, req->source_id);
+                if (subtitle_auto_language[0])
+                    subtitle_choice_capture_auto(&g_player_subtitle_choice, subtitle_keys, nsub, scur, req->source_id);
+                else subtitle_choice_capture(&g_player_subtitle_choice, subtitle_keys, nsub, scur, req->source_id);
                 const char *norm = audio_language_normalize(
                     manifest_subtitles[scur].language, manifest_subtitles[scur].name);
                 if (was_switch) {
@@ -3205,7 +3219,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     subtitle_retry_failed(&subtitle_retry, pending_hot_choice, now_ticks);
             }
         }
-        if (!subtitle_fetch.thread) {
+        if (!subtitle_fetch.thread && !pending_hot_subtitle) {
             int choice = subtitle_retry_due(&subtitle_retry, now_ticks);
             if (choice >= 0 && choice < nsub && SUB_HOT(choice) && !pending_hot_subtitle) {
                 pending_hot_subtitle = start_hot_subtitle(manifest_subtitles[choice].uri, restart_base);
@@ -3508,6 +3522,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                             resume_preroll_frames = 0;
                             resume_target = target;
                             player_audio_timeline_reset(&audio_timing, target);
+                            av_frame_free(&pending_video); video_frame_held = video_receive_pending = 0;
                             if (swr) swr_free(&swr);
                             post_resume_kind = PLAYER_RESTART_SEEK;
                             post_resume_started = 0;
@@ -3672,6 +3687,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                             resume_preroll_frames = 0;
                                             resume_target = cur_pos;
                                             player_audio_timeline_reset(&audio_timing, cur_pos);
+                                            av_frame_free(&pending_video); video_frame_held = video_receive_pending = 0;
                                             if (swr) swr_free(&swr);
                                             post_resume_kind = PLAYER_RESTART_TRACK;
                                             post_resume_started = 0;
@@ -3850,6 +3866,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                                 resume_preroll_frames = 0;
                                                 resume_target = cur_pos;
                                                 player_audio_timeline_reset(&audio_timing, cur_pos);
+                                                av_frame_free(&pending_video); video_frame_held = video_receive_pending = 0;
                                                 if (swr) swr_free(&swr);
                                                 post_resume_kind = PLAYER_RESTART_TRACK;
                                                 post_resume_started = 0;
@@ -4081,6 +4098,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                         resume_preroll_frames = 0;
                         resume_target = target;
                         player_audio_timeline_reset(&audio_timing, target);
+                        av_frame_free(&pending_video); video_frame_held = video_receive_pending = 0;
                         if (swr) swr_free(&swr);
                         post_resume_kind = PLAYER_RESTART_SEEK;
                         post_resume_started = 0;
@@ -4230,21 +4248,72 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 SDL_GetTicks() - buffering_since);
         }
         int take = 0;
+        int decoder_wait = 0, early_video_drain = 0;
+        int replay_video = video_frame_held &&
+            av_gettime_relative() / 1000000.0 - wall_start >= held_video_pts - 0.001;
+        int receive_video = !video_frame_held && video_receive_pending;
         int video_first = adev && player_audio_video_first(audio_before_ms,
                                       resume_preroll, 0);
-        if (!refill && video_first) {
+        if (replay_video || receive_video) {
+            av_packet_unref(pkt); pkt->stream_index = vidx; take = 1;
+            if (replay_video) { av_frame_unref(frame); av_frame_move_ref(frame, pending_video); video_frame_held = 0; }
+        } else if (video_frame_held) {
+            // Keep one decoded frame; continue feeding audio, never decode a
+            // second future video frame or display this one before its PTS.
+            if (aidx >= 0 && audio_before_ms < 1000u)
+                take = demux_worker_take_stream(&demux, aidx, pkt, &read_ms);
+            // Native cues must also be decoded during a long video interval.
+            // External subtitles already have their own independent worker.
+            if (!take && scur >= 0 && !SUB_EXTERNAL(scur) && sctx)
+                take = demux_worker_take_stream(&demux, sidxs[scur], pkt, &read_ms);
+            if (!take && aidx >= 0 && audio_before_ms < 1000u &&
+                demux_worker_video_lookahead(&demux, aidx) < 0) take = AVERROR(ENOBUFS);
+            // A future frame is a presentation deadline, not an empty network
+            // buffer. Entering EAGAIN here would freeze/reanchor that deadline.
+            if (!take) decoder_wait = 1;
+        } else if (!refill && video_first) {
             take = demux_worker_take_stream(&demux, vidx, pkt, &read_ms);
             if (!take) {
                 int lookahead = demux_worker_video_lookahead(&demux, vidx);
                 if (lookahead < 0) take = AVERROR(ENOBUFS);
-                else if (lookahead == 2) video_first = 0;
+                else if (lookahead == 2) {
+                    if (!eof_drain_stage && demux_worker_terminal(&demux) == AVERROR_EOF) {
+                        av_packet_unref(pkt); pkt->stream_index = vidx;
+                        take = 1; early_video_drain = 1; eof_drain_stage = 1;
+                    } else if (!resume_preroll && audio_before_ms >= 1000u) decoder_wait = 1;
+                    else video_first = 0;
+                }
             }
         } else if (!refill && aidx >= 0 && actx && adev && !resume_preroll &&
             demux_buffer_prefer_audio(audio_before_ms, paused))
             take = demux_worker_take_stream(&demux, aidx, pkt, &read_ms);
-        if (!take && !video_first) take = refill ? 0 : demux_worker_take(&demux, pkt, &read_ms);
+        if (!take && !video_first && !video_frame_held && !decoder_wait)
+            take = refill ? 0 : demux_worker_take(&demux, pkt, &read_ms);
         int ret = take == 1 ? 0 : take == 0 ? AVERROR(EAGAIN) : take;
-        int drain_decoder = 0;
+        int drain_decoder = early_video_drain;
+        if (decoder_wait) {
+            if (logged_first_present && !resume_preroll) {
+                double presented = video_frame_held ? av_gettime_relative() / 1000000.0 - wall_start : cur_pos;
+                if (!video_frame_held && audio_timing.valid)
+                    presented = player_audio_presented(cur_pos, audio_clock, SDL_GetQueuedAudioSize(adev), bps);
+                if (presented > cur_pos) cur_pos = presented;
+                // Present may wait for vblank. Close to the next frame, keep
+                // the existing image instead of adding an avoidable vblank
+                // plus Delay before its deadline. Long gaps still update cues.
+                int redraw_wait = !video_frame_held || held_video_pts -
+                    (av_gettime_relative() / 1000000.0 - wall_start) > 0.05;
+                if (redraw_wait) {
+                    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren);
+                    if (have_video_frame) SDL_RenderCopy(ren, tex, NULL, &dst);
+                    const char *text = active_subtitle_text(scur, SUB_EXTERNAL(scur), &subtitles, &external_subtitles, cur_pos);
+                    if (hud_pinned || SDL_GetTicks() < hud_until)
+                        draw_hud(ren, &hud_base, cur_pos, dur, 0, vol, acur_ui, scur, seekable_stream, NULL, -1, NULL, text);
+                    else draw_subtitle_overlay(ren, &hud_base, text);
+                    SDL_RenderPresent(ren);
+                }
+            }
+            SDL_Delay(8); continue;
+        }
         if (open_watch.cancelled) {
             running = 0;
             av_packet_unref(pkt);
@@ -4338,6 +4407,8 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                 drain_decoder = 1;
                 ret = 0;
             } else {
+                if (logged_first_present && audio_timing.valid && adev)
+                    cur_pos = player_audio_presented(cur_pos, audio_clock, SDL_GetQueuedAudioSize(adev), bps);
                 if (!adev || SDL_GetQueuedAudioSize(adev) < 8192) {
                     if (ret == AVERROR_EOF && player_eof_complete(cur_pos, dur,
                             SDL_AtomicGet(&open_watch.hls_io_failed))) reached_end = 1;
@@ -4448,14 +4519,18 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                                   pkt->size, (long long)pkt->pts);
                 logged_first_video_packet = 1;
             }
-            if (avcodec_send_packet(vctx, drain_decoder ? NULL : pkt) == 0) {
-                while (avcodec_receive_frame(vctx, frame) == 0) {
+            if (replay_video || video_receive_pending || avcodec_send_packet(vctx, drain_decoder ? NULL : pkt) == 0) {
+                video_receive_pending = 1;
+                while (running) {
+                    int replayed_frame = replay_video;
+                    if (replay_video) replay_video = 0;
+                    else if (avcodec_receive_frame(vctx, frame) != 0) { video_receive_pending = 0; break; }
                     if (!logged_first_video_frame) {
                         diag_player_event("video", "first-frame", "fmt=%d size=%dx%d",
                                           frame->format, frame->width, frame->height);
                         logged_first_video_frame = 1;
                     }
-                    decoded_video++;
+                    if (!replayed_frame) decoded_video++;
                     int64_t vts = frame->best_effort_timestamp != AV_NOPTS_VALUE
                         ? frame->best_effort_timestamp : frame->pts;
                     double vpts = (vts != AV_NOPTS_VALUE) ? vts * av_q2d(vtb) - timeline_origin : cur_pos;
@@ -4506,8 +4581,15 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
                     // este quadro para a GPU so aumenta o atraso. Descartar aqui
                     // permite recuperar sincronismo em fontes pesadas/instaveis.
                     if (delay < -0.12) { dropped_video++; continue; }
+                    if (delay > 0.02) {
+                        if (!pending_video) pending_video = av_frame_alloc();
+                        if (!pending_video) { playback_error = -4; running = 0; break; }
+                        av_frame_move_ref(pending_video, frame);
+                        held_video_pts = vpts; // Never overwrite codec timestamps.
+                        video_frame_held = 1;
+                        break;
+                    }
                     if (delay > 0.001) {
-                        if (delay > 0.35) delay = 0.35;
                         Uint32 sync_started = SDL_GetTicks();
                         Uint32 wait_until = sync_started + (Uint32)(delay * 1000);
                         while (!SDL_TICKS_PASSED(SDL_GetTicks(), wait_until)) {
@@ -4794,7 +4876,7 @@ static int player_play_internal(SDL_Renderer *ren, SDL_Joystick *joy, PlayerRequ
         subtitle_session_keep(manifest_subtitles[scur].uri, &external_subtitles);
     external_subtitle_clear(&external_subtitles);
     avcodec_free_context(&vctx);
-    av_frame_free(&frame); av_packet_free(&pkt);
+    av_frame_free(&frame); av_frame_free(&pending_video); av_packet_free(&pkt);
     SDL_DestroyTexture(tex);
     avformat_close_input(&fmt);
     nplay_curl_avio_close(avio);

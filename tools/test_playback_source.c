@@ -26,7 +26,7 @@ long net_request_timeout_cancel(const char *url, const char *method,
     assert(!strcmp(method, "POST") && !strcmp(bearer, "test-token"));
     assert(connect_timeout == 8 && total_timeout == 20 && !cancel);
     // The NRO never forces an embed/provider or excludes the ready R2 source.
-    assert(!strcmp(body, "{}"));
+    assert(!strcmp(body, "{\"new_session\":true}"));
     out->len = strlen(fixture); out->data = malloc(out->len + 1);
     assert(out->data); memcpy(out->data, fixture, out->len + 1);
     *err = NULL; calls++; return 200;

@@ -1,5 +1,87 @@
 # Continuidade para agentes
 
+## .63 sessao/QR — 24/11/2026, nova autorizacao/publicacao PENDENTE
+
+- Usuario revogou escopo somente NRO: pediu corrigir encerramento no servidor e
+  limite de aparelho no re-login, depois publicar no atualizador. Backend isolado
+  .codex-tmp/backend-session-fencing, base a85d8568, branch
+  codex/switch-session-fencing-20261124. Nao alterar worktrees antigos.
+- NRO usa somente /stream/session/:sid/stop, inclusive falha de progresso e
+  preparo hot. Legacy api_stop_playback removido; sem fallback amplo. Admissao
+  envia new_session:true, pois reutilizar SID antigo anularia a protecao.
+- Backend novo tem rota exata/ownership e opt-in SID novo. QR tem aprovacao por
+  senha sem cadastrar celular: celular novo podia consumir vaga antes do Switch.
+  Novos aparelhos ainda respeitam quota, sem apagar/fundir por nome ou IP.
+- FINAL make-B integral-Werror e bateria COMPLETA SEM SkipMediaFixtures
+  passaram exit0. Logs build/build-0.12.63-session-final2.log e
+  build/validate-0.12.63-session-final4.log, SHA antes/depois identico.
+  NRO24319823B/SHA4f287b3a1df2b22900ba2eb79a719e5be943039c710ac13a02f9bc1f20271002.
+  Sidecar atualizado apos prova; NRO/sidecar nao commitar. Nenhum rebuild apos.
+  Backend npm test completo/check/diff passaram e main1c60ef4f enviado.
+- Backend precisa implantar ANTES do NRO. Timer ativo mas adiando por players,
+  health1e59abdf observado. Nunca forcar restart/ativar Actions antigos. Sem
+  release NRO ainda. Preparar rascunho, mas nao promover antes da saude do
+  servidor confirmar1c60ef4f. Docs de sessao no backend; atualizar ao concluir.
+
+## .63 rodada anterior LOCAL VALIDADA — 24/11/2026, artefato SUPERADO
+
+- Usuario autorizou implementar a auditoria .62; respondeu explicitamente
+  CORRIGIR SOMENTE NRO por enquanto. Nao alterar backend/deploy/SQL. Stop com
+  sessionID fica dependencia documentada; nao omitir stop nem bloquear telas.
+- Mesmo checkout/branch, base 989a71d. Implementados budgets HTTP por rota
+  (catalogo16MiB/progresso-jobs8MiB/outros4MiB, override explicito preservado),
+  rejeicao de URL truncada/CRLF, token HLS exato de audiodescricao e origem
+  AUTO/MANUAL de legenda com promocao forced->full sem sobrepor escolha/OFF.
+- main.c introduz barreira assincrona para reauth: token/profilevelhos imutaveis
+  ate todosjobs cancelarem+join, login/input/aplicacao suspensos masUIrenderiza;
+  entao limpa caches/prefs e libera login novo. Legacyworkers usam cancel proprio.
+  Teste da barreira: 100 reautenticacoes/1000 joins pthread reais passaram;
+  HTTP/SD/render simulados. Sem conta real ou troca fisica de perfil testada.
+- Scheduler conserva uma referencia de quadro futuro, continua audio/legenda
+  nativa e respeita PTS; evita redraw/vblank perto do prazo. EOF drena video
+  antes da cauda PCM e acompanha posicao audivel. Seek libera quadro retido;
+  OOM falha controladamente. Tetos de demux/PCM nao aumentaram.
+- Testes novos test_media_deadlines/test_identity_barrier/test_system_contracts
+  integrados ao validador. Media usa timestamps FFmpeg8.1.1 reais, mas decoder,
+  dispositivo e clock simulados; NAO equivale a SDK7.1/NVTEGRA/Horizon.
+- Version bump .63 LOCAL, nenhuma publicacao/commit. NRO local pode ser build
+  candidato. Sidecar atualizado apos a prova FINAL; nao commitar NRO/sidecar.
+- Primeira suite completa passou, mas nao conta como FINAL: houve ajuste de
+  cadencia depois. Processo final atual: build/build-0.12.63-final3.log seguido
+  de build/validate-0.12.63-final3.log, SEM SkipMediaFixtures, passaram exit0.
+  SHA antes/depois identico: bc4b154332478432d4afdf4c854fd07152579a4b1a2f901e8cfc98c42a97528d,
+  NRO24319823B. Nenhuma mudanca no app/rebuild apos essa prova. Diffcheck passou.
+  Suite inteira +55 cenarios/6 perfis/118HTTP/1087AAC e simbolos ELF aprovados.
+  Nenhum commit/push/release. Relatorio docs/PLAYER_FIXES_0_12_63.md.
+  Sem hardware, sessao longa ou obra de producao. Nao chamar de homologado.
+
+## Auditoria sistema .62 — 24/11/2026, SEM correcao/publicacao
+
+- Pedido somente auditar profundamente. Checkout/branch autorizados, HEAD989a71d,
+  runtime563245f/.62. Nenhum source/include/Makefile/NRO/build de app alterado,
+  sem commit/push/release/deploy/conta. Sidecarlocaluntracked continua esperado.
+- Relatorio docs/PLAYER_SYSTEM_AUDIT_2026_11_24.md: sete lacunas locais e um
+  risco condicional deprotocolo. Novas ferramentas sao NEGATIVAS, opt-in
+  --reproduce-062; exit0=DEFEITOSREPRODUZIDOS, nunca gateverde ou homologacao.
+- audit_player_062_edges.mjs --media-fixtures: HLSperdeCHARACTERISTICS deAD;
+  autoPTforced fica preso quando fullPTchega depois; reauthapos401 reaplica
+  historico/prefsantigos naidentidadenova (troca NORMALdeperfil restartseguro);
+  JSON24MiB -> buffer32MiB/pico58720395B comcJSONreal, limit0nos callers;
+  URL2299truncada1535aceita; caudaAAC281pacotesfalha197no capPCM; VFRPTS0/4/8
+  apresentaPTS4apos350ms modelados,3.65scedo. C real, rede/device/tempo fake;
+  midia/packettimestampsCLI8.1.1 reais != SDK7.1. Nao atribuir incidente fisico.
+- audit_stop_identity_062.mjs: HTTPabortreal+SQLiteemmemoria+SQLatualbackend
+  reproduzem STOPantigo fechando sessao nova mesmoitem/device SEhandler
+  executar depois. Outra tela protegida. Ordem/atraso artificiais, nao medidos
+  emproducao. HipotesedeordemNAOequivaleacausaconfirmada. SessionIDfencing
+  exige coordenarservidor, nada implementado. origin/mainbackend1e59abdf
+  conferido porfetchsomente; checkout/backendsemalteracoes/deploy.
+- Regressoes POSITIVASlate/discovery/flow/login/demux/.62mediarerodaramexit0;
+  6000late/2200login/8800layouts/50248policy/200kcues. Nao provam cenariosnovos.
+  NROcontinua24315727B/SHA2899776a1ec2e1a620a0b971b4890a9312fcc06a2ab3dd0a089a25914ba48d31.
+  Proximo: identidade/contratos, intencao AUTO/MANUAL, tempoPCM/VFR e fencing.
+  Sem SDK/hardwareintegrado ou validadorcompletonovo; auditoria nao e release.
+
 ## .62 PUBLICADA — 23/11/2026
 
 - v0.12.62 latest publica, nao draft/prerelease, em22:33:52UTC

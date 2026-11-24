@@ -35,7 +35,7 @@ long net_request_timeout_cancel(const char *url, const char *method,
     }
     assert(!strcmp(url, normal_mode ? "https://nplay.test/api/stream/42" : started_mode ? "https://nplay.test/api/stream/hot/request/91/started" : "https://nplay.test/api/stream/hot/42"));
     assert(!strcmp(method, "POST"));
-    if (normal_mode) assert(!strcmp(body,"{}"));
+    if (normal_mode) assert(!strcmp(body,"{\"new_session\":true}"));
     else if (started_mode) {
         cJSON *parsed = cJSON_Parse(body); assert(parsed);
         assert(!strcmp(jstr(parsed, "session_id"), "1234567890abcdef_safe-session"));

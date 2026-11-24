@@ -101,7 +101,7 @@ $mainSource = Get-Content source/main.c -Raw
 Assert-True ($mainSource -match 'SDL_CreateThread\(landing_fetch_thread') 'Catalogo voltou a bloquear a thread de interface.'
 Assert-True ($mainSource -match 'ui_header_action_hit\(x, y\)' -and $mainSource -notmatch 'y < 95 && x < 260') 'Voltar por touch nao coincide com a acao desenhada no cabecalho.'
 Assert-True ($mainSource -match 'g_land_cache\[5\]') 'Troca de aba perdeu o cache de catalogo.'
-Assert-True ($mainSource -match 'api_get_timeout\(landing_path\(tab\), 6L, 30L\)') 'Series voltou ao timeout curto ou sincrono.'
+Assert-True ($mainSource -match 'api_get_timeout_cancel\(landing_path\(tab\), 6L, 30L, &g_identity_cancel\)') 'Series perdeu prazo, worker ou cancelamento de identidade.'
 Assert-True ($mainSource -notmatch 'prefetch_order\[\] = \{ 1, 2, 3, 4 \}') 'Catalogos voltaram a ocupar heap automaticamente antes do player.'
 Assert-True ($mainSource -match 'playback_memory_enter') 'Player nao reserva memoria antes de abrir HLS.'
 Assert-True ($mainSource -match 'hero_pool_add_ready\(g_heroesArr, cJSON_GetObjectItem\(g_land, "featured"\)\)' -and $mainSource -match 'jstr\(item, "hero_type"\)') 'Destaques do Switch perderam tipo ou curadoria pronta do site.'
@@ -411,6 +411,8 @@ if (-not $SkipMediaFixtures) {
 }
 if (-not $SkipMediaFixtures -and (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
     (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+    & node tools/test_media_deadlines.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'Deadlines VFR, cauda PCM ou ownership de quadro regrediram.' }
     & node tools/test_chunked_remux.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Simulacao local do remux chunked falhou.' }
     & node tools/test_hls_player_fixture.mjs
@@ -423,6 +425,12 @@ if (-not $SkipMediaFixtures -and (Get-Command ffmpeg -ErrorAction SilentlyContin
     if ($LASTEXITCODE -ne 0) { throw 'Timestamps AAC reais perderam continuidade na retomada.' }
 }
 $nm = $env:TARGET_NM
+& node tools/test_identity_barrier.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Reautenticacao reaplicou respostas/cache de identidade antiga.' }
+& node tools/test_session_stop.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Encerramento exato da sessao perdeu SID/ownership ou voltou ao stop amplo.' }
+& node tools/test_system_contracts.mjs
+if ($LASTEXITCODE -ne 0) { throw 'Contratos HLS/legenda/URL/budget regrediram.' }
 if (-not $nm) {
     $nmCommand = Get-Command aarch64-none-elf-nm -ErrorAction SilentlyContinue
     if ($nmCommand) { $nm = $nmCommand.Source }

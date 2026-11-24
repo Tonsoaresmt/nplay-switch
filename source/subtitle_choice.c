@@ -62,6 +62,12 @@ void subtitle_choice_capture(SubtitleChoice *out, const SubtitleTrackKey *tracks
     out->roster = roster(tracks, count);
     if (index >= 0) out->key = tracks[index];
 }
+void subtitle_choice_capture_auto(SubtitleChoice *out, const SubtitleTrackKey *tracks,
+                                  int count, int index, int source_id) {
+    if (!out || !tracks || index < 0 || index >= count) return;
+    subtitle_choice_capture(out, tracks, count, index, source_id);
+    out->automatic = 1;
+}
 int subtitle_choice_resolve(const SubtitleChoice *choice, const SubtitleTrackKey *tracks,
                             int count, int source_id) {
     if (!choice || !choice->valid) return -2;

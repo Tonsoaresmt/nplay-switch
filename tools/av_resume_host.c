@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include "player_audio_timeline.h"
 typedef uint32_t Uint32;
 typedef int SDL_AudioDeviceID;
@@ -50,21 +51,45 @@ static void feed(double pts,int samples){
  }
 }
 static int streams[16],stream_count,terminal;
+static int packet_ids[4096],taken_id;
+typedef struct {int id,has_data;} AVFrame;
+typedef struct {int stream_index;} AVPacket;
+static AVFrame current_frame,*frame=&current_frame,*pending_video;
+static int video_frame_held,video_receive_pending,buffering_since,eof_drain_stage=1;
+static int scheduled_wait,scheduled_replay,scheduled_receive,scheduled_drain,frames_allocated,frame_oom;
+static double held_video_pts,wall_start;
+static int64_t model_time;
+#define AVERROR_EOF (-541478725)
+static int64_t av_gettime_relative(void){return model_time;}
+static void av_packet_unref(AVPacket*p){p->stream_index=-1;}
+static void av_frame_unref(AVFrame*p){memset(p,0,sizeof(*p));}
+static void av_frame_move_ref(AVFrame*out,AVFrame*in){*out=*in;memset(in,0,sizeof(*in));}
+static AVFrame*av_frame_alloc(void){if(frame_oom)return NULL;AVFrame*p=calloc(1,sizeof(*p));if(p)frames_allocated++;return p;}
+static void av_frame_free(AVFrame**p){if(*p){free(*p);*p=NULL;frames_allocated--;}}
 static int demux_worker_terminal(int*w){(void)w;return terminal;}
 static int demux_worker_video_lookahead(int*w,int index){(void)w;
  for(int i=0;i<stream_count;i++)if(streams[i]==index)return 0;
  return demux_worker_terminal(w)?2:0;}
-static int demux_worker_take_stream(int*w,int stream,int*pkt,Uint32*ms){(void)w;(void)ms;
- for(int i=0;i<stream_count;i++)if(streams[i]==stream){*pkt=stream;memmove(streams+i,streams+i+1,(stream_count-i-1)*sizeof(*streams));stream_count--;return 1;}
+static int demux_worker_take_stream(int*w,int stream,AVPacket*pkt,Uint32*ms){(void)w;(void)ms;
+ for(int i=0;i<stream_count;i++)if(streams[i]==stream){pkt->stream_index=stream;taken_id=packet_ids[i];memmove(packet_ids+i,packet_ids+i+1,(stream_count-i-1)*sizeof(*packet_ids));memmove(streams+i,streams+i+1,(stream_count-i-1)*sizeof(*streams));stream_count--;return 1;}
  return 0;}
-static int demux_worker_take(int*w,int*pkt,Uint32*ms){(void)w;(void)ms;if(!stream_count)return terminal;
- *pkt=streams[0];memmove(streams,streams+1,--stream_count*sizeof(*streams));return 1;}
+static int demux_worker_take(int*w,AVPacket*pkt,Uint32*ms){(void)w;(void)ms;if(!stream_count)return terminal;
+ pkt->stream_index=streams[0];taken_id=packet_ids[0];memmove(packet_ids,packet_ids+1,(stream_count-1)*sizeof(*packet_ids));memmove(streams,streams+1,--stream_count*sizeof(*streams));return 1;}
 static int demux_buffer_prefer_audio(unsigned ms,int paused){return !paused&&ms<1000;}
-static int schedule(unsigned audio_before_ms,int preroll,int*pkt){
+static int schedule(unsigned audio_before_ms,int preroll,int*selected){
+ AVPacket packet={-1},*pkt=&packet;
  int demux=0,aidx=1,vidx=0,actx=1,paused=0,refill=0;Uint32 read_ms=0;
+ int scur=0,sctx=1,sidxs[]={2};
+#define SUB_EXTERNAL(s) (0)
+ (void)scur;(void)sctx;(void)sidxs;
  (void)vidx; // The published .57 scheduler had no video-first branch.
  resume_preroll=preroll;
 #include "av_resume_schedule.inc"
+#undef SUB_EXTERNAL
+#ifndef LEGACY_SCHEDULER
+ scheduled_wait=decoder_wait;scheduled_replay=replay_video;scheduled_receive=receive_video;scheduled_drain=early_video_drain;
+#endif
+ *selected=pkt->stream_index;
  return take;
 }
 static void reset(double target){
@@ -72,6 +97,10 @@ static void reset(double target){
  gap_seconds=head_pts=last_end=timeline_origin=0;injected_delay=fail_queue=0;
  cur_pos=resume_target=audio_clock=target;running=1;playback_error=0;
  player_audio_timeline_reset(&audio_timing,target);
+ av_frame_free(&pending_video);video_frame_held=video_receive_pending=buffering_since=0;eof_drain_stage=1;
+ scheduled_wait=scheduled_replay=scheduled_receive=scheduled_drain=0;model_time=0;wall_start=0;
+ (void)av_frame_alloc;(void)av_frame_unref;(void)av_frame_move_ref;(void)av_packet_unref;(void)av_gettime_relative;
+ held_video_pts=0;
 }
 static void matrix(void){
  for(int paused=0;paused<2;paused++)for(int presented=0;presented<2;presented++)for(int preroll=0;preroll<2;preroll++)

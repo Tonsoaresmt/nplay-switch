@@ -23,10 +23,13 @@ const end=source.indexOf('// Legenda de sess',start);
 const utfEnd=source.indexOf('// Legenda de sessão',start);
 const finish=end>=0 ? end : utfEnd;
 assert.ok(start>=0 && finish>start,'Review descriptor extraction boundaries');
-let hlsJobs=0;
+let hlsJobs=0,externalProof=0,lastPlaybackSid=0;
+const isolatedDelivery={enabled:false};
 const descriptor=vm.runInNewContext(source.slice(start,finish).replace('export function','function')+'\ndebridPlaybackResponse',{
- createDebridSession:direct=>({...direct,id:'1234567890_fixture_session'}),
- privateMediaUrl:(kind,id,account,tail='video')=>`/api/media/${kind}/${id}/${tail}?token=fixture`,
+ isolatedDelivery,
+ createDebridSession:direct=>({...direct,id:'1234567890_fixture_session',persisted:true}),
+ privateMediaUrl:(kind,id,account,tail='video',sid=0)=>{lastPlaybackSid=sid;return `/api/media/${kind}/${id}/${tail}?token=fixture`;},
+ prepareExternalDelivery:sid=>{externalProof=sid;},
  debridHlsAvailable:()=>true,ensureDebridHls:()=>{hlsJobs++;return {};},
  debridSessionProbe:()=>Promise.resolve({ok:true}), refreshDebridSessionLink:()=>{},
 });
@@ -39,5 +42,9 @@ if(source.slice(start,finish).includes('tvHls')){
  const hls=descriptor({needsRemux:true,fileName:'movie.mkv',fileSize:10737418240},91,7,42,null,{id:1},{hls:true});
  assert.equal(hls.container,'hls');assert.equal(hls.seekable,true);assert.equal(hls.seek_mode,'range');
  assert.match(hls.play_url,/\/hls\/index\.m3u8\?token=fixture$/);assert.equal(hlsJobs,1);
+ isolatedDelivery.enabled=true;
+ const isolated=descriptor({needsRemux:true,fileName:'movie.mkv',fileSize:10737418240},91,7,42,null,{id:1},{hls:true,playbackSessionId:88});
+ assert.equal(isolated.container,'hls');assert.equal(isolated.seekable,true);
+ assert.equal(externalProof,88);assert.equal(lastPlaybackSid,88);assert.equal(hlsJobs,1,'isolated delivery must not launch local HLS job');
  console.log('SITE COMPAT: deployed descriptor function extracted; MP4 Range, MKV restart, TV HLS and request/SID contracts passed (provider/jobs mocked).');
 }else console.log('SITE COMPAT: legacy descriptor MP4/MKV contract passed; backend has no TV-HLS descriptor.');

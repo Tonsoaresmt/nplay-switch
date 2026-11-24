@@ -14,6 +14,7 @@ typedef struct {
     char uri[HLS_MANIFEST_URI_MAX];
     int is_default;
     int forced;
+    int is_commentary; // HLS CHARACTERISTICS accessibility role, not its name.
 } HlsManifestTrack;
 
 // Bounded pre-publication selection; never reorder a live UI catalog.

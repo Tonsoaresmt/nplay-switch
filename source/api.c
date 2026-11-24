@@ -36,19 +36,26 @@ static void api_set_error(long code, const char *transport, cJSON *json) {
         snprintf(g_api_last_error, sizeof(g_api_last_error), "Resposta HTTP %ld", code);
 }
 
-static void absolute_play_url(const char *play, char *out, size_t cap) {
-    if (!out || cap == 0) return;
+static int absolute_play_url(const char *play, char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
     out[0] = '\0';
-    if (!play || !play[0]) return;
+    if (!play || !play[0]) return 1; // Preparation descriptors may omit media.
+    int n;
     if (!strncmp(play, "http://", 7) || !strncmp(play, "https://", 8))
-        snprintf(out, cap, "%s", play);
+        n = snprintf(out, cap, "%s", play);
     else if (play[0] == '/')
-        snprintf(out, cap, "%s%s", BASE, play);
+        n = snprintf(out, cap, "%s%s", BASE, play);
     else
-        snprintf(out, cap, "%s/%s", BASE, play);
+        n = snprintf(out, cap, "%s/%s", BASE, play);
+    if (n < 0 || (size_t)n >= cap || strpbrk(out, "\r\n")) {
+        out[0] = 0;
+        snprintf(g_api_last_error, sizeof(g_api_last_error), "Endereco de video invalido ou excede o limite seguro");
+        return 0;
+    }
+    return 1;
 }
 
-static void parse_playback_source(cJSON *j, PlaybackSource *out) {
+static int parse_playback_source(cJSON *j, PlaybackSource *out) {
     out->hot_session_id[0] = 0; // Normal resolver/refresh supersedes hot delivery.
     out->source_provider[0] = 0;
     int value;
@@ -66,7 +73,7 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
         out->delivery = !strcmp(text, "r2") ? DELIVERY_R2 :
                         !strcmp(text, "upstream") ? DELIVERY_UPSTREAM : DELIVERY_UNKNOWN;
     }
-    absolute_play_url(jstr(j, "play_url"), out->play_url, sizeof(out->play_url));
+    if (!absolute_play_url(jstr(j, "play_url"), out->play_url, sizeof(out->play_url))) return 0;
     if ((text = jstr(j, "quality"))) snprintf(out->quality, sizeof(out->quality), "%s", text);
     cJSON *qs = cJSON_GetObjectItem(j, "qualities");
     if (cJSON_IsArray(qs)) {
@@ -84,6 +91,7 @@ static void parse_playback_source(cJSON *j, PlaybackSource *out) {
     cJSON *bytes = cJSON_GetObjectItem(j, "source_bytes");
     if (cJSON_IsNumber(bytes)) out->source_bytes = (long long)bytes->valuedouble;
     out->is_cam = jint(j, "is_cam");
+    return 1;
 }
 
 cJSON *api_get_timeout_cancel(const char *path, long connect_timeout,
@@ -191,8 +199,10 @@ int api_hot_stream_attempt(int item_id, int source_id, SDL_atomic_t *cancel,
         snprintf(out->source.container, sizeof(out->source.container), "m3u8");
     const char *name = jstr(json, "file_name");
     out->source.sequential_stream = hot_sequential_file(name);
-    absolute_play_url(jstr(json, "play_url"), out->source.play_url,
-                      sizeof(out->source.play_url));
+    if (!absolute_play_url(jstr(json, "play_url"), out->source.play_url,
+                           sizeof(out->source.play_url))) {
+        cJSON_Delete(json); membuf_free(&resp); return -1;
+    }
     const char *seek_mode = jstr(json, "seek_mode");
     cJSON *seekable = cJSON_GetObjectItem(json, "seekable");
     if (seek_mode && !strcmp(seek_mode, "restart"))
@@ -369,6 +379,13 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
         snprintf(g_api_last_error, sizeof(g_api_last_error), "Memoria insuficiente ao preparar a reproducao");
         return -1;
     }
+    // A fresh admission must have a fresh SID. Otherwise a delayed exact stop
+    // of an earlier play could still close a reopened play sharing the SID.
+    if (!cJSON_AddBoolToObject(request, "new_session", 1)) {
+        cJSON_Delete(request);
+        snprintf(g_api_last_error, sizeof(g_api_last_error), "Memoria insuficiente ao preparar a sessao");
+        return -1;
+    }
     if (quality && quality[0]) {
         cJSON_AddStringToObject(request, "quality", quality);
     }
@@ -406,11 +423,11 @@ static int resolve_playback_with_timeout(int item_id, const char *quality,
         return -1;
     }
 
-    parse_playback_source(j, out);
+    int parsed = parse_playback_source(j, out);
 
     cJSON_Delete(j);
     membuf_free(&resp);
-    return 0;
+    return parsed ? 0 : -1;
 }
 
 int api_resolve_playback(int item_id, const char *quality, PlaybackSource *out) {
@@ -457,10 +474,10 @@ int api_refresh_playback_cancel(const PlaybackSource *current, SDL_atomic_t *can
         membuf_free(&resp);
         return -1;
     }
-    parse_playback_source(json, out);
+    int parsed = parse_playback_source(json, out);
     cJSON_Delete(json);
     membuf_free(&resp);
-    return out->play_url[0] ? 0 : -1;
+    return parsed && out->play_url[0] ? 0 : -1;
 }
 
 int api_refresh_playback(const PlaybackSource *current, PlaybackSource *out) {
@@ -630,20 +647,17 @@ int api_mark_watched(int item_id) {
     return code == 200 ? 0 : -1;
 }
 
-int api_stop_playback_cancel(int item_id, SDL_atomic_t *cancel) {
-    if (item_id <= 0) return 0;
-    char url[1024]; snprintf(url, sizeof(url), "%s/api/stream/%d/stop", BASE, item_id);
+int api_stop_session_cancel(int session_id, SDL_atomic_t *cancel) {
+    if (session_id <= 0) return 0;
+    char path[96], url[1024];
+    snprintf(path, sizeof(path), "/api/stream/session/%d/stop", session_id);
+    snprintf(url, sizeof(url), "%s%s", BASE, path);
     struct membuf out = {0}; const char *err = NULL;
     Uint32 started = SDL_GetTicks();
     long code = net_request_timeout_cancel(url, "POST", "{}",
-                                           g_token[0] ? g_token : NULL,
-                                           &out, &err, 3L, 6L, cancel);
-    char path[96]; snprintf(path, sizeof(path), "/api/stream/%d/stop", item_id);
+        g_token[0] ? g_token : NULL, &out, &err, 3L, 6L, cancel);
     diag_network_event("POST", path, code, SDL_GetTicks() - started, out.len);
     membuf_free(&out);
+    // Unknown/old servers must NOT cause a broad stop that can kill a new play.
     return code == 200 ? 0 : -1;
-}
-
-int api_stop_playback(int item_id) {
-    return api_stop_playback_cancel(item_id, NULL);
 }

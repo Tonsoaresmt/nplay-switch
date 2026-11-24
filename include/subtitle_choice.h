@@ -6,7 +6,10 @@ typedef struct {
     int valid, index, source_id; // index=-1 is deliberate OFF; valid=0 is UNSET
     uint64_t roster;
     SubtitleTrackKey key;
+    int automatic; // A fallback may improve later; never override manual/OFF.
 } SubtitleChoice;
+void subtitle_choice_capture_auto(SubtitleChoice *out, const SubtitleTrackKey *tracks,
+                                  int count, int index, int source_id);
 void subtitle_choice_capture(SubtitleChoice *out, const SubtitleTrackKey *tracks,
                              int count, int index, int source_id);
 // -2: missing/ambiguous identity; -1: deliberate OFF.

@@ -17,7 +17,7 @@ const scheduling=p.indexOf('        int take = 0;',p.indexOf('Uint32 audio_befor
 const schedulingEnd=p.indexOf('        int ret = take',scheduling);
 writeFileSync('build/av_resume_schedule.inc',p.slice(scheduling,schedulingEnd));
 const exe=resolve('build/test_av_resume.exe');
-let r=spawnSync(process.env.HOST_CC||'gcc',['-std=c11','-Wall','-Wextra','-Werror','-Iinclude','-Ibuild','tools/av_resume_host.c','-lm','-o',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
+let r=spawnSync(process.env.HOST_CC||'gcc',['-std=c11','-Wall','-Wextra','-Werror',...(process.argv.includes('--baseline-057')?['-DLEGACY_SCHEDULER=1']:[]),'-Iinclude','-Ibuild','tools/av_resume_host.c','-lm','-o',exe],{encoding:'utf8',windowsHide:true,timeout:30000});
 if(r.status!==0)throw Error(r.stderr||r.error?.message);
 const modes=process.argv.includes('--baseline-057')?[process.argv.includes('--late')?'late':'preroll']:['preroll','late','matrix'];
 for(const mode of modes){

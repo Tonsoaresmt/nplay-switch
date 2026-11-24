@@ -34,7 +34,7 @@ long net_request_timeout_cancel(const char*url,const char*method,const char*body
   if(cancel_after_refresh&&cancel)SDL_AtomicSet(cancel,1);
  }else{
   assert(!strcmp(url,"https://nplay.test/api/stream/42"));resolve_calls++;
-  assert(!strcmp(body,"{\"quality\":\"1080p\"}"));code=admission_code;
+  assert(!strcmp(body,"{\"new_session\":true,\"quality\":\"1080p\"}"));code=admission_code;
   response=code==401?"{\"error\":\"Acesso expirado\",\"reason\":\"expired\"}":code!=200?"{\"error\":\"Indisponivel\"}":
    bad_source==1?"{\"container\":\"torrent\",\"play_url\":\"magnet:?fixture\"}":
    bad_source==2?"{\"delivery\":\"r2\",\"play_url\":\"/fixture\"}":

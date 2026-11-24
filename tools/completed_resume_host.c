@@ -23,14 +23,13 @@ static int prompt_resume_playback(const char *title, int position) {
 static int prompt_sequential_restart(const char *title) {
     (void)title; restart_prompts++; return decision;
 }
-static void api_stop_playback(int item_id) { (void)item_id; }
+static int api_stop_session_cancel(int sid,void*cancel) { (void)sid;(void)cancel;return 0; }
 static double direct(int itemId) {
     const char *stable_title = "The Big Bang Theory";
 #include "completed_resume_direct.inc"
     return start;
 }
 static double resolved(int sequential) {
-    int itemId = 17;
     const char *stable_title = "The Big Bang Theory";
     struct { int sequential_stream, session_id, restart_seek; } src = {sequential!=0, 7, sequential==2};
     double start = 0;

@@ -122,7 +122,7 @@ static cJSON*ui_request_get(SDL_Renderer*r,const char*p,int*running,int*cancelle
  (void)r;(void)running;assert(!strcmp(p,"/api/sync/progress/42"));guard_queries++;*cancelled=guard_cancel;
  return progress_fixture?cJSON_Parse(progress_fixture):NULL;
 }
-static long ui_send(const char*p,const char*m,const char*b){assert(!strcmp(p,"/api/stream/42/stop") && !strcmp(m,"POST") && !strcmp(b,"{}"));stop_calls++;return 200;}
+static long ui_send(const char*p,const char*m,const char*b){assert(!strcmp(p,"/api/stream/session/9/stop") && !strcmp(m,"POST") && !strcmp(b,"{}"));stop_calls++;return 200;}
 static int progress_guard(cJSON**prefetched_progress,int progress_fetched,double*position,int*done){
  int itemId=42;PlaybackSource src={.session_id=9};
 #include "playback_progress_guard.inc"

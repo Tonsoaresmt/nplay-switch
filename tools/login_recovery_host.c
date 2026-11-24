@@ -66,6 +66,11 @@ static void store_clear_user(void){user_cleared++;}
 static void store_clear_profile_id(void){profile_cleared++;}
 void net_set_profile_id(int n){net_profile=n;}
 static void toast(const char *s){snprintf(last_toast,sizeof(last_toast),"%s",s);}
+// This dispatcher harness has no OTHER live jobs; model the drained barrier.
+// The real multi-owner barrier is exercised by test_identity_barrier.mjs.
+static void identity_reset_begin(void){
+    g_token[0]=g_user[0]=0;g_profile_id=g_profile_required=0;net_set_profile_id(0);
+}
 #include "login_clear_session.inc"
 #include "login_catalog_dispatch.inc"
 

@@ -30,6 +30,8 @@ Assert-Contains $switchApi '/api/stream/session/%d/refresh' 'Refresh de sessao a
 Assert-Contains $switchApi '/api/stream/hot/%d' 'Rota TorBox/hot-stream ausente no Switch.'
 Assert-Contains $switchApi 'exclude_source_ids' 'Failover por abertura ausente no Switch.'
 Assert-Contains $switchApi '/api/stream/session/%d/heartbeat' 'Heartbeat ausente no Switch.'
+Assert-Contains $switchApi '/api/stream/session/%d/stop' 'Encerramento exato ausente no Switch.'
+Assert-Contains $switchApi 'new_session' 'Aberturas novas podem reutilizar sessao encerrada.'
 Assert-Contains $switchPlayer 'fallback_cb' 'Supervisor do player nao usa failover.'
 Assert-Contains $switchMain 'search_scope' 'Busca do Switch nao separa as areas do catalogo.'
 Assert-Contains $switchMain 'url_encode_utf8' 'Busca do Switch nao codifica UTF-8 com seguranca.'
@@ -55,7 +57,12 @@ Assert-Contains $stream "'/stream/session/:sessionId/refresh'" 'Backend nao poss
 Assert-Contains $stream 'exclude_source_ids' 'Backend nao suporta exclusao nao destrutiva por abertura.'
 Assert-Contains $stream "'/stream/session/:sessionId/fail'" 'Backend nao possui failover de fonte.'
 Assert-Contains $stream "'/stream/session/:sessionId/heartbeat'" 'Backend nao possui heartbeat.'
-Assert-Contains $hot "app\.post\('/stream/hot/:itemId'" 'Backend nao possui hot-stream.'
+Assert-Contains $stream "'/stream/session/:sessionId/stop'" 'Backend nao possui encerramento exato; implante antes de publicar NRO.'
+Assert-Contains $stream 'new_session' 'Backend nao separa novas aberturas da renovacao.'
+Assert-Contains $hot "(?:app\.post|controlPost)\('/stream/hot/:itemId'" 'Backend nao possui hot-stream.'
+if ($hot -match "controlPost\('/stream/hot/:itemId'") {
+    Assert-Contains $hot 'const controlPost = .*if \(!deliveryOnly\) app\.post\(\.\.\.args\)' 'Wrapper hot-stream nao registra o handler na API de controle.'
+}
 Assert-Contains $devices "app\.post\('/code'" 'Backend nao possui criacao do pareamento por QR.'
 Assert-Contains $devices "app\.post\('/token'" 'Backend nao possui polling do pareamento por QR.'
 foreach ($field in @('delivery:', 'container:', 'play_url:')) {

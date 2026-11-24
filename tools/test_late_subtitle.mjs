@@ -3,7 +3,7 @@ import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 const p=readFileSync('source/player.c','utf8').replace(/\r\n/g,'\n');
-const a=p.indexOf('        // Late remux tracks start'),b=p.indexOf('        if (!subtitle_fetch.thread)',a);
+const a=p.indexOf('        // Late remux tracks start'),b=p.indexOf('        if (!subtitle_fetch.thread && !pending_hot_subtitle)',a);
 if(a<0||b<a)throw Error('Review late subtitle extraction');
 mkdirSync('build',{recursive:true});writeFileSync('build/late_subtitle_poll.inc',p.slice(a,b));
 const start=p.indexOf('static ProgressiveSubtitle *start_hot_subtitle('),end=p.indexOf('static int load_hot_subtitle(',start);

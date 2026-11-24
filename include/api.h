@@ -101,8 +101,7 @@ int api_playback_progress(int item_id, int position_sec, int duration_sec);
 int api_playback_progress_cancel(int item_id, int position_sec, int duration_sec,
                                  SDL_atomic_t *cancel);
 int api_mark_watched(int item_id);
-int api_stop_playback(int item_id);
-int api_stop_playback_cancel(int item_id, SDL_atomic_t *cancel);
+int api_stop_session_cancel(int session_id, SDL_atomic_t *cancel);
 const char *api_last_error(void);
 
 

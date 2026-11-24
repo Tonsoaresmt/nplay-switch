@@ -2,6 +2,7 @@
 #include "net.h"
 #include "diag.h"
 #include "subtitle_limits.h"
+#include "response_budget.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -450,6 +451,8 @@ long net_request_timeout_cancel(const char *url, const char *method,
                                 SDL_atomic_t *cancel) {
     if (err) *err = NULL;
     memset(&g_request_timing, 0, sizeof(g_request_timing));
+    if (!out) return -1;
+    if (!out->limit) out->limit = response_body_budget(url);
     if (cancel && SDL_AtomicGet(cancel)) return -(long)CURLE_ABORTED_BY_CALLBACK;
 
     CURL *curl = curl_easy_init();

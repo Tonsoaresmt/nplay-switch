@@ -34,6 +34,7 @@ writeFileSync('build/av_resume_helper.inc',helper);
 writeFileSync('build/av_resume_queue.inc',part('                        double audio_pts = ats != AV_NOPTS_VALUE','\n                    }\n                }\n            }\n        } else if (pkt->stream_index == vidx)'));
 writeFileSync('build/av_resume_schedule.inc',part('        int take = 0;','        int ret = take',player.indexOf('Uint32 audio_before_ms')));
 let host=readFileSync('tools/av_resume_host.c','utf8').replace(/\r\n/g,'\n').split('int main(int argc,char**argv)')[0];
+if(!verify)host='#define LEGACY_SCHEDULER 1\n'+host;
 host=host.replace('static int streams[16],stream_count,terminal;','static int streams[1024],stream_count,terminal;');
 host+=`\nint main(void){
  (void)matrix;(void)trace;(void)SDL_GetError;

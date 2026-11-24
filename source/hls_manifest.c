@@ -12,6 +12,17 @@ static int line_contains(const char *line, size_t len, const char *needle) {
     return 0;
 }
 
+static int characteristic_has(const char *list, const char *tag) {
+    size_t len = strlen(tag);
+    while (*list) {
+        const char *end = strchr(list, ',');
+        if (!end) end = list + strlen(list);
+        if ((size_t)(end - list) == len && !memcmp(list, tag, len)) return 1;
+        list = *end ? end + 1 : end;
+    }
+    return 0;
+}
+
 static int attr_copy(const char *line, size_t len, const char *key,
                      char *out, size_t out_size) {
     if (!line || !key || !out || out_size == 0) return 0;
@@ -352,6 +363,10 @@ int hls_manifest_audio_tracks(const char *body, size_t len, HlsManifestTrack *tr
         char flag[8];
         track->is_default = attr_copy(line, n, "DEFAULT", flag, sizeof(flag)) &&
                             !strcasecmp(flag, "YES");
+        char characteristics[256];
+        track->is_commentary = attr_copy(line, n, "CHARACTERISTICS", characteristics,
+                                         sizeof(characteristics)) &&
+            characteristic_has(characteristics, "public.accessibility.describes-video");
         if (!attr_copy(line, n, "GROUP-ID", other, sizeof(other))) other[0] = 0;
         if (!count) snprintf(group, sizeof(group), "%s", other);
         else if (strcmp(group, other)) same_group = 0;

@@ -1,5 +1,6 @@
 #include "cJSON.h"
 #include "player_completion.h"
+#include "player_audio_timeline.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -46,6 +47,7 @@ static int terminal(int input,double cur_pos,double dur,int io_failed){
     open_watch.hls_io_failed.value=io_failed;
     int running=1,adev=0,native_hls=1,logged_first_present=1,reached_end=0,playback_error=0;
     int eof_drain_stage=0,vidx=0,aidx=1;AVPacket packet={0},*pkt=&packet;
+    PlayerAudioTimeline audio_timing={0}; double audio_clock=0,bps=192000;
     drains=0;
     while(running){int ret=input,drain_decoder=0;
 #include "flow_guards_terminal.inc"

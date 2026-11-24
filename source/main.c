@@ -502,6 +502,10 @@ static int g_pref_hide_adult = 1, g_pref_autoplay = 1, g_pref_reduce_motion = 0;
 static int g_pref_audio = 0; // 0=dublado, 1=legendado, 2=tanto faz
 static int g_pref_seek_stick = 0; // local profile, disabled by default
 static int g_account_prefs_loaded = 0, g_next_audio_hint = 0, g_last_audio_index = 0;
+static int g_identity_reset_pending = 0;
+static SDL_atomic_t g_identity_cancel;
+static void identity_reset_begin(void);
+static void identity_reset_pump(void);
 // Lista do painel Episodios do player (montada por play_episode_sequence).
 static PlayerEpisode *g_play_episodes = NULL;
 static int g_play_episode_count = 0, g_play_episode_current = -1, g_play_chosen_item = 0;
@@ -866,7 +870,7 @@ static int landing_fetch_thread(void *unused) {
     // Series pode gerar um payload grande no Pi. A espera maior nao bloqueia a
     // interface porque esta funcao roda exclusivamente na thread de catalogo.
     g_land_error[0] = '\0';
-    g_land_pending = api_get_timeout(landing_path(tab), 6L, 30L);
+    g_land_pending = api_get_timeout_cancel(landing_path(tab), 6L, 30L, &g_identity_cancel);
     if (!g_land_pending) snprintf(g_land_error, sizeof(g_land_error), "%s", api_last_error());
     SDL_AtomicSet(&g_land_done, 1);
     return 0;
@@ -1006,9 +1010,9 @@ static int on_player_started(const PlaybackSource *source, SDL_atomic_t *cancel,
 
 static int on_player_stop(int item_id, int session_id,
                           SDL_atomic_t *cancel, void *u) {
-    (void)session_id;
+    (void)item_id;
     (void)u;
-    return api_stop_playback_cancel(item_id, cancel);
+    return api_stop_session_cancel(session_id, cancel);
 }
 
 static int on_player_renew(const PlaybackSource *current, PlaybackSource *out,
@@ -1261,11 +1265,9 @@ static void session_invalid_to_login(const char *message) {
     store_clear_token();
     store_clear_user();
     store_clear_profile_id();
-    g_token[0] = '\0';
-    g_user[0] = '\0';
-    g_profile_id = 0;
-    g_profile_required = 0;
-    net_set_profile_id(0);
+    // Keep HTTP identity immutable until every old worker has joined.
+    // No login/input or result application is allowed across this barrier.
+    identity_reset_begin();
     toast(message);
     g_screen = SC_LOGIN;
 }
@@ -1516,7 +1518,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
         // /stream pode escolher uma fonte que o hot-stream considera nao
         // confiavel. Sem escolha manual de variante, deixe o endpoint selecionar
         // a melhor fonte validada para TorBox.
-        if (src.session_id > 0) api_stop_playback(itemId);
+        if (src.session_id > 0) api_stop_session_cancel(src.session_id, NULL);
         src.session_id = 0;
         int hot = hot_wait_for_stream(itemId, 0, stable_title, &src);
         if (hot == 2) {
@@ -1552,7 +1554,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
                 diag_player_event("resolve", "progress-unavailable", "item=%d cancel=%d", itemId, cancelled);
                 // Do not silently start at zero or overwrite the saved point.
                 if (src.session_id > 0) {
-                    snprintf(p, sizeof(p), "/api/stream/%d/stop", itemId);
+                    snprintf(p, sizeof(p), "/api/stream/session/%d/stop", src.session_id);
                     ui_send(p, "POST", "{}");
                 }
                 if (!cancelled) toast("Nao consegui consultar seu ponto salvo. Tente novamente.");
@@ -1572,7 +1574,7 @@ static int resolve_and_play_resolved(int itemId, char *stable_title, char *stabl
             start = 0;
         } else if (!completed && start > 10) {
             int choice = prompt_resume_playback(stable_title, (int)start);
-            if (choice < 0) { if (src.session_id > 0) api_stop_playback(itemId); return 0; }
+            if (choice < 0) { if (src.session_id > 0) api_stop_session_cancel(src.session_id, NULL); return 0; }
             if (choice == 0) start = 0;
         }
 
@@ -1763,7 +1765,7 @@ static void install_avatar_catalog(cJSON *catalog) {
 }
 static int avatar_fetch_thread(void *unused) {
     (void)unused;
-    g_avatar_pending = api_get_timeout("/api/account/avatars", 3L, 12L);
+    g_avatar_pending = api_get_timeout_cancel("/api/account/avatars", 3L, 12L, &g_identity_cancel);
     SDL_AtomicSet(&g_avatar_done, 1);
     return 0;
 }
@@ -2426,8 +2428,8 @@ static int downloads_fetch_thread(void *unused) {
     (void)unused;
     char url[1024]; snprintf(url, sizeof(url), "%s/api/accel/jobs", BASE);
     struct membuf out = {0}; const char *err = NULL;
-    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 6L);
+    long code = net_request_timeout_cancel(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 6L, &g_identity_cancel);
     if (code == 200 && out.data) g_dl_pending = cJSON_Parse(out.data);
     membuf_free(&out);
     SDL_AtomicSet(&g_dl_done, 1);
@@ -2438,8 +2440,8 @@ static int history_fetch_thread(void *unused) {
     (void)unused;
     char url[1024]; snprintf(url, sizeof(url), "%s/api/sync/progress", BASE);
     struct membuf out = {0}; const char *err = NULL;
-    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 7L);
+    long code = net_request_timeout_cancel(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 7L, &g_identity_cancel);
     if (code == 200 && out.data) g_history_pending = cJSON_Parse(out.data);
     membuf_free(&out);
     SDL_AtomicSet(&g_history_done, 1);
@@ -2451,8 +2453,8 @@ static int watchlater_fetch_thread(void *unused) {
     char url[1024];
     struct membuf out = {0}; const char *err = NULL;
     snprintf(url, sizeof(url), "%s/api/sync/watchlater", BASE);
-    long code = net_request_timeout(url, "GET", NULL, g_token[0] ? g_token : NULL,
-                                    &out, &err, 3L, 7L);
+    long code = net_request_timeout_cancel(url, "GET", NULL, g_token[0] ? g_token : NULL,
+                                    &out, &err, 3L, 7L, &g_identity_cancel);
     if (code == 200 && out.data) g_watchlater_pending = cJSON_Parse(out.data);
     membuf_free(&out);
     SDL_AtomicSet(&g_watchlater_done, 1);
@@ -3945,6 +3947,7 @@ static void cancel_login_pairing(int restart) {
 }
 
 static void pump_login_pairing(void) {
+    if (g_identity_reset_pending) return;
     if (!g_pair.thread || !SDL_AtomicGet(&g_pair.done)) return;
     SDL_WaitThread(g_pair.thread, NULL);
     g_pair.thread = NULL;
@@ -4038,6 +4041,13 @@ static void draw_pairing_qr(const DevicePairingCode *code, int x, int y, int box
 }
 
 static void draw_login(void) {
+    if (g_identity_reset_pending) {
+        ui_header("NPLAY", "Encerrando sessao com seguranca", "B Fechar");
+        ui_popcorn_draw(gRen, 640, 260, 96);
+        text_center_at("Aguarde enquanto encerramos os pedidos anteriores...", 60, WIN_W - 120, 420, C_TEXT, 0);
+        ui_footer("B Fechar  |  Seus perfis e arquivos locais serao preservados");
+        return;
+    }
     LoginPairStage stage = LOGIN_PAIR_IDLE;
     DevicePairingCode code = {0};
     char pair_status[192] = "";
@@ -4817,10 +4827,11 @@ static void logout_and_restart(void) {
 }
 static int settings_fetch_thread(void *unused) {
     (void)unused;
-    g_account_pending = api_get("/api/account/me");
-    if (!g_account_pending) g_account_pending = api_get("/api/auth/me"); // servidor anterior
+    g_account_pending = api_get_timeout_cancel("/api/account/me", 5L, 15L, &g_identity_cancel);
+    if (!g_account_pending && !SDL_AtomicGet(&g_identity_cancel))
+        g_account_pending = api_get_timeout_cancel("/api/auth/me", 5L, 15L, &g_identity_cancel);
     SDL_AtomicSet(&g_account_ready, 1);
-    g_settings_accel_pending = api_get("/api/accel/status");
+    g_settings_accel_pending = api_get_timeout_cancel("/api/accel/status", 5L, 15L, &g_identity_cancel);
     SDL_AtomicSet(&g_settings_done, 1);
     return 0;
 }
@@ -5487,6 +5498,10 @@ static int stick_dir(SDL_Joystick *j) {
     return ax < 0 ? JOY_DLEFT : JOY_DRIGHT;
 }
 static void handle_button(int b) {
+    if (g_identity_reset_pending) {
+        if (b == JOY_B || b == JOY_MINUS || b == JOY_PLUS) g_running = 0;
+        return;
+    }
     if (g_profile_menu && (g_screen == SC_MAIN || g_screen == SC_SEARCH)) {
         if (b == JOY_B || b == JOY_MINUS) g_profile_menu = 0;
         else if (b == JOY_UP && g_profile_menu_sel > 0) g_profile_menu_sel--;
@@ -5636,6 +5651,10 @@ static void handle_history_touch(int x, int y) {
 }
 
 static void handle_touch_tap(int x, int y) {
+    if (g_identity_reset_pending) {
+        if (ui_header_action_hit(x, y)) g_running = 0;
+        return;
+    }
     if (g_screen == SC_LOGIN) {
         LoginPairStage stage = LOGIN_PAIR_IDLE;
         if (g_pair.mutex) {
@@ -6094,6 +6113,92 @@ static void touch_momentum_update(void) {
         memset(&g_touch_momentum, 0, sizeof(g_touch_momentum));
 }
 
+// Reauthentication is an ownership barrier, not merely clearing three strings.
+// Render continues while old jobs cancel. Never mutate HTTP token/profile or
+// reuse worker mailboxes until ALL owners have joined; never apply old results.
+static void identity_reset_begin(void) {
+    if (g_identity_reset_pending) return;
+    g_identity_reset_pending = 1;
+    SDL_AtomicSet(&g_identity_cancel, 1);
+    catalog_fetch_cancel(&g_fetch);
+    catalog_fetch_cancel(&g_favs_fetch);
+    catalog_fetch_cancel(&g_dl_done_fetch);
+    SDL_AtomicSet(&g_pair.cancel, 1);
+    g_profile_menu = g_history_menu = g_avatar_picker = g_profile_editor = 0;
+}
+
+static int identity_join_ready(SDL_Thread **thread, SDL_atomic_t *done) {
+    if (!*thread) return 1;
+    if (!SDL_AtomicGet(done)) return 0;
+    SDL_WaitThread(*thread, NULL); *thread = NULL;
+    return 1;
+}
+
+static void identity_reset_pump(void) {
+    if (!g_identity_reset_pending) return;
+    int ready = 1;
+    ready &= identity_join_ready(&g_land_thread, &g_land_done);
+    ready &= identity_join_ready(&g_history_thread, &g_history_done);
+    ready &= identity_join_ready(&g_watchlater_thread, &g_watchlater_done);
+    ready &= identity_join_ready(&g_settings_thread, &g_settings_done);
+    ready &= identity_join_ready(&g_avatar_thread, &g_avatar_done);
+    ready &= identity_join_ready(&g_dl_thread, &g_dl_done);
+    ready &= identity_join_ready(&g_pair.thread, &g_pair.done);
+    CatalogFetch *jobs[] = { &g_fetch, &g_favs_fetch, &g_dl_done_fetch };
+    for (unsigned i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i++) {
+        if (jobs[i]->thread && !SDL_AtomicGet(&jobs[i]->done)) ready = 0;
+        else catalog_fetch_dispose(jobs[i]);
+    }
+    if (!ready) return;
+
+    // All following pointers belong only to the renderer now.
+    g_land = g_heroesArr = NULL; g_railsN = 0;
+    memset(g_rails, 0, sizeof(g_rails));
+    memset(g_landing_focus, 0, sizeof(g_landing_focus));
+    memset(&g_search_window, 0, sizeof(g_search_window));
+    g_search_counts_valid = 0;
+    memset(g_avatar_items, 0, sizeof(g_avatar_items)); g_avatar_item_n = 0;
+    memset(g_avatar_lookup, 0, sizeof(g_avatar_lookup));
+    cJSON **json[] = { &g_land_pending, &g_history_pending, &g_watchlater_pending,
+        &g_account_pending, &g_settings_accel_pending, &g_avatar_pending, &g_dl_pending,
+        &g_history, &g_search, &g_ser, &g_saga_detail, &g_profiles, &g_avatar_catalog,
+        &g_account_status, &g_accel_status, &g_dl };
+    for (unsigned i = 0; i < sizeof(json) / sizeof(json[0]); i++) {
+        cJSON_Delete(*json[i]); *json[i] = NULL;
+    }
+    for (int i = 0; i <= TAB_SAGAS; i++) {
+        cJSON_Delete(g_land_cache[i]); g_land_cache[i] = NULL;
+    }
+    close_movie_details(); play_episodes_clear();
+    g_fetch_current = (FetchIntent){0}; g_fetch_queued = (FetchIntent){0};
+    g_fetch_discard = 0;
+    g_land_fetch_tab = g_land_queued_tab = g_land_applied_tab = -1;
+    g_account_prefs_loaded = g_settings_refresh_pending = g_history_refresh_requested = 0;
+    g_pref_audio = 0; g_pref_autoplay = g_pref_hide_adult = 1; g_pref_reduce_motion = 0;
+    g_prefs_revision++;
+    g_next_audio_hint = g_last_audio_index = 0;
+    g_next_audio_language[0] = g_last_audio_language[0] = 0;
+    g_next_audio_pref_override = -1; g_next_audio_pref_explicit = 0;
+    g_favItemN = g_favSeriesN = g_favs_profile_id = 0;
+    g_episode_pending.active = 0;
+    g_dlDoneN = g_dl_done_requested = g_dl_done_inflight = g_dl_done_profile = 0;
+    g_dlgN = g_dlView = g_history_sel = g_history_context_initialized = 0;
+    g_watchlater_revision++; g_watchlater_fetch_revision = g_watchlater_revision;
+    g_avatar_due = 0; g_avatar_attempted = g_avatar_failures = g_avatar_picker_await = 0;
+    g_srchQuery[0] = 0; g_srchSel = g_srchScroll = g_srchFilter = 0;
+    if (g_pair.mutex) {
+        SDL_LockMutex(g_pair.mutex);
+        g_pair.stage = LOGIN_PAIR_IDLE; g_pair.result = 0; g_pair.restart_requested = 0;
+        memset(&g_pair.token, 0, sizeof(g_pair.token));
+        SDL_UnlockMutex(g_pair.mutex);
+    }
+    g_token[0] = g_user[0] = 0;
+    g_profile_id = g_profile_required = 0; net_set_profile_id(0);
+    SDL_AtomicSet(&g_identity_cancel, 0);
+    g_identity_reset_pending = 0;
+    g_screen = SC_LOGIN;
+}
+
 // ------------------------------------------------------------- main
 int main(int argc, char **argv) {
     update_resolve_target_path((argc > 0 && argv) ? argv[0] : NULL, g_self_path, sizeof(g_self_path));
@@ -6201,6 +6306,8 @@ int main(int argc, char **argv) {
         if (g_screen == SC_MAIN && g_tab == TAB_DOWNLOADS && SDL_GetTicks() > g_dl_next) {
             load_downloads(); g_dl_next = SDL_GetTicks() + 2000;
         }
+        if (g_identity_reset_pending) identity_reset_pump();
+        else {
         pump_downloads();
         pump_dl_done();
         pump_favs();
@@ -6210,6 +6317,7 @@ int main(int argc, char **argv) {
         pump_landing();
         pump_catalog_fetch();
         pump_login_pairing();
+        }
         if (!g_avatar_attempted && g_avatar_due && SDL_GetTicks() >= g_avatar_due &&
             (g_screen == SC_PROFILES || (g_screen == SC_MAIN && g_land))) {
             g_avatar_attempted = 1;

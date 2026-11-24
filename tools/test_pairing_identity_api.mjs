@@ -8,6 +8,7 @@ import {join} from 'node:path';
 const read=p=>readFileSync(p,'utf8').replace(/\r/g,'');
 const base='integration/nplay-device-identity/';
 const backendRoot=process.env.NPLAY_BACKEND_ROOT||'build/site-c9d0f77';
+const legacyRoot='build/site-c9d0f77'; // Historical negative fixture, never current origin/main.
 const strip=s=>s.replace(/^import .*;\n/gm,'').replace(/export default /g,'').replace(/export function /g,'function ');
 function setup(legacy=false){
  const db=new DatabaseSync(':memory:');db.exec(`PRAGMA foreign_keys=ON;
@@ -21,7 +22,7 @@ function setup(legacy=false){
  const app={authenticate(){},jwt:{sign(payload){return {fixture:true,...payload};}},
   post(path,...args){if(path==='/approve')assert.equal(args[0].preHandler[0],this.authenticate);routes.set('POST '+path,args.at(-1));},
   get(path,...args){routes.set('GET '+path,args.at(-1));},delete(path,...args){routes.set('DELETE '+path,args.at(-1));}};
- const source=legacy?read(join(backendRoot,'src/routes/devices.js')):
+ const source=legacy?read(join(legacyRoot,'src/routes/devices.js')):
   read(base+'pairing-device.js')+'\n'+read(base+'devices.js');
  const factory=new Function('get','all','run','tx','randomBytes','config','withBillingLimits','hit','pairingUrl','pairingMatrix','invalidateAuthCache',
   strip(source)+";deviceRoutes.testMigrate=typeof installPairingIdentitySchema==='function'?installPairingIdentitySchema:null;return deviceRoutes;");
@@ -33,7 +34,7 @@ function setup(legacy=false){
   const result=await routes.get(method+' '+path)(req,reply);return {status:reply.status,body:reply.body??result};
  }
  const passwordSource=read(join(backendRoot,'src/routes/auth.js'));
- const start=passwordSource.indexOf('function resolveDevice('),end=passwordSource.indexOf('export default async function authRoutes',start);
+ const start=passwordSource.indexOf('function resolveDevice('),end=passwordSource.indexOf('\n}\n',start)+3;
  assert(start>=0&&end>start);
  const passwordResolve=new Function('get','run','all',passwordSource.slice(start,end)+';return resolveDevice;')(get,run,all);
  return {db,get,run,all,call,ready,invalidated,passwordResolve,migrate:install.testMigrate};
@@ -48,7 +49,7 @@ function add(s,user=1,key=fp,name='Nintendo Switch'){return Number(s.run('INSERT
 {
  const s=setup(true);await s.ready;add(s);
  const c=await code(s);assert.equal((await approve(s,c)).status,409);
- s.db.close();console.log('BASELINE .59/current deployed route reproduced: same Switch rejected at full limit via QR (409).');
+ s.db.close();console.log('HISTORICAL c9d0f77 snapshot reproduced: same Switch rejected at full limit via QR (409); not the current production route.');
 }
 {
  const s=setup();await s.ready;const id=add(s,1,fp,'My custom name');
