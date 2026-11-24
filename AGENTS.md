@@ -1,5 +1,28 @@
 # Continuidade para agentes
 
+## Publicacao .63 PREPARADA, aguardando backend — 24/11/2026
+
+- Servidor: npm test COMPLETO/check/diff passaram. Codigo enviado por push
+  fast-forward ao main Tonsoaresmt/Nplay:1c60ef4f. Health publico ainda1e59abdf;
+  host timer ativo e log repete reproducoes ativas/publicacao adiada. Nao forcar
+  restart, tocar DB/aparelhos, ativar Actions antigos nem ignorar os guards.
+- NRO: build/tag f66255921fba3dd33851198e1d5e1097f620682a enviados atomicamente
+  na branch hardening +tag v0.12.63. Tag anotada c09cbbae5d58a194b06ed15263468db112a94e2a.
+  FINAL build-session-final2 +validate-session-final4 COMPLETO exit0, SEM
+  SkipMediaFixtures. NRO24319823B/SHA4f287b3a1df2b22900ba2eb79a719e5be943039c710ac13a02f9bc1f20271002.
+  Nenhuma mudanca app/rebuild apos prova. NRO/sidecar nao commitados.
+- Release457107779 criada DRAFT, nao prerelease. Dois assets com digest remoto
+  correto; download INTEGRAL autenticado do rascunho +sidecar76B conferidos
+  identicos. Pasta ignorada build/release-0.12.63-draft-check. Latest publico
+  ainda v0.12.62 (intencional). NAO dizer que atualizador tem .63 ainda.
+- Usuario foi perguntado sobre janela com players fechados para concluir sem
+  interromper terceiros. Aguardar publicador normal e health com1c60ef4f ou
+  descendente (verificar ancestralidade no repo backend). Entao atualizar notas
+  da release e promover draft=false/latest; conferir API latest SEM auth,
+  download publico inteiro/SHA/sidecar e tag. Nao reconstruir o NRO.
+- Backend isolado .codex-tmp/backend-session-fencing /codex/switch-session-fencing-20261124;
+  artefatoNRO em switch-access-expiry. Sem teste fisico de Switch/telefone.
+
 ## .63 sessao/QR — 24/11/2026, nova autorizacao/publicacao PENDENTE
 
 - Usuario revogou escopo somente NRO: pediu corrigir encerramento no servidor e
